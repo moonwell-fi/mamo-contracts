@@ -230,6 +230,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /**
      * @notice Pays the fee accrued since the last payment in one token, callable by anyone
+     * @dev A payment the balance cuts short credits only the slice of the period it covers
      * @param token The asset or a listed token that is neither unlisted nor halted
      */
     function payFees(address token) external override {
@@ -263,6 +264,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         address buyToken = address(order.buyToken);
         if (sellToken == buyToken) revert TokensMustDiffer();
         if (order.sellAmount == 0) revert ZeroAmount();
+        if (order.buyAmount == 0) revert ZeroAmount();
+        if (stockRegistry.paused()) revert RegistryPaused();
 
         if (sellToken != address(asset)) {
             IStockAccountRegistry.TokenStatus status = stockRegistry.tokenConfig(sellToken).status;
@@ -284,7 +287,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (expectedOut == 0) revert PriceCheckFailed();
 
         uint256 slip = getAccountSlippage();
-        if (slip > TOTAL_BPS) revert SlippageExceedsMaximum();
+        if (slip >= TOTAL_BPS) revert SlippageExceedsMaximum();
         if (order.buyAmount < (expectedOut * (TOTAL_BPS - slip)) / TOTAL_BPS) revert PriceCheckFailed();
 
         _checkRange(sellToken, buyToken, order.sellAmount, order.buyAmount, expectedOut);
@@ -368,7 +371,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      */
     function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
         if (usdcAmount == 0) revert ZeroAmount();
-        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
+        _checkWithdrawSlippage(maxSlippageBps);
 
         uint256 idle = asset.balanceOf(address(this));
         uint256 sold;
@@ -392,7 +395,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
      */
     function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
-        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
+        _checkWithdrawSlippage(maxSlippageBps);
 
         (address[] memory tokens, uint256[] memory balances) = _sellable();
         uint256 sold = _executeSells(tokens, balances, maxSlippageBps);
@@ -418,6 +421,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         override
         returns (address[] memory tokensToSell, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds)
     {
+        _checkWithdrawSlippage(maxSlippageBps);
+
         uint256 idle = asset.balanceOf(address(this));
         if (idle >= usdcAmount) {
             return (new address[](0), new uint256[](0), 0, 0);
@@ -577,13 +582,21 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance == 0) revert NoBalanceForFee(token);
 
-        uint256 amount = _feeAmount(token, due);
-        if (amount > balance) amount = balance;
+        // A due that converts to nothing in this token stays owed rather than blocking the caller
+        uint256 full = _feeAmount(token, due);
+        if (full == 0) return;
+
+        uint256 amount = full > balance ? balance : full;
+        uint256 credited = amount == full ? elapsed : (elapsed * amount) / full;
+
+        // casting to 'uint64' is safe because the credited seconds never exceed the elapsed seconds,
+        // so the sum cannot exceed the current timestamp
+        // forge-lint: disable-next-line(unsafe-typecast)
+        lastFeePaid = uint64(lastFeePaid + credited);
 
         IERC20(token).safeTransfer(feeRecipient, amount);
-        lastFeePaid = uint64(block.timestamp);
 
-        emit FeesPaid(elapsed, token, amount);
+        emit FeesPaid(credited, token, amount);
     }
 
     function _isFeeToken(address token) internal view returns (bool) {
@@ -594,20 +607,30 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return status != IStockAccountRegistry.TokenStatus.None && status != IStockAccountRegistry.TokenStatus.Halted;
     }
 
+    /// @dev Walks the balances until the fee is settled, so an exit cannot leave a remainder nothing can collect
     function _payFeesFromAny() internal {
         if (asset.balanceOf(address(this)) > 0) {
-            return _payFees(address(asset));
+            _payFees(address(asset));
         }
+
+        if (_feeSettled()) return;
 
         address[] memory tokens = stockRegistry.allTokens();
 
-        for (uint256 i = 0; i < tokens.length; i++) {
+        for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
             if (_isSellable(tokens[i])) {
-                return _payFees(tokens[i]);
+                _payFees(tokens[i]);
             }
         }
 
-        lastFeePaid = uint64(block.timestamp);
+        // Nothing the fee is charged on is left, so nothing is owed and the clock catches up
+        if (!_feeSettled() && getNAV() == 0) {
+            lastFeePaid = uint64(block.timestamp);
+        }
+    }
+
+    function _feeSettled() internal view returns (bool) {
+        return lastFeePaid >= block.timestamp;
     }
 
     function _feeDue(uint256 elapsed) internal view returns (uint256) {
@@ -670,6 +693,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function _isSellable(address token) internal view returns (bool) {
         return IERC20(token).balanceOf(address(this)) > 0
             && stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Halted;
+    }
+
+    /// @dev A full cap would zero every sell floor, and zero the divisor the gross up below divides by
+    function _checkWithdrawSlippage(uint16 maxSlippageBps) internal view {
+        if (maxSlippageBps >= TOTAL_BPS || maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) {
+            revert SlippageExceedsMaximum();
+        }
     }
 
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)

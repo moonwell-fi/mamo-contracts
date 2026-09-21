@@ -68,7 +68,7 @@ NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 
 RECEIPT=$(send "$USER_C" "$ACCT" 'withdraw(uint256,uint16)' "$FEE_WITHDRAW" 100)
 PAID=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
-ELAPSED=$(fees_paid_elapsed "$RECEIPT" "$ACCT")
+CREDITED=$(fees_paid_credited "$RECEIPT" "$ACCT")
 
 assert_eq "the withdrawal paid its fee in USDC" "$(fees_paid_token "$RECEIPT" "$ACCT")" "$USDC"
 assert_eq "collector USDC grew by exactly that fee" \
@@ -77,7 +77,7 @@ assert_approx "the fee is feeDue read before the withdrawal" "$PAID" "$FEE_DUE" 
 assert_eq "the withdrawal fee left the position alone" "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
 assert_eq "the owner still received what was asked" \
   "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_BEFORE")" "$FEE_WITHDRAW"
-record "$SCEN" "month of fee: paid vs feeDue" 1 "$PAID vs $FEE_DUE over ${ELAPSED}s"
+record "$SCEN" "month of fee: paid vs feeDue" 1 "$PAID vs $FEE_DUE over ${CREDITED}s"
 
 # An in-kind withdrawal pays in the token it sends, not in cash.
 increase_time "$DAY"

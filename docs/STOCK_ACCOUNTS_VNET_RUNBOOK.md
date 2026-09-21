@@ -254,6 +254,14 @@ has not accumulated blocks. Only `listToken` decides, through the registry's own
 `vnet-up.sh` runs the readiness script against the vnet just before the deploy, so a fresh fork has its
 pools grown before step 8 probes them.
 
+`setPriceChecker` and `setTwapWindow` change what "priceable" means for every listing at once, so both
+apply the new value first and then re-probe every token that is not `Halted`, reverting the whole call
+with `TokenNotPriceable(token)` if any of them stops quoting. A window no pool can serve is therefore
+refused rather than silently bricking every holder's valuation. One broken pool blocks both calls until
+that token is halted, which is deliberate: auto-halting would change account value as a side effect of
+an unrelated admin action. Both calls probe on-chain, so they are not cheap — on a Base fork one
+pool-TWAP listing costs about 107k gas and one Chainlink listing about 113k.
+
 ## Why the smoke test only deposits USDC
 
 B20 stock tokens are node-native precompiles on Base: their code is the single byte `0xef`, which revm
@@ -274,8 +282,15 @@ account can only be read with `cast`.
 Every account charges the registry's `managementFeeBps` — 100 bps a year in both deploy configs — on
 its whole NAV. Nothing is accrued in storage: `payFees(token)` values the fee as
 `NAV x rate x elapsed / (10000 x 365 days)` in USDC, converts that to `token` at the price checker's
-reference, sends it to the fee recipient, moves `lastFeePaid` to now and emits
-`FeesPaid(elapsed, token, amount)`. It is permissionless.
+reference, sends it to the fee recipient and emits `FeesPaid(credited, token, amount)` with `token`
+indexed. It is permissionless.
+
+**A payment the balance cuts short only settles the part of the period it covers.** The clock moves
+by `elapsed x amount / full`, not to now, so a payment out of a balance that covers a tenth of the
+fee leaves nine tenths of the period owed for the next one. One wei of a token therefore buys
+nothing: it settles the wei's worth of seconds and no more. A fee that converts to zero of the chosen
+token — the period is so short that it is worth less than one unit of an 8 decimal stock — pays
+nothing and moves nothing, rather than reverting or forgiving the period.
 
 **The fee is paid in the token the account receives.** `token` has to be USDC or a listed token that
 is neither unlisted nor Halted, otherwise `FeeTokenNotAllowed(token)`; a zero balance of it is
@@ -293,17 +308,22 @@ Three things call it:
   the vnet measures `payFees` at 667,000 gas, about 1.5x inside the limit the document declares.
 - **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it.
   `withdraw` and `withdrawAll` pay in USDC, after their sells. `withdrawToken(token)` pays in that
-  token; if it is Halted or unlisted the fee falls back to USDC, or to another sellable token.
-  `withdrawAllInKind` pays from USDC, else the first sellable stock, else it only moves the clock.
+  token; if it is Halted or unlisted the fee falls back to USDC and then to the sellable stocks.
+  `withdrawAllInKind` pays from USDC and then walks the listed tokens, stopping as soon as the period
+  is settled, because the account is empty when it returns and anything left uncollected there is
+  uncollectable forever. It only moves the clock outright when the NAV is zero, which is the one case
+  where nothing is owed.
 - **A poke.** An account that neither trades nor withdraws just keeps owing more; the backend calls
   `payFees(token)` on it directly, naming whichever balance it wants the fee taken out of.
 
 The rate lives on the registry, one for every account: `managementFeeBps` in the deploy config, then
 `setManagementFeeBps` from the admin, capped by the immutable `maxManagementFeeBps` of 200.
 
-Before changing it, poke `payFees` on every account. The rate is read when the fee is paid and
-applied to the whole elapsed period, so an unsettled account would have its backlog charged at the
-new rate.
+Before changing it, settle every account, and check `feeDue()` reads zero afterwards. The rate is
+read when the fee is paid and applied to the period that payment settles, so a backlog left behind
+is charged at the new rate. A poke is not enough on its own: `payFees(token)` out of a balance that
+cannot cover `feeDueIn(token)` credits only its slice and leaves the rest owed, so settle out of
+USDC, or out of a token whose balance covers the fee, and read `feeDue()` back to confirm.
 
 ## CoW appData
 

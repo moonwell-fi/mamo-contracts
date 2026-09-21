@@ -175,19 +175,145 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(feeRecipient), _feeValue(5_000e18, 30 days), "only the paid period is charged");
     }
 
-    function testFeeIsCappedByTheChosenTokenBalance() public {
+    function testFeeIsCappedByTheChosenTokenBalanceAndCreditsOnlyThatSlice() public {
         vm.warp(startTime + 40_000 days);
 
-        assertGt(strategy.feeDueIn(address(nvda)), 10e18, "the fee is larger than the balance");
+        uint256 full = strategy.feeDueIn(address(nvda));
+        assertGt(full, 10e18, "the fee is larger than the balance");
+
+        uint256 credited = (uint256(40_000 days) * 10e18) / full;
+        assertEq(credited, 1_261_440_000, "the paid fraction of the period");
 
         vm.expectEmit(address(strategy));
-        emit IStockAccountStrategy.FeesPaid(40_000 days, address(nvda), 10e18);
+        emit IStockAccountStrategy.FeesPaid(credited, address(nvda), 10e18);
 
         strategy.payFees(address(nvda));
 
         assertEq(nvda.balanceOf(feeRecipient), 10e18, "the whole balance is paid");
         assertEq(nvda.balanceOf(address(strategy)), 0, "nvda emptied");
-        assertEq(strategy.lastFeePaid(), startTime + 40_000 days, "last fee paid");
+        assertEq(strategy.lastFeePaid(), startTime + credited, "only the paid slice is credited");
+        assertGt(strategy.feeDue(), 0, "the rest is still owed");
+    }
+
+    function testPokingWithADustTokenForgivesNothing() public {
+        for (uint256 i = 1; i <= 10; i++) {
+            vm.warp(startTime + i * 365 days);
+
+            _fundToken(msft, funder, 1);
+            vm.prank(funder);
+            strategy.depositToken(address(msft), 1);
+
+            strategy.payFees(address(msft));
+        }
+
+        assertEq(msft.balanceOf(feeRecipient), 10, "ten wei is all that was paid");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "asset untouched");
+        assertEq(strategy.lastFeePaid(), startTime, "the clock never moved");
+        assertEq(strategy.feeDue(), _feeValue(strategy.getNAV(), 3_650 days), "ten years are still owed");
+    }
+
+    function testWithdrawingInKindOnAWeiOfTheAssetStillCollectsTheWholeFee() public {
+        vm.prank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18 - 1);
+
+        vm.warp(startTime + 365 days);
+
+        uint256 owed = strategy.feeDue();
+        uint256 owedInNvda = strategy.feeDueIn(address(nvda));
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(usdc.balanceOf(feeRecipient), 1, "the wei of cash goes first");
+        assertEq(nvda.balanceOf(feeRecipient), owedInNvda, "the rest comes out of the first sellable stock");
+        assertEq(owedInNvda * 200, owed, "which is the whole fee in value");
+        assertEq(aapl.balanceOf(feeRecipient), 0, "and nothing more is taken");
+        assertEq(strategy.lastFeePaid(), startTime + 365 days, "the period is settled");
+        assertEq(nvda.balanceOf(user), 10e18 - owedInNvda, "the owner is out with the remainder");
+    }
+
+    function testACappedPaymentLeavesTheRemainderForALaterOne() public {
+        _fundToken(msft, funder, 1e14);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 1e14);
+
+        vm.warp(startTime + 30 days);
+
+        uint256 owed = strategy.feeDue();
+        uint256 full = strategy.feeDueIn(address(msft));
+        uint256 credited = (uint256(30 days) * 1e14) / full;
+
+        strategy.payFees(address(msft));
+
+        assertEq(msft.balanceOf(feeRecipient), 1e14, "the whole balance is paid");
+        assertEq(strategy.lastFeePaid(), startTime + credited, "only the paid slice is credited");
+        assertGt(strategy.feeDue(), 0, "the remainder is still owed");
+
+        strategy.payFees(address(usdc));
+
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the clock is current");
+        assertEq(strategy.feeDue(), 0, "nothing is owed anymore");
+        assertApproxEqRel(usdc.balanceOf(feeRecipient) + 1e14 * 50, owed, 1e15, "the whole period is collected");
+    }
+
+    function testAFullPaymentAdvancesTheClockToNow() public {
+        vm.warp(startTime + 30 days);
+        strategy.payFees(address(usdc));
+
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "first period settled");
+        assertEq(strategy.feeDue(), 0, "nothing owed");
+
+        vm.warp(startTime + 90 days);
+        strategy.payFees(address(nvda));
+
+        assertEq(strategy.lastFeePaid(), startTime + 90 days, "second period settled");
+        assertEq(strategy.feeDue(), 0, "nothing owed");
+    }
+
+    function testFeeThatRoundsToZeroInTheChosenTokenIsSkippedNotForgiven() public {
+        priceChecker.setRate(address(usdc), address(msft), 1);
+
+        _fundToken(msft, funder, 1e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 1e18);
+
+        vm.warp(startTime + 1);
+
+        assertGt(strategy.feeDue(), 0, "the fee is owed");
+        assertEq(strategy.feeDueIn(address(msft)), 0, "but it rounds to nothing in msft");
+
+        strategy.payFees(address(msft));
+
+        assertEq(msft.balanceOf(feeRecipient), 0, "nothing is taken");
+        assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
+    }
+
+    function testAFeeThatRoundsToZeroInTheOnlyTokenHeldDoesNotBlockTheInKindExit() public {
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18);
+        strategy.withdrawToken(address(nvda), 10e18);
+        strategy.withdrawToken(address(aapl), 20e18);
+        vm.stopPrank();
+
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+
+        priceChecker.setRate(address(usdc), address(msft), 1);
+        vm.warp(startTime + 1);
+
+        assertGt(strategy.feeDue(), 0, "the fee is owed");
+        assertEq(strategy.feeDueIn(address(msft)), 0, "and rounds to nothing in the only token held");
+
+        vm.prank(user);
+        strategy.withdrawToken(address(msft), 1e18);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(msft.balanceOf(user), 100e18, "both exits went through");
+        assertEq(msft.balanceOf(feeRecipient), 0, "a second of fee is worth less than a wei of the token");
+        assertEq(strategy.lastFeePaid(), startTime, "and the period is not forgiven either");
     }
 
     function testWithdrawPaysTheFeeInTheAssetAfterSelling() public {
