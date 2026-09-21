@@ -37,7 +37,9 @@ In reuse mode the address book copy is kept, so every deploy step that already r
 
 1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
    deployed with the placeholder price checker (see Configuration)
-2. `StockAccountPriceChecker(registry, USDC)` — recorded as `STOCK_ACCOUNT_PRICE_CHECKER`
+2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker)` — recorded as
+   `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker` that
+   every `PriceSource.Chainlink` token is priced against (see Configuration)
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
 4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, 0)` — assigns the strategy type id
@@ -82,6 +84,10 @@ bootstrap detail, not a stopgap: the registry constructor needs a price checker 
 the real `StockAccountPriceChecker` needs the registry address, so the registry is born with the
 placeholder and step 3 immediately points it at the checker deployed in step 2. Any address with code
 works; nothing is ever priced through the placeholder.
+
+`existingPriceChecker` is also `CHAINLINK_SWAP_CHECKER_PROXY` in both environments, but it is load
+bearing: it is the audited checker the step 2 constructor keeps, and every token listed with
+`PriceSource.Chainlink` is routed to it. Tokens listed as `PoolTwap` never reach it.
 
 TESTING differs from PROD in one way: `admin`, `guardian` and `feeRecipient` are `DEPLOYER_EOA`, so a
 vnet run needs no impersonation for the stock registry itself — step 3 and step 8 run directly. The
@@ -138,3 +144,69 @@ jq -r '.rpc' script/stock-accounts/vnet-manifest.json
 cast call "$(jq -r '.testUserAccount' script/stock-accounts/vnet-manifest.json)" 'getNAV()(uint256)' \
   --rpc-url "$(jq -r '.rpc' script/stock-accounts/vnet-manifest.json)"
 ```
+
+## Scenarios
+
+`script/stock-accounts/scenarios/` is a scenario harness that exercises a deployed stock account
+system end to end: CoW settlement, withdrawals, a price spike, the account lifecycle, and the gas
+cost of order validation as a basket grows.
+
+```bash
+make tenderly-stock-accounts-scenarios
+```
+
+It runs against whatever vnet `script/stock-accounts/vnet-manifest.json` points at, so a fresh vnet is
+just `make tenderly-stock-accounts` followed by the line above. Every run derives its actor addresses
+from a new run id, so rerunning against the same vnet never collides with accounts an earlier run
+created. State that has to survive a rerun — the settlement helper address, the run id — lives in the
+gitignored `scenarios/.state/`.
+
+### Why it is cast-driven and not a forge script
+
+B20 stock tokens are node-native precompiles whose code is the single byte `0xef`. `forge script`
+executes the script locally in revm before broadcasting, and revm refuses to execute that byte, so a
+script step that moves a stock token fails even when it is pointed at the vnet. Every state change
+here is therefore a transaction the Tenderly node executes (`cast send --unlocked --from`), every read
+is a `cast call`, and Solidity appears only as `SettlementHelper.sol`, deployed to the vnet so that its
+code runs on the node. USDC balances come from `tenderly_setErc20Balance` and time from
+`evm_increaseTime`; stock tokens cannot be minted and are always bought on the stocks router.
+
+`SettlementHelper` is registered as a CoW solver by impersonating the allow-list manager on the vnet.
+It builds the `tokens`/`clearingPrices`/`trades` arrays for `GPv2Settlement.settle`, signs each trade
+with the EIP-1271 scheme (the owner address followed by the encoded order and the backend signature
+over its digest), and either sources the buy token from the stocks pool in the intra-settlement
+interactions or nets two accounts against each other with no interaction at all.
+
+Every order an account accepts also carries a signature by `StockAccountRegistry.orderSigner`, so
+being an allow-listed solver is not enough to author one. `prepare.sh` points the registry at anvil
+account 0 (`0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266`, a public test key that is fine on a vnet) and
+the harness signs every digest with it.
+
+### What each scenario proves
+
+| Scenario | Proves |
+| --- | --- |
+| `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; NAV and weights survive it; the same trade sized past the band is refused by the account and therefore by the settlement; a solver-authored order with no backend signature is refused both ways and accepted once signed; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue. |
+| `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
+| `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
+| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a Halted token leaves the NAV while remaining held and withdrawable in kind; a month of management fee accrues at the configured rate and collects to the fee recipient. |
+| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them, and measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions. |
+
+Two things the range rule makes concrete and the scenarios assert. An account sitting on its targets
+can move at most `maxDeviationBps` of its NAV in a single order, so a rebalance larger than that has
+to be split. And in a two-asset account — cash plus one stock — `SellLeavesTokenBelowRange` and
+`BuyLeavesTokenAboveRange` are the same condition read from either leg; `_checkRange` evaluates the
+sell rule first, so the sell-side error is the one an out-of-range order always returns.
+
+### Reading the results
+
+`scenarios/results.json` (gitignored) is written as the run goes:
+
+```json
+{"setup": {"runId": "…", "settlementHelper": "0x…", "accountA": "0x…"},
+ "checks": [{"scenario": "01-settlement", "check": "…", "pass": true, "value": "…"}]}
+```
+
+`run.sh` prints the same rows as a table at the end and exits with the number of failed checks, so it
+is usable as a gate. Individual scenarios can be run on their own; they read the helper address from
+`results.json` or `.state/`, and `CT11_RUN_ID` pins the actor addresses across separate invocations.
