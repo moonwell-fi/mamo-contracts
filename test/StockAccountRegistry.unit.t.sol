@@ -818,6 +818,31 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.orderSigner(), rotated, "order signer mismatch");
     }
 
+    function testLooseningATokenStatusIsFrozenWhilePaused() public {
+        listDefaultToken();
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
+
+        vm.prank(guardian);
+        registry.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
+
+        vm.prank(guardian);
+        registry.unpause();
+
+        vm.prank(admin);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
+        assertEq(
+            uint256(registry.tokenConfig(token).status),
+            uint256(IStockAccountRegistry.TokenStatus.Active),
+            "status should be active"
+        );
+    }
+
     function testSetTokenStatusWorksWhilePaused() public {
         listDefaultToken();
 
