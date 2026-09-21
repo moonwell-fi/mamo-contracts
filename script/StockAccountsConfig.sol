@@ -50,6 +50,8 @@ contract StockAccountsConfig is Script {
         string orderSigner;
         /// @dev Bootstrap only: satisfies the registry constructor, then setPriceChecker replaces it
         string placeholderPriceChecker;
+        /// @dev Chosen, never auto-assigned: the registry's counter is a stale lower bound, not the next free slot
+        uint256 strategyTypeId;
         uint32 twapWindow;
     }
 
@@ -77,6 +79,7 @@ contract StockAccountsConfig is Script {
         config.minTargetBps = uint16(json.readUint(".minTargetBps"));
         config.orderSigner = json.readString(".orderSigner");
         config.placeholderPriceChecker = json.readString(".placeholderPriceChecker");
+        config.strategyTypeId = json.readUint(".strategyTypeId");
         config.twapWindow = uint32(json.readUint(".twapWindow"));
 
         require(config.chainId == block.chainid, "Config chain id does not match the current chain");

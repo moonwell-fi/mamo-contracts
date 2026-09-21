@@ -428,25 +428,5 @@
     "addr": "0x515158f52eA06feF9985083882b7893D95d5f58f",
     "name": "STOCK_ORDER_SIGNER",
     "isContract": false
-  },
-  {
-    "addr": "0xb0e62191C30256790Ae62e71138707483a9B6EAA",
-    "name": "STOCK_ACCOUNT_REGISTRY",
-    "isContract": true
-  },
-  {
-    "addr": "0xb309cFC028965300b76Fa3909ba0c7B98Dc74035",
-    "name": "STOCK_ACCOUNT_PRICE_CHECKER",
-    "isContract": true
-  },
-  {
-    "addr": "0x17Fff4d4E628fc17C4e01B1E781A368Bc33444e5",
-    "name": "STOCK_ACCOUNT_STRATEGY_IMPL",
-    "isContract": true
-  },
-  {
-    "addr": "0xad0fFd91D25e132116a2fBe3d16BFBfc7B840528",
-    "name": "STOCK_ACCOUNT_STRATEGY_FACTORY",
-    "isContract": true
   }
 ]

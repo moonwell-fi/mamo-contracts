@@ -45,7 +45,7 @@ account's NAV after that (see below). The whole rerun is a no-op.
    every `PriceSource.Chainlink` token is priced against (see Configuration)
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
 4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
-5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, 0)` — assigns the strategy type id
+5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the deploy config
    (existing ids are 1, 2 and 3; the stock account implementation takes **4**)
 6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
@@ -116,10 +116,16 @@ accounts are unlocked, i.e. a Tenderly vnet or anvil.
 
 `ADMIN_MODE=calldata` prints `from`, `to` and the calldata of each admin call and executes none of
 them. That is the mainnet path: hand the printed calldata to the Safe, see `docs/SAFE_CALLDATA_GUIDE.md`.
-The strategy type id used for the factory constructor is read ahead of time from
-`MamoStrategyRegistry.nextStrategyTypeId()`, so the factory can be deployed before the Safe executes
-the whitelist — but the whitelist must then land before any account is created, and no other
-implementation may be whitelisted in between or the id shifts.
+The strategy type id is **chosen, in the deploy config, never auto-assigned**. The registry's
+`nextStrategyTypeId()` counter only moves when an implementation is whitelisted with a zero id, and
+every whitelist since the USDC strategy has passed an explicit one, so the counter is a stale lower
+bound rather than the next free slot: it reads 4 while slot 4 already holds the Moonwell Morpho V2
+implementation. Auto-assigning would overwrite that entry, which would stop new accounts of that type
+being created and would repoint its upgrades at the wrong implementation.
+
+The script therefore refuses to proceed unless the configured id is free and sits above the counter,
+and the factory can still be deployed before the Safe executes the whitelist, because the id no longer
+depends on when that happens.
 
 Mainnet dry run (no broadcast, writes to a throwaway copy of the address book):
 
