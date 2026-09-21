@@ -9,6 +9,8 @@ contract MockCLPoolObserve {
     int56 public cumulativeAtWindow;
     int56 public cumulativeNow;
     bool public revertOld;
+    /// @dev Longest window this pool has history for; 0 means any window
+    uint32 public maxObservableWindow;
 
     constructor(address token0_, address token1_) {
         token0 = token0_;
@@ -31,12 +33,18 @@ contract MockCLPoolObserve {
         revertOld = value;
     }
 
+    /// @notice Caps the history this pool can serve, so longer windows revert "OLD" as Slipstream does
+    function setMaxObservableWindow(uint32 value) external {
+        maxObservableWindow = value;
+    }
+
     function observe(uint32[] calldata secondsAgos)
         external
         view
         returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128)
     {
         if (revertOld) revert("OLD");
+        if (maxObservableWindow != 0 && secondsAgos[0] > maxObservableWindow) revert("OLD");
         require(secondsAgos.length == 2 && secondsAgos[1] == 0, "unexpected secondsAgos");
         tickCumulatives = new int56[](2);
         tickCumulatives[0] = cumulativeAtWindow;

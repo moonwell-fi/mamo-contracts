@@ -73,6 +73,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             StockAccountRegistry.Config({
                 admin: admin,
                 aerodromeRouter: ISwapRouter(AERODROME_CL_ROUTER),
+                asset: USDC,
                 guardian: admin,
                 managementFeeBps: 100,
                 maxBackendSlippageBps: 100,
@@ -172,9 +173,18 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertFalse(checker.checkPrice(amountIn, NVDAC, USDC, floor - 1, 100));
     }
 
+    /// @dev The registry refuses a window the live pool cannot serve, so the token is halted first to
+    ///      reach the checker's own behaviour behind that guard.
     function test_fork_windowLongerThanHistoryReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, NVDAC));
         vm.prank(admin);
         registry.setTwapWindow(type(uint32).max);
+
+        vm.prank(admin);
+        registry.setTokenStatus(NVDAC, IStockAccountRegistry.TokenStatus.Halted);
+        vm.prank(admin);
+        registry.setTwapWindow(type(uint32).max);
+
         vm.expectRevert(
             abi.encodeWithSelector(
                 StockAccountPriceChecker.InsufficientObservations.selector, NVDAC_USDC_POOL, type(uint32).max

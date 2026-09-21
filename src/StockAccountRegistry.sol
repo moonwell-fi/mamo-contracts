@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
@@ -22,6 +23,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
+        address asset;
         address guardian;
         uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
@@ -38,6 +40,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
     ISwapRouter public override aerodromeRouter;
     ISlippagePriceChecker public override priceChecker;
+    address public override asset;
 
     uint8 public override maxPositions;
     uint16 public override minTargetBps;
@@ -72,6 +75,9 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     constructor(Config memory config) {
         if (config.admin == address(0)) revert ZeroAddress();
         if (config.guardian == address(0)) revert ZeroAddress();
+        if (config.asset == address(0)) revert ZeroAddress();
+
+        asset = config.asset;
 
         _grantRole(DEFAULT_ADMIN_ROLE, config.admin);
         _grantRole(GUARDIAN_ROLE, config.guardian);
@@ -104,6 +110,10 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     {
         if (address(newPriceChecker) == address(priceChecker)) revert AlreadySet();
         _setPriceChecker(newPriceChecker);
+
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokenConfig[_tokens[i]].status != TokenStatus.Halted) _requirePriceable(_tokens[i]);
+        }
     }
 
     /// @notice Sets the maximum number of positions a stock account may hold
@@ -137,9 +147,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     /// @notice Sets the TWAP observation window in seconds
+    /// @param newTwapWindow The new window; it takes effect first, so every non-halted token is re-probed
+    ///        against it and a window no pool can serve is refused
     function setTwapWindow(uint32 newTwapWindow) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newTwapWindow == twapWindow) revert AlreadySet();
         _setTwapWindow(newTwapWindow);
+
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokenConfig[_tokens[i]].status != TokenStatus.Halted) _requirePriceable(_tokens[i]);
+        }
     }
 
     /// @notice Sets the minimum total value a single stock account must hold after a deposit
@@ -188,13 +204,16 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _tokenConfig[token] = cfg;
         _tokens.push(token);
 
+        _requirePriceable(token);
+
         emit TokenListed(token, cfg);
     }
 
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
-    /// @param status The new status; the guardian may only tighten it
-    /// @dev Stays available while paused: halting a token is a remediation lever
+    /// @param status The new status; the guardian may only tighten it, and any loosening re-probes the price
+    /// @dev Tightening stays available while paused, because halting a token is a remediation lever;
+    ///      loosening is frozen, because it is the action that puts a token back into every account's value
     function setTokenStatus(address token, TokenStatus status) external {
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian();
@@ -206,6 +225,11 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         if (!isAdmin && status <= oldStatus) revert GuardianCanOnlyLower();
 
         _tokenConfig[token].status = status;
+
+        if (status < oldStatus) {
+            _requireNotPaused();
+            _requirePriceable(token);
+        }
 
         emit TokenStatusUpdated(token, oldStatus, status);
     }
@@ -236,6 +260,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Returns whether stock accounts are barred from validating orders
     function paused() public view override(IStockAccountRegistry, Pausable) returns (bool) {
         return super.paused();
+    }
+
+    function _requirePriceable(address token) internal view {
+        uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
+        try priceChecker.getExpectedOut(oneToken, token, asset) returns (uint256 quote) {
+            if (quote == 0) revert TokenNotPriceable(token);
+        } catch {
+            revert TokenNotPriceable(token);
+        }
     }
 
     function _setAerodromeRouter(ISwapRouter newRouter) internal {

@@ -9,6 +9,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 contract MockStockAccountRegistry is IStockAccountRegistry {
     ISwapRouter public override aerodromeRouter;
     ISlippagePriceChecker public override priceChecker;
+    address public override asset;
 
     uint8 public override maxPositions;
     uint16 public override minTargetBps;
@@ -73,6 +74,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setPriceChecker(ISlippagePriceChecker value) external {
         priceChecker = value;
+    }
+
+    function setAsset(address value) external {
+        asset = value;
     }
 
     function setPaused(bool value) external {
