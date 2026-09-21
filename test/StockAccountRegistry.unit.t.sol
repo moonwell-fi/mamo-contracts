@@ -214,7 +214,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testConstructorRevertsOnBackendSlippageTooHigh() public {
         StockAccountRegistry.Config memory config = defaultConfig();
-        config.maxBackendSlippageBps = 10_001;
+        config.maxBackendSlippageBps = 501;
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         new StockAccountRegistry(config);
@@ -222,7 +222,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testConstructorRevertsOnWithdrawSlippageTooHigh() public {
         StockAccountRegistry.Config memory config = defaultConfig();
-        config.maxWithdrawSlippageBps = 10_001;
+        config.maxWithdrawSlippageBps = 1_001;
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         new StockAccountRegistry(config);
@@ -243,15 +243,26 @@ contract StockAccountRegistryUnitTest is Test {
         new StockAccountRegistry(config);
     }
 
-    function testConstructorAcceptsASlippageCapOfNineThousandNineHundredNinetyNine() public {
+    function testConstructorAcceptsTheSlippageCeilings() public {
         StockAccountRegistry.Config memory config = defaultConfig();
-        config.maxBackendSlippageBps = 9_999;
-        config.maxWithdrawSlippageBps = 9_999;
+        config.maxBackendSlippageBps = 500;
+        config.maxWithdrawSlippageBps = 1_000;
 
         StockAccountRegistry created = new StockAccountRegistry(config);
 
-        assertEq(created.maxBackendSlippageBps(), 9_999, "backend slippage mismatch");
-        assertEq(created.maxWithdrawSlippageBps(), 9_999, "withdraw slippage mismatch");
+        assertEq(created.maxBackendSlippageBps(), created.backendSlippageCeilingBps(), "backend slippage mismatch");
+        assertEq(created.maxWithdrawSlippageBps(), created.withdrawSlippageCeilingBps(), "withdraw slippage mismatch");
+    }
+
+    function testConstructorAcceptsTheLaunchSlippageValues() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxBackendSlippageBps = 100;
+        config.maxWithdrawSlippageBps = 500;
+
+        StockAccountRegistry created = new StockAccountRegistry(config);
+
+        assertEq(created.maxBackendSlippageBps(), 100, "backend slippage mismatch");
+        assertEq(created.maxWithdrawSlippageBps(), 500, "withdraw slippage mismatch");
     }
 
     function testConstructorRevertsOnZeroTwapWindow() public {
@@ -456,13 +467,13 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxDeviationBps(10_001);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
-        registry.setMaxBackendSlippageBps(10_001);
+        registry.setMaxBackendSlippageBps(501);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxBackendSlippageBps(10_000);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
-        registry.setMaxWithdrawSlippageBps(10_001);
+        registry.setMaxWithdrawSlippageBps(1_001);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(10_000);
@@ -499,14 +510,14 @@ contract StockAccountRegistryUnitTest is Test {
         new StockAccountRegistry(config);
     }
 
-    function testSlippageSettersAcceptOneBpsUnderTheFullCap() public {
+    function testSlippageSettersAcceptTheCeilings() public {
         vm.startPrank(admin);
-        registry.setMaxBackendSlippageBps(9_999);
-        registry.setMaxWithdrawSlippageBps(9_999);
+        registry.setMaxBackendSlippageBps(registry.backendSlippageCeilingBps());
+        registry.setMaxWithdrawSlippageBps(registry.withdrawSlippageCeilingBps());
         vm.stopPrank();
 
-        assertEq(registry.maxBackendSlippageBps(), 9_999, "backend slippage mismatch");
-        assertEq(registry.maxWithdrawSlippageBps(), 9_999, "withdraw slippage mismatch");
+        assertEq(registry.maxBackendSlippageBps(), 500, "backend slippage mismatch");
+        assertEq(registry.maxWithdrawSlippageBps(), 1_000, "withdraw slippage mismatch");
     }
 
     function testListTokenStoresConfigAndEmits() public {

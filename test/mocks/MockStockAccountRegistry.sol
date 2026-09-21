@@ -22,6 +22,8 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint256 public override maxStrategyDeposit;
     uint16 public override managementFeeBps;
     uint16 public override maxManagementFeeBps = 200;
+    uint16 public override backendSlippageCeilingBps = 500;
+    uint16 public override withdrawSlippageCeilingBps = 1_000;
     bool public override paused;
 
     mapping(address => TokenConfig) internal _tokenConfig;

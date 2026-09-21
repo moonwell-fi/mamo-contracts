@@ -71,6 +71,10 @@ interface IStockAccountRegistry {
 
     function maxManagementFeeBps() external view returns (uint16);
 
+    function backendSlippageCeilingBps() external view returns (uint16);
+
+    function withdrawSlippageCeilingBps() external view returns (uint16);
+
     function orderSigner() external view returns (address);
 
     function aerodromeRouter() external view returns (ISwapRouter);

@@ -20,6 +20,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Highest annual management fee the admin may set, in basis points
     uint16 public constant override maxManagementFeeBps = 200;
 
+    /// @notice Highest backend slippage cap the admin may set, in basis points
+    uint16 public constant override backendSlippageCeilingBps = 500;
+
+    /// @notice Highest withdrawal slippage cap the admin may set, in basis points
+    uint16 public constant override withdrawSlippageCeilingBps = 1_000;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
@@ -319,7 +325,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps > backendSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -328,7 +334,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps > withdrawSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;
