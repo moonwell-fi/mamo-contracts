@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Price spike: once the 180s average has absorbed a 3x move the account is far overweight, the
 # de-risking sell is accepted and settles, buying more is refused, and the unwind restores both.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, an assert compares
+# that unequal and records a FAIL, and `send` will not build a transaction out of it. The reads that
+# decide control flow are captured into a variable first, where the shell's own -e catches them.
+# shellcheck disable=SC2312
 set -euo pipefail
 
 SCEN=03-spike
@@ -42,7 +46,8 @@ push() { # push <multiple-of-current-spot>
 push 4.5
 for _ in 1 2 3; do
   REF=$(expected_out "$ONE_NVDA" "$NVDA" "$USDC")
-  [ "$(bb "$REF >= $TARGET_MULTIPLE * $PRE_REF")" = 1 ] && break
+  REACHED=$(bb "$REF >= $TARGET_MULTIPLE * $PRE_REF")
+  [ "$REACHED" = 1 ] && break
   push 2.2
 done
 

@@ -2,6 +2,10 @@
 # Cost as a basket grows: the same sell order priced against accounts holding 2, 4 and 10 listed stock
 # tokens, with every extra position adding one more pool TWAP read, and the fee post-hook measured on
 # the widest of them against the gas limit the appData document declares.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, an assert compares
+# that unequal and records a FAIL, and `send` will not build a transaction out of it. The reads that
+# decide control flow are captured into a variable first, where the shell's own -e catches them.
+# shellcheck disable=SC2312
 set -euo pipefail
 
 SCEN=05-gas
@@ -19,8 +23,10 @@ DAY=86400
 # StockAccountStrategy.HOOK_GAS_LIMIT, the gas every appData document gives its post-hook.
 HOOK_GAS_LIMIT=1000000
 
+USDC_TOPIC=0x000000000000000000000000$(lc "${USDC#0x}")
+
 pools_from_logs() {
-  rpc eth_getLogs "[{\"address\":\"$CL_FACTORY\",\"topics\":[\"$POOL_CREATED_TOPIC\",\"0x000000000000000000000000$(printf '%s' "${USDC#0x}" | tr 'A-Z' 'a-z')\"],\"fromBlock\":\"0x0\",\"toBlock\":\"latest\"}]" |
+  rpc eth_getLogs "[{\"address\":\"$CL_FACTORY\",\"topics\":[\"$POOL_CREATED_TOPIC\",\"$USDC_TOPIC\"],\"fromBlock\":\"0x0\",\"toBlock\":\"latest\"}]" |
     python3 -c '
 import json, sys
 for log in json.load(sys.stdin):
@@ -53,7 +59,9 @@ for token, (spacing, pool, balance) in sorted(best.items(), key=lambda kv: -kv[1
 
 # Appends ok or old to every pool line: old means `observe` cannot reach back over the registry window.
 annotate() { # annotate <pools-file>
-  awk -v data="$(cast calldata 'observe(uint32[])' "[$TWAP_WINDOW,0]")" '{print $3, data}' "$1" |
+  local data
+  data=$(cast calldata 'observe(uint32[])' "[$TWAP_WINDOW,0]")
+  awk -v data="$data" '{print $3, data}' "$1" |
     batch_call >"$STATE_DIR/pool-obs.txt"
   paste "$1" "$STATE_DIR/pool-obs.txt" | awk '{print $1, $2, $3, $4, ($5 == "0x" ? "old" : "ok")}'
 }

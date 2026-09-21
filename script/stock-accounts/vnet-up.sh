@@ -97,6 +97,7 @@ send() { # send <to> <sig> [args...]
     { echo "send failed: to=$to sig=$1" >&2; exit 1; }
   status=$(printf '%s' "$out" | jq -r '.status')
   [ "$status" = "0x1" ] || {
+    # shellcheck disable=SC2312 # already on the failure path; a receipt jq cannot parse just prints an empty hash
     echo "tx status $status: to=$to sig=$1 hash=$(printf '%s' "$out" | jq -r '.transactionHash')" >&2
     exit 1
   }

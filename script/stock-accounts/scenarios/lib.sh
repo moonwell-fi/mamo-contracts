@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Shared plumbing for the stock account vnet scenarios. Sourced, never executed.
+# Every name defined here is read by the scenarios that source the file, not by the file itself.
+# shellcheck disable=SC2034
+# Set here too, not only in the scenarios: a pipeline's failing stage has to fail the pipeline for the
+# reads below to report a bad node call at all.
+set -o pipefail
 
 SCEN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCEN_DIR/../../.." && pwd)"
@@ -10,7 +15,7 @@ MANIFEST="$REPO_ROOT/script/stock-accounts/vnet-manifest.json"
 ADDRESS_BOOK="$REPO_ROOT/addresses/8453.json"
 
 mkdir -p "$STATE_DIR"
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || { echo "cannot enter $REPO_ROOT" >&2; exit 1; }
 
 set -a
 # shellcheck disable=SC1091
@@ -81,16 +86,19 @@ SCEN=${SCEN:-lib}
 # Big integers past 2^63 (sqrt prices, wei) are beyond bash arithmetic.
 bn() { python3 -c "print(int($1))"; }
 bb() { python3 -c "print(1 if ($1) else 0)"; }
-lc() { printf '%s\n' "$1" | tr 'A-Z' 'a-z'; }
+lc() { printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # ---------------------------------------------------------------- rpc
 
 rpc() { # rpc <method> <params-json>
-  local out
+  local out failed
   out=$(curl -sS -m 120 -X POST "$VNET" -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}")
   [ -n "$out" ] || { echo "rpc $1 returned an empty body" >&2; return 1; }
-  if [ "$(printf '%s' "$out" | jq -r 'has("error")')" = "true" ]; then
+  # Captured, not compared inline: set_eth and increase_time discard this output, so a jq that failed
+  # on an unparsable body would otherwise read as "no error" and the scenario would run on regardless.
+  failed=$(printf '%s' "$out" | jq -r 'has("error")') || return 1
+  if [ "$failed" = "true" ]; then
     echo "rpc $1 failed: $out" >&2
     return 1
   fi
@@ -147,6 +155,7 @@ send() { # send <from> <to> <sig> [args...]
   fi
   status=$(printf '%s' "$out" | jq -r '.status')
   if [ "$status" != "0x1" ]; then
+    # shellcheck disable=SC2312 # the caller is already failing; a receipt jq cannot parse just prints an empty hash
     echo "tx status $status: from=$from to=$to sig=$1 hash=$(printf '%s' "$out" | jq -r '.transactionHash') gasUsed=$(printf '%s' "$out" | jq -r '.gasUsed')" >&2
     return 1
   fi
@@ -160,8 +169,10 @@ estimate_gas() { # estimate_gas <from> <to> <sig> [args...]
 }
 
 set_eth() { rpc tenderly_setBalance "[[\"$1\"],\"0x56BC75E2D63100000\"]" >/dev/null; }
+# shellcheck disable=SC2312 # a to-hex that failed leaves malformed params, which the node rejects and `rpc` reports
 set_usdc() { rpc tenderly_setErc20Balance "[\"$USDC\",\"$1\",\"$(cast to-hex "$2")\"]" >/dev/null; }
 # Tenderly mines a block on evm_increaseTime, so reads and order deadlines see the new time at once.
+# shellcheck disable=SC2312 # same: malformed params come back as an rpc error, not as a silent no-op
 increase_time() { rpc evm_increaseTime "[\"$(cast to-hex "$1")\"]" >/dev/null; }
 now_ts() { cast block latest --field timestamp --rpc-url "$VNET" 2>>"$LOG"; }
 
@@ -188,21 +199,27 @@ pass() { record "$SCEN" "$1" 1 "${2-}"; printf '  ok   %-44s %s\n' "$1" "${2-}";
 fail() { record "$SCEN" "$1" 0 "${2-}"; printf '  FAIL %-44s %s\n' "$1" "${2-}" >&2; FAILURES=$((FAILURES + 1)); }
 
 assert_eq() { # assert_eq <check> <actual> <expected>
-  if [ "$(echo "$2" | tr 'A-Z' 'a-z')" = "$(echo "$3" | tr 'A-Z' 'a-z')" ]; then
+  # shellcheck disable=SC2312 # `lc` is a printf piped into tr over arguments already in hand; it has nothing to fail at
+  if [ "$(lc "$2")" = "$(lc "$3")" ]; then
     pass "$1" "$2"
   else
     fail "$1" "actual=$2 expected=$3"
   fi
 }
 
+# The three below read an empty `bb` -- what a python that choked on an empty or unparsable operand
+# prints -- as "not 1", so a read that failed upstream lands in the else branch and records a FAIL.
+# shellcheck disable=SC2312
 assert_gt() { # assert_gt <check> <a> <b>
   if [ "$(bb "$2 > $3")" = 1 ]; then pass "$1" "$2 > $3"; else fail "$1" "$2 !> $3"; fi
 }
 
+# shellcheck disable=SC2312
 assert_gte() { # assert_gte <check> <a> <b>
   if [ "$(bb "$2 >= $3")" = 1 ]; then pass "$1" "$2 >= $3"; else fail "$1" "$2 !>= $3"; fi
 }
 
+# shellcheck disable=SC2312
 assert_approx() { # assert_approx <check> <actual> <expected> <tolerance-bps>
   if [ "$(bb "abs($2 - $3) * 10000 <= $4 * $3")" = 1 ]; then
     pass "$1" "$2 ~ $3"
@@ -229,6 +246,7 @@ _expect_revert() { # _expect_revert <send|call> <check> <want> <from> <to> <sig>
   if [ -z "$want" ] || printf '%s' "$out" | grep -qiF -- "${want#0x}"; then
     pass "$check" "${want:-reverted}"
   else
+    # shellcheck disable=SC2312 # this branch is already a FAIL; the cut only trims the message it prints
     fail "$check" "wanted ${want}, got: $(printf '%s' "$out" | cut -c1-240)"
   fi
 }
@@ -251,7 +269,11 @@ else
   echo "$RUN_ID" >"$STATE_DIR/run-id"
 fi
 
-actor() { printf '0x%s\n' "$(cast keccak "ct11:$RUN_ID:$1" | cut -c 27-66)"; }
+actor() { # actor <label> -> a per-run address
+  local hash
+  hash=$(cast keccak "ct11:$RUN_ID:$1")
+  printf '0x%s\n' "${hash:26:40}"
+}
 
 fund() { # fund <address> [usdc-amount]
   set_eth "$1"
@@ -280,9 +302,13 @@ ensure_listed() { # ensure_listed <token> <pool>
 }
 
 create_account() { # create_account <user> <entries-tuple-array> <cash-bps>
-  local acct
+  local acct code
   acct=$(call "$FACTORY" 'computeStrategyAddress(address)(address)' "$1")
-  if [ "$(cast code "$acct" --rpc-url "$VNET" 2>>"$LOG")" = "0x" ]; then
+  # A failed code read is fatal rather than "already created": an empty answer is not "0x", so the
+  # creation would be skipped and every later send would go to an address with nothing behind it.
+  code=$(cast code "$acct" --rpc-url "$VNET" 2>>"$LOG") || true
+  [ -n "$code" ] || { echo "cannot read the code at $acct (see $LOG)" >&2; return 1; }
+  if [ "$code" = "0x" ]; then
     send "$1" "$FACTORY" 'createStrategyForUser(address,(address,uint16)[],uint16)' "$1" "$2" "$3" >/dev/null
   fi
   echo "$acct"
@@ -295,25 +321,29 @@ deposit_usdc() { # deposit_usdc <user> <account> <amount>
 
 # Stock tokens cannot be minted, so an actor buys them on the stocks router and deposits them in kind.
 buy_and_deposit() { # buy_and_deposit <user> <account> <token> <tick-spacing> <usdc-in>
-  local before got
+  local before after got
   before=$(call "$3" 'balanceOf(address)(uint256)' "$1")
   swap "$1" "$USDC" "$3" "$4" "$5" 0
-  got=$(bn "$(call "$3" 'balanceOf(address)(uint256)' "$1") - $before")
+  after=$(call "$3" 'balanceOf(address)(uint256)' "$1")
+  got=$(bn "$after - $before")
   ensure_approve "$1" "$3" "$2"
   send "$1" "$2" 'depositToken(address,uint256)' "$3" "$got" >/dev/null
   echo "$got"
 }
 
 swap() { # swap <from> <tokenIn> <tokenOut> <tick-spacing> <amount-in> <sqrt-limit>
+  local now
+  now=$(now_ts)
   ensure_approve "$1" "$2" "$ROUTER"
   send "$1" "$ROUTER" \
     'exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160))(uint256)' \
-    "($2,$3,$4,$1,$(bn "$(now_ts) + 3600"),$5,0,$6)" >/dev/null
+    "($2,$3,$4,$1,$((now + 3600)),$5,0,$6)" >/dev/null
 }
 
 # Non-indexed data of the first matching log, narrowed to one emitter when given.
 event_data() { # event_data <receipt-json> <event-signature> [emitter]
-  printf '%s' "$1" | jq -r --arg t "$(cast keccak "$2")" --arg a "$(echo "${3-}" | tr 'A-Z' 'a-z')" \
+  # shellcheck disable=SC2312 # a keccak of a literal signature, and `lc` of an argument in hand; an unmatched topic returns empty, which event_word refuses
+  printf '%s' "$1" | jq -r --arg t "$(cast keccak "$2")" --arg a "$(lc "${3-}")" \
     '[.logs[] | select(.topics[0] == $t) | select($a == "" or (.address | ascii_downcase) == $a) | .data] | first // empty'
 }
 
@@ -332,6 +362,7 @@ FEES_PAID_SIG='FeesPaid(uint256,address,uint256)'
 # current event: a deployment still carrying the flat three-word event would otherwise decode silently.
 fees_paid_log() { # fees_paid_log <receipt-json> <account>
   local log topics data
+  # shellcheck disable=SC2312 # a keccak of a literal signature, and `lc` of an address in hand; neither has anything to fail at
   log=$(printf '%s' "$1" | jq -c --arg t "$(cast keccak "$FEES_PAID_SIG")" --arg a "$(lc "$2")" \
     '[.logs[] | select(.topics[0] == $t) | select((.address | ascii_downcase) == $a)] | first // empty')
   [ -n "$log" ] || return 0
@@ -349,18 +380,24 @@ fees_paid_log() { # fees_paid_log <receipt-json> <account>
 
 # The token an account's fee payment was taken in, empty when it paid nothing in this transaction.
 fees_paid_token() { # fees_paid_token <receipt-json> <account>
-  local log
+  local log topic
   log=$(fees_paid_log "$1" "$2") || return 1
   [ -n "$log" ] || return 0
-  printf '0x%s\n' "$(printf '%s' "$log" | jq -r '.topics[1]' | cut -c27-66)"
+  topic=$(printf '%s' "$log" | jq -r '.topics[1]')
+  printf '0x%s\n' "${topic:26:40}"
 }
 
 # What an account's fee payment moved in one token; zero when it paid in another token or not at all.
 fees_paid() { # fees_paid <receipt-json> <account> <token>
-  local log data
+  local log data paid want
   log=$(fees_paid_log "$1" "$2") || return 1
   [ -n "$log" ] || { echo 0; return 0; }
-  [ "$(lc "$(fees_paid_token "$1" "$2")")" = "$(lc "$3")" ] || { echo 0; return 0; }
+  # Captured rather than compared inline: a fees_paid_token that failed would otherwise look like "paid
+  # in another token", and the 0 that follows compares equal to a collector balance that never moved.
+  paid=$(fees_paid_token "$1" "$2") || return 1
+  paid=$(lc "$paid")
+  want=$(lc "$3")
+  [ "$paid" = "$want" ] || { echo 0; return 0; }
   data=$(printf '%s' "$log" | jq -r '.data')
   bn "0x${data:66:64}"
 }
@@ -405,6 +442,7 @@ sqrt_price() { calln 1 "$1" 'slot0()(uint160,int24,uint16,uint16,uint16,bool)'; 
 # The appData an order must carry is the account's document for the token it buys, since that is the
 # token the post-hook takes the fee in.
 mk_order() { # mk_order <sellToken> <buyToken> <account> <sellAmount> <buyAmount> <validTo> [appData]
+  # shellcheck disable=SC2312 # an appData read that failed leaves the hash empty, which the account refuses in isValidSignature
   printf '(%s,%s,%s,%s,%s,%s,%s,0,%s,false,%s,%s)' \
     "$1" "$2" "$3" "$4" "$5" "$6" "${7:-$(app_data_hash "$3" "$2")}" "$KIND_SELL" "$BALANCE_ERC20" "$BALANCE_ERC20"
 }
@@ -421,10 +459,12 @@ order_encoded() { # order_encoded <order> <signature>
 check_signature() { # check_signature <account> <order>
   local digest
   digest=$(order_digest "$2")
+  # shellcheck disable=SC2312 # empty bytes make the account revert, so `call` prints nothing and the magic-value assert records a FAIL
   call "$1" 'isValidSignature(bytes32,bytes)(bytes4)' "$digest" "$(order_encoded "$2" "$(sign_digest "$digest")")"
 }
 
 settle_sell() { # settle_sell <account> <order> <sellAmount> <buyAmount>
+  # shellcheck disable=SC2312 # an empty signature makes the settlement revert, which `send` catches on the receipt status
   send "$DEPLOYER" "$HELPER" "settleSell(address,$ORDER_T,bytes,uint256,uint256)" \
     "$1" "$2" "$(sign_digest "$(order_digest "$2")")" "$4" "$3"
 }
@@ -438,10 +478,15 @@ finish() {
 }
 
 load_helper() {
+  local code
   HELPER=$(jq -r '.setup.settlementHelper // empty' "$RESULTS" 2>/dev/null || true)
   [ -n "$HELPER" ] || HELPER=$(cat "$STATE_DIR/helper" 2>/dev/null || true)
-  if [ -z "$HELPER" ] || [ "$(cast code "$HELPER" --rpc-url "$VNET" 2>>"$LOG")" = "0x" ]; then
-    echo "settlement helper not deployed; run prepare.sh" >&2
+  [ -n "$HELPER" ] || { echo "settlement helper not deployed; run prepare.sh" >&2; exit 1; }
+  # A code read that failed is not "deployed": an empty answer is not "0x", so the scenario would run
+  # on and send every order to an address it never checked.
+  code=$(cast code "$HELPER" --rpc-url "$VNET" 2>>"$LOG") || true
+  if [ -z "$code" ] || [ "$code" = "0x" ]; then
+    echo "settlement helper $HELPER has no code (see $LOG); run prepare.sh" >&2
     exit 1
   fi
   DOMAIN_SEPARATOR=$(call "$SETTLEMENT" 'domainSeparator()(bytes32)')

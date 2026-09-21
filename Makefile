@@ -48,6 +48,13 @@ fee-splitter:
 stock-price-checker:
 	forge test --ffi --match-contract StockAccountPriceChecker -vvv
 
+# check-extra-masked-returns (SC2312) is the point of this: a command substitution used straight in a
+# comparison or as an argument throws its own failure away, which is how a check passes without having
+# checked anything. Scoped to the stock-accounts scripts; the rest of the repo is not clean yet.
+shell-lint:
+	shellcheck -x --source-path=SCRIPTDIR --enable=check-extra-masked-returns \
+		script/stock-accounts/*.sh script/stock-accounts/scenarios/*.sh
+
 deploy-stock-accounts:
 	rm -rf script/stock-accounts/addresses-dryrun && mkdir -p script/stock-accounts/addresses-dryrun && cp addresses/*.json script/stock-accounts/addresses-dryrun/
 	ADDRESSES_PATH=$(ADDRESSES_PATH) DEPLOY_ENV=$(DEPLOY_ENV) ADMIN_MODE=calldata forge script script/DeployStockAccounts.s.sol:DeployStockAccounts --fork-url base --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 -vv
@@ -65,4 +72,4 @@ tenderly-stock-accounts-scenarios:
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker
 
-.PHONY: stock-price-checker deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+.PHONY: shell-lint stock-price-checker deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all

@@ -3,6 +3,10 @@
 # management fee in the token the order buys, an order carrying the document of the wrong token is
 # refused, an out-of-range mirror of the trade is refused, and two accounts on opposite sides of the
 # pair net against each other, each paying its fee in the token it bought.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, an assert compares
+# that unequal and records a FAIL, and `send` will not build a transaction out of it. The reads that
+# decide control flow are captured into a variable first, where the shell's own -e catches them.
+# shellcheck disable=SC2312
 set -euo pipefail
 
 SCEN=01-settlement

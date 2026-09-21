@@ -312,3 +312,21 @@ jobs:
 
       - name: Run stock price checker tests
         run: make stock-price-checker
+
+  shell-lint:
+    name: Shell Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: |
+          curl -sSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz | tar -xJ
+          sudo install shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+
+      - name: Show ShellCheck version
+        run: |
+          shellcheck --version
+
+      - name: Run ShellCheck on the stock-accounts scripts
+        run: make shell-lint

@@ -2,7 +2,8 @@
 # Runs the whole stock account scenario suite against the vnet named in the manifest.
 set -uo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")"
+HERE=$(dirname "${BASH_SOURCE[0]}")
+cd "$HERE" || { echo "cannot enter $HERE" >&2; exit 1; }
 
 rm -f .state/run-id
 echo '{"setup":{},"checks":[]}' >results.json
