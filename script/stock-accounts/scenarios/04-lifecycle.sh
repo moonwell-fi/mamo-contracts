@@ -3,9 +3,10 @@
 # paid outside a settlement -- a cash withdrawal paying in USDC, an in-kind withdrawal paying in the
 # token it sends, a poke on an idle account, and a halted token that can no longer settle the fee but
 # is still withdrawable, the fee then coming out of the cash instead.
-# Reads here are arguments to an assert or to `send`: a failed read prints nothing, an assert compares
-# that unequal and records a FAIL, and `send` will not build a transaction out of it. The reads that
-# decide control flow are captured into a variable first, where the shell's own -e catches them.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, the asserts refuse
+# an empty operand outright (see lib.sh), so it is recorded as a FAIL and cannot pass, and `send` will
+# not build a transaction out of one. Reads that decide control flow are captured into a variable
+# first, where the shell's own -e catches them.
 # shellcheck disable=SC2312
 set -euo pipefail
 

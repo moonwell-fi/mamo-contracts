@@ -2,9 +2,10 @@
 # Cost as a basket grows: the same sell order priced against accounts holding 2, 4 and 10 listed stock
 # tokens, with every extra position adding one more pool TWAP read, and the fee post-hook measured on
 # the widest of them against the gas limit the appData document declares.
-# Reads here are arguments to an assert or to `send`: a failed read prints nothing, an assert compares
-# that unequal and records a FAIL, and `send` will not build a transaction out of it. The reads that
-# decide control flow are captured into a variable first, where the shell's own -e catches them.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, the asserts refuse
+# an empty operand outright (see lib.sh), so it is recorded as a FAIL and cannot pass, and `send` will
+# not build a transaction out of one. Reads that decide control flow are captured into a variable
+# first, where the shell's own -e catches them.
 # shellcheck disable=SC2312
 set -euo pipefail
 

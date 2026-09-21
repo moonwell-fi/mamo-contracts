@@ -180,11 +180,22 @@ now_ts() { cast block latest --field timestamp --rpc-url "$VNET" 2>>"$LOG"; }
 
 init_results() { [ -f "$RESULTS" ] || echo '{"setup":{},"checks":[]}' >"$RESULTS"; }
 
+# EMPTY IS NOT A VALUE. A read that failed prints nothing, and `set -e` does not see it when the
+# substitution sits in an argument, so the empty string arrives here as though it were what was read.
+# Two of them compare equal to each other, which is how a check passes having read nothing. Every
+# helper below that takes a read refuses an empty operand outright rather than comparing it.
 record() { # record <scenario> <check> <0|1> <value>
   local flag=false
   [ "$3" = 1 ] && flag=true
+  # `pass` refuses an empty value before it reaches here; this catches a scenario recording a
+  # measurement row directly, which is the other way a passing row is created.
+  if [ "$flag" = true ] && [ -z "${4-}" ]; then
+    flag=false
+    printf '  FAIL %-44s %s\n' "$2" "empty value: the read behind this check failed" >&2
+    FAILURES=$((FAILURES + 1))
+  fi
   init_results
-  jq --arg s "$1" --arg c "$2" --argjson p "$flag" --arg v "$4" \
+  jq --arg s "$1" --arg c "$2" --argjson p "$flag" --arg v "${4-}" \
     '.checks += [{scenario: $s, check: $c, pass: $p, value: $v}]' "$RESULTS" >"$RESULTS.tmp"
   mv "$RESULTS.tmp" "$RESULTS"
 }
@@ -195,10 +206,18 @@ setup_note() { # setup_note <key> <value>
   mv "$RESULTS.tmp" "$RESULTS"
 }
 
-pass() { record "$SCEN" "$1" 1 "${2-}"; printf '  ok   %-44s %s\n' "$1" "${2-}"; }
+pass() {
+  [ -n "${2-}" ] || { fail "$1" "empty value: the read behind this check failed"; return 0; }
+  record "$SCEN" "$1" 1 "$2"
+  printf '  ok   %-44s %s\n' "$1" "$2"
+}
 fail() { record "$SCEN" "$1" 0 "${2-}"; printf '  FAIL %-44s %s\n' "$1" "${2-}" >&2; FAILURES=$((FAILURES + 1)); }
 
+# Each assert opens on the same guard: neither operand may be empty. `fail` prints the check name, and
+# the message prints both sides, which is how you see which read to go and look at.
 assert_eq() { # assert_eq <check> <actual> <expected>
+  { [ -n "${2-}" ] && [ -n "${3-}" ]; } ||
+    { fail "$1" "empty operand: a read behind this check failed (actual='${2-}' expected='${3-}')"; return 0; }
   # shellcheck disable=SC2312 # `lc` is a printf piped into tr over arguments already in hand; it has nothing to fail at
   if [ "$(lc "$2")" = "$(lc "$3")" ]; then
     pass "$1" "$2"
@@ -207,20 +226,24 @@ assert_eq() { # assert_eq <check> <actual> <expected>
   fi
 }
 
-# The three below read an empty `bb` -- what a python that choked on an empty or unparsable operand
-# prints -- as "not 1", so a read that failed upstream lands in the else branch and records a FAIL.
-# shellcheck disable=SC2312
+# shellcheck disable=SC2312 # `bb` prints nothing when python chokes, which is not 1, so the else branch records a FAIL
 assert_gt() { # assert_gt <check> <a> <b>
+  { [ -n "${2-}" ] && [ -n "${3-}" ]; } ||
+    { fail "$1" "empty operand: a read behind this check failed (a='${2-}' b='${3-}')"; return 0; }
   if [ "$(bb "$2 > $3")" = 1 ]; then pass "$1" "$2 > $3"; else fail "$1" "$2 !> $3"; fi
 }
 
 # shellcheck disable=SC2312
 assert_gte() { # assert_gte <check> <a> <b>
+  { [ -n "${2-}" ] && [ -n "${3-}" ]; } ||
+    { fail "$1" "empty operand: a read behind this check failed (a='${2-}' b='${3-}')"; return 0; }
   if [ "$(bb "$2 >= $3")" = 1 ]; then pass "$1" "$2 >= $3"; else fail "$1" "$2 !>= $3"; fi
 }
 
 # shellcheck disable=SC2312
 assert_approx() { # assert_approx <check> <actual> <expected> <tolerance-bps>
+  { [ -n "${2-}" ] && [ -n "${3-}" ] && [ -n "${4-}" ]; } ||
+    { fail "$1" "empty operand: a read behind this check failed (actual='${2-}' expected='${3-}' tol='${4-}')"; return 0; }
   if [ "$(bb "abs($2 - $3) * 10000 <= $4 * $3")" = 1 ]; then
     pass "$1" "$2 ~ $3"
   else
@@ -233,18 +256,22 @@ assert_approx() { # assert_approx <check> <actual> <expected> <tolerance-bps>
 _expect_revert() { # _expect_revert <send|call> <check> <want> <from> <to> <sig> [args...]
   local mode=$1 check=$2 want=$3 from=$4 to=$5 out rc=0
   shift 5
+  # Same rule, and the sharpest case of it: every caller passes a `cast sig` of a literal, so an empty
+  # want is a selector lookup that failed, and it used to mean "accept any revert" -- which accepts a
+  # revert for the wrong reason. There is no caller that wants that, so it is refused.
+  [ -n "$want" ] || { fail "$check" "empty revert selector: the lookup that produces it failed"; return 0; }
   if [ "$mode" = send ]; then
     out=$(cast send --rpc-url "$VNET" --unlocked --from "$from" "$to" "$@" 2>&1) || rc=$?
   else
     out=$(cast call --rpc-url "$VNET" --from "$from" "$to" "$@" 2>&1) || rc=$?
   fi
   if [ $rc -eq 0 ]; then
-    fail "$check" "succeeded, expected revert ${want:-any}"
+    fail "$check" "succeeded, expected revert $want"
     return 0
   fi
   out=$(printf '%s' "$out" | tr '\n' ' ')
-  if [ -z "$want" ] || printf '%s' "$out" | grep -qiF -- "${want#0x}"; then
-    pass "$check" "${want:-reverted}"
+  if printf '%s' "$out" | grep -qiF -- "${want#0x}"; then
+    pass "$check" "$want"
   else
     # shellcheck disable=SC2312 # this branch is already a FAIL; the cut only trims the message it prints
     fail "$check" "wanted ${want}, got: $(printf '%s' "$out" | cut -c1-240)"

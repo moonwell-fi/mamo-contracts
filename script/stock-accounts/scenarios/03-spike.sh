@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Price spike: once the 180s average has absorbed a 3x move the account is far overweight, the
 # de-risking sell is accepted and settles, buying more is refused, and the unwind restores both.
-# Reads here are arguments to an assert or to `send`: a failed read prints nothing, an assert compares
-# that unequal and records a FAIL, and `send` will not build a transaction out of it. The reads that
-# decide control flow are captured into a variable first, where the shell's own -e catches them.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, the asserts refuse
+# an empty operand outright (see lib.sh), so it is recorded as a FAIL and cannot pass, and `send` will
+# not build a transaction out of one. Reads that decide control flow are captured into a variable
+# first, where the shell's own -e catches them.
 # shellcheck disable=SC2312
 set -euo pipefail
 
