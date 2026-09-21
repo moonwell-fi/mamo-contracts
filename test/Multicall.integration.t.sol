@@ -100,8 +100,9 @@ contract MulticallIntegrationTest is BaseTest {
     /// @dev PINNED Base fork (repo policy for fork tests): at `latest`, Moonwell's timestamp-based
     ///      `accrueInterest` intermittently reverts `could not calculate block delta`. `make
     ///      strategy-multicall` drops `--fork-url base`; `vm.fee(0)`/`vm.txGasPrice(0)` is the op-revm
-    ///      Isthmus operator-fee workaround.
-    uint256 internal constant PINNED_BLOCK = 49_600_000;
+    ///      Isthmus operator-fee workaround. The pin must also sit ABOVE the newest deployment in
+    ///      addresses/8453.json, since the FPS book validates that every entry has code on the fork.
+    uint256 internal constant PINNED_BLOCK = 51_500_000;
 
     function setUp() public override {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
