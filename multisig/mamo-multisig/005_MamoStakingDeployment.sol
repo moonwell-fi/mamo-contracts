@@ -95,8 +95,7 @@ contract MamoStakingDeployment is MultisigProposal {
                 multiRewards,
                 mamoToken,
                 mamoStakingStrategy,
-                STRATEGY_TYPE_ID,
-                DEFAULT_SLIPPAGE_IN_BPS
+                STRATEGY_TYPE_ID
             )
         );
 
@@ -201,11 +200,6 @@ contract MamoStakingDeployment is MultisigProposal {
             "Factory should have correct strategy implementation"
         );
         assertEq(factoryContract.strategyTypeId(), STRATEGY_TYPE_ID, "Factory should have correct strategy type ID");
-        assertEq(
-            factoryContract.defaultSlippageInBps(),
-            DEFAULT_SLIPPAGE_IN_BPS,
-            "Factory should have correct default slippage"
-        );
 
         // Check MamoStrategyRegistry
         MamoStrategyRegistry registryContract = MamoStrategyRegistry(mamoStrategyRegistry);

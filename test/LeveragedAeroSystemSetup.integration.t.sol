@@ -78,6 +78,7 @@ contract LeveragedAeroSystemSetupTest is Test {
     address multisig;
     address usdc;
     address rebalancer = makeAddr("leveragedAeroRebalancer");
+    address deployer = makeAddr("leveragedAeroDeployer");
     address user = makeAddr("leveragedAeroUser");
 
     function setUp() public {
@@ -93,14 +94,26 @@ contract LeveragedAeroSystemSetupTest is Test {
         vm.txGasPrice(0);
         vm.fee(0);
 
+        address[] memory lent = _lendCodeToEntriesDeployedAfterThePin();
+
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
         addresses = new Addresses("./addresses", chainIds);
         vm.makePersistent(address(addresses));
 
+        // Take the borrowed code back — the book is only validated in that constructor.
+        for (uint256 i = 0; i < lent.length; i++) {
+            vm.etch(lent[i], "");
+        }
+
         // The committed MAMO_REBALANCER is the ops-held signer; the test swaps in its own EOA so
         // it can prank the proposer legs. changeAddress, since the key ships in addresses/8453.json.
         addresses.changeAddress("MAMO_REBALANCER", rebalancer, false);
+
+        // And a throwaway deployer: at this pin the real DEPLOYER_EOA's next CREATE slots are
+        // addresses the book already records (contracts it deployed just after the pin), and FPS
+        // refuses to register an address twice. A nonce-0 EOA deploys into free slots.
+        addresses.changeAddress("DEPLOYER_EOA", deployer, false);
 
         multisig = addresses.getAddress("MAMO_MULTISIG");
         usdc = addresses.getAddress("USDC");
@@ -112,6 +125,29 @@ contract LeveragedAeroSystemSetupTest is Test {
         account = new DeployLeveragedAeroAccountSystem();
         account.setPrimaryForkId(vm.activeFork());
         account.setAddresses(addresses);
+    }
+
+    /// @dev FPS `Addresses` requires every `isContract` entry to have code on the ACTIVE fork, and the
+    ///      shared book records deployments made after this (deliberately pre-borrow-cap-freeze) pin —
+    ///      re-pinning is not an option, see {PINNED_BLOCK}. Lend each of them a byte for the length of
+    ///      that constructor. The loan MUST be returned: those slots are the deploying EOA's own next
+    ///      CREATE addresses at this block, so leaving code there makes 015's deploy collide.
+    /// @return lent The addresses that were given code.
+    function _lendCodeToEntriesDeployedAfterThePin() internal returns (address[] memory lent) {
+        Addresses.FileAddresses[] memory book =
+            abi.decode(vm.parseJson(vm.readFile("./addresses/8453.json")), (Addresses.FileAddresses[]));
+
+        lent = new address[](book.length);
+        uint256 count;
+        for (uint256 i = 0; i < book.length; i++) {
+            if (book[i].isContract && book[i].addr.code.length == 0) {
+                vm.etch(book[i].addr, hex"00");
+                lent[count++] = book[i].addr;
+            }
+        }
+        assembly {
+            mstore(lent, count)
+        }
     }
 
     /// @dev One test, not three: the two proposals and the user lifecycle are strictly sequential and

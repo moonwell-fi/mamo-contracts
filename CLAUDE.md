@@ -50,7 +50,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### System Flow
 
-1. Mamo Backend whitelists strategy implementations in the registry
+1. The admin multisig (`DEFAULT_ADMIN_ROLE`, behind a timelock) whitelists strategy implementations in the registry — the backend cannot
 2. Users request strategy deployment through Mamo
 3. Mamo deploys a strategy and registers it for the user
 4. Users deposit funds directly into their strategy

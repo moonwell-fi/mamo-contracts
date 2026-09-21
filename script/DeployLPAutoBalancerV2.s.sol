@@ -26,7 +26,7 @@ contract DeployLPAutoBalancerV2 is Script {
         address guardian = addresses.getAddress("F-MAMO");
         // The Aerodrome Slipstream NFPM the WETH/cbBTC gauge accepts. Stored under its existing
         // name (the address is already registered; FPS forbids the same address under two names).
-        address positionManager = addresses.getAddress("UNISWAP_V3_POSITION_MANAGER_AERODROME");
+        address positionManager = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
         address aero = addresses.getAddress("AERO");
 
         // manager_ and rebalancer_ are granted later via a Safe proposal, so pass address(0).

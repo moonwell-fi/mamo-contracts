@@ -73,7 +73,7 @@ contract WhitelistWETHStrategyImplementation is MultisigProposal {
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         vm.startBroadcast(deployer);
 
-        address newImplementation = address(new MamoMultiMarketStrategy());
+        address newImplementation = address(new MamoMultiMarketStrategy(addresses.getAddress("MARKET_REGISTRY")));
         vm.stopBroadcast();
 
         addresses.addAddress(strategyImplementation, newImplementation, true);

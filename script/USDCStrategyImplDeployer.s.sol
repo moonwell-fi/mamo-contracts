@@ -16,7 +16,7 @@ contract USDCStrategyImplDeployer is Script {
     function deployImplementation(Addresses addresses) public returns (address) {
         vm.startBroadcast();
         // Deploy the implementation contract
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy(addresses.getAddress("MARKET_REGISTRY"));
 
         vm.stopBroadcast();
 

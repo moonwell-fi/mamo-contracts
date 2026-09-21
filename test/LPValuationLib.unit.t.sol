@@ -5,11 +5,13 @@ import {Test} from "@forge-std/Test.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {LPGeometryLib} from "@libraries/LPGeometryLib.sol";
 import {LPValuationLib} from "@libraries/LPValuationLib.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
 
 /// @dev Minimal positions() surface for principalValue: one configurable position.
+///      Field 4 is `int24 tickSpacing` on Slipstream (see INonfungiblePositionManager).
 contract MiniPositionManager {
     int24 internal tl;
     int24 internal tu;
@@ -24,17 +26,46 @@ contract MiniPositionManager {
     function positions(uint256)
         external
         view
-        returns (uint96, address, address, address, uint24, int24, int24, uint128, uint256, uint256, uint128, uint128)
+        returns (uint96, address, address, address, int24, int24, int24, uint128, uint256, uint256, uint128, uint128)
     {
         return (0, address(0), address(0), address(0), 0, tl, tu, liq, 0, 0, 0, 0);
     }
 }
 
-/// @notice Standalone unit suite for LPValuationLib — feed staleness, mixed-decimal USD scaling,
-///         and the funded-leg-only feed-consultation invariant, previously only reachable through
-///         the balancer's full mock stack.
+/// @notice Chainlink L2 sequencer-uptime aggregator mock: `answer` is 0 (up) / 1 (down) and
+///         `startedAt` is when that status began. MockPriceFeed hard-codes startedAt = 0, which is
+///         precisely the field the uptime guard reads, so the sequencer needs its own mock.
+///         Shared with the balancer unit suite (imported from there).
+contract LPSequencerFeedMock is IPriceFeed {
+    int256 public answer;
+    uint256 public startedAt;
+
+    constructor(int256 answer_, uint256 startedAt_) {
+        answer = answer_;
+        startedAt = startedAt_;
+    }
+
+    function set(int256 answer_, uint256 startedAt_) external {
+        answer = answer_;
+        startedAt = startedAt_;
+    }
+
+    function decimals() external pure returns (uint8) {
+        return 0;
+    }
+
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
+        return (1, answer, startedAt, startedAt, 1);
+    }
+}
+
+/// @notice Standalone unit suite for LPValuationLib — feed staleness (now PER FEED), the L2
+///         sequencer-uptime guard, mixed-decimal USD scaling, and the funded-leg-only
+///         feed-consultation invariant, previously only reachable through the balancer's full mock
+///         stack.
 contract LPValuationLibUnitTest is Test {
     uint256 internal constant MAX_DELAY = 1 hours;
+    uint256 internal constant GRACE = 30 minutes;
 
     MockPriceFeed internal feed0; // 8-dec USD feed, price 1.00
     MockPriceFeed internal feed1;
@@ -49,10 +80,22 @@ contract LPValuationLibUnitTest is Test {
         token1 = address(new MockERC20("Token1", "TK1"));
     }
 
+    /// @dev Default config: both feeds, a shared delay, sequencer guard DISABLED.
+    function _cfg(address o0, address o1) internal pure returns (LPValuationLib.OracleConfig memory) {
+        return LPValuationLib.OracleConfig({
+            oracle0: o0,
+            oracle1: o1,
+            maxDelay0: MAX_DELAY,
+            maxDelay1: MAX_DELAY,
+            sequencerUptimeFeed: address(0),
+            sequencerGracePeriod: 0
+        });
+    }
+
     // ─── readFeed ────────────────────────────────────────────────────────────
 
     function test_readFeed_freshFeed_returnsPriceAndDecimals() public view {
-        (uint256 price, uint8 dec) = LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+        (uint256 price, uint8 dec) = LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(0), 0);
         assertEq(price, 1e8);
         assertEq(dec, 8);
     }
@@ -60,22 +103,22 @@ contract LPValuationLibUnitTest is Test {
     /// @dev updatedAt exactly at the delay boundary passes (check is strict >); one second past reverts.
     function test_readFeed_staleness_boundary() public {
         feed0.setUpdatedAt(block.timestamp - MAX_DELAY);
-        (uint256 price,) = LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+        (uint256 price,) = LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(0), 0);
         assertEq(price, 1e8);
 
         feed0.setUpdatedAt(block.timestamp - MAX_DELAY - 1);
         vm.expectRevert(LPValuationLib.StaleOracle.selector);
-        LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(0), 0);
     }
 
     function test_readFeed_nonPositiveAnswer_reverts() public {
         feed0.setAnswer(0);
         vm.expectRevert(LPValuationLib.StaleOracle.selector);
-        LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(0), 0);
 
         feed0.setAnswer(-1);
         vm.expectRevert(LPValuationLib.StaleOracle.selector);
-        LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(0), 0);
     }
 
     /// @dev A FUTURE-dated feed (misbehaving oracle) must revert StaleOracle explicitly, not trip
@@ -83,14 +126,103 @@ contract LPValuationLibUnitTest is Test {
     function test_readFeed_futureDatedFeed_revertsStaleOracle() public {
         feed0.setUpdatedAt(block.timestamp + 1);
         vm.expectRevert(LPValuationLib.StaleOracle.selector);
-        LPValuationLib.readFeed(address(feed0), MAX_DELAY);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(0), 0);
+    }
+
+    // ─── MOO-740: per-feed staleness bounds ──────────────────────────────────
+
+    /// @dev THE regression for the shared-bound bug. Both legs are funded; feed0 is 2 hours old and
+    ///      feed1 is fresh. Under a single shared 26-hour bound BOTH pass. With independent bounds —
+    ///      feed0 held to a 20-minute heartbeat, feed1 to 26 hours — the stale leg is rejected.
+    ///      The discriminator is that the SAME call succeeds when only delay0 is widened.
+    function test_valueInUsd_perFeedDelay_rejectsOnlyTheStaleLeg() public {
+        feed0.setUpdatedAt(block.timestamp - 2 hours);
+
+        LPValuationLib.OracleConfig memory tight = _cfg(address(feed0), address(feed1));
+        tight.maxDelay0 = 20 minutes; // feed0's real heartbeat
+        tight.maxDelay1 = 26 hours; // the old shared bound, kept on the OTHER leg
+
+        vm.expectRevert(LPValuationLib.StaleOracle.selector);
+        LPValuationLib.valueInUsd(1e18, 1e18, tight, 18, 18);
+
+        // Only leg1 funded: leg0's feed is never consulted, so the same stale feed0 is irrelevant.
+        assertEq(LPValuationLib.valueInUsd(0, 1e18, tight, 18, 18), 1e8, "unfunded stale leg not consulted");
+
+        // Widening ONLY delay0 (the pre-fix shared-bound behaviour) lets the stale answer through —
+        // proving the revert above came from the per-feed split and nothing else.
+        tight.maxDelay0 = 26 hours;
+        assertEq(LPValuationLib.valueInUsd(1e18, 1e18, tight, 18, 18), 2e8, "shared 26h bound accepts it");
+    }
+
+    /// @dev Mirror: a stale token1 feed is caught by maxDelay1, independently of maxDelay0.
+    function test_valueInUsd_perFeedDelay_leg1Independent() public {
+        feed1.setUpdatedAt(block.timestamp - 2 hours);
+        LPValuationLib.OracleConfig memory cfg = _cfg(address(feed0), address(feed1));
+        cfg.maxDelay0 = 26 hours;
+        cfg.maxDelay1 = 20 minutes;
+
+        vm.expectRevert(LPValuationLib.StaleOracle.selector);
+        LPValuationLib.valueInUsd(1e18, 1e18, cfg, 18, 18);
+
+        assertEq(LPValuationLib.valueInUsd(1e18, 0, cfg, 18, 18), 1e8, "leg0 unaffected by leg1's bound");
+    }
+
+    // ─── MOO-741: sequencer uptime guard ─────────────────────────────────────
+
+    function test_checkSequencer_disabledWhenFeedUnset() public view {
+        LPValuationLib.checkSequencer(address(0), GRACE); // must not revert
+    }
+
+    function test_readFeed_revertsWhenSequencerDown() public {
+        LPSequencerFeedMock seq = new LPSequencerFeedMock(1, block.timestamp - 1 days); // 1 == down
+        vm.expectRevert(LPValuationLib.SequencerDown.selector);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(seq), GRACE);
+    }
+
+    /// @dev The core of the finding: the price feed itself is perfectly "fresh" by its own
+    ///      updatedAt, but the sequencer only just came back. Inside the grace window the read must
+    ///      fail closed; one second past it, the same read succeeds.
+    function test_readFeed_gracePeriodBoundary() public {
+        LPSequencerFeedMock seq = new LPSequencerFeedMock(0, block.timestamp - GRACE + 1); // up, just barely
+        vm.expectRevert(LPValuationLib.SequencerGracePeriod.selector);
+        LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(seq), GRACE);
+
+        seq.set(0, block.timestamp - GRACE); // exactly at the boundary: elapsed == grace, accepted
+        (uint256 price,) = LPValuationLib.readFeed(address(feed0), MAX_DELAY, address(seq), GRACE);
+        assertEq(price, 1e8);
+    }
+
+    /// @dev A zero (or future) `startedAt` is the aggregator's invalid-round sentinel: fail closed
+    ///      rather than treating "unknown" as "up long enough".
+    function test_checkSequencer_invalidRound_failsClosed() public {
+        LPSequencerFeedMock seq = new LPSequencerFeedMock(0, 0);
+        vm.expectRevert(LPValuationLib.SequencerDown.selector);
+        LPValuationLib.checkSequencer(address(seq), GRACE);
+
+        seq.set(0, block.timestamp + 1);
+        vm.expectRevert(LPValuationLib.SequencerDown.selector);
+        LPValuationLib.checkSequencer(address(seq), GRACE);
+    }
+
+    /// @dev The guard runs on every valuation path, not just a bare readFeed.
+    function test_valueInUsd_propagatesSequencerGuard() public {
+        LPSequencerFeedMock seq = new LPSequencerFeedMock(1, block.timestamp - 1 days);
+        LPValuationLib.OracleConfig memory cfg = _cfg(address(feed0), address(feed1));
+        cfg.sequencerUptimeFeed = address(seq);
+        cfg.sequencerGracePeriod = GRACE;
+
+        vm.expectRevert(LPValuationLib.SequencerDown.selector);
+        LPValuationLib.valueInUsd(1e18, 0, cfg, 18, 18);
+
+        // ...but a zero-amount valuation still short-circuits before any feed is touched.
+        assertEq(LPValuationLib.valueInUsd(0, 0, cfg, 18, 18), 0);
     }
 
     // ─── valueInUsd ──────────────────────────────────────────────────────────
 
     /// @dev 1 token (18-dec) at $1.00 (8-dec feed) = 1e8 USD units (1e8 scale).
     function test_valueInUsd_18decLeg_at1Dollar() public view {
-        uint256 usd = LPValuationLib.valueInUsd(1e18, 0, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        uint256 usd = LPValuationLib.valueInUsd(1e18, 0, _cfg(address(feed0), address(feed1)), 18, 18);
         assertEq(usd, 1e8);
     }
 
@@ -98,17 +230,17 @@ contract LPValuationLibUnitTest is Test {
     ///      at $100,000 = 1e13 USD units; sums with the 18-dec leg.
     function test_valueInUsd_mixedDecimals_sumsLegs() public {
         feed1.setAnswer(100_000e8);
-        uint256 usd = LPValuationLib.valueInUsd(2e18, 1e8, address(feed0), address(feed1), 18, 8, MAX_DELAY);
+        uint256 usd = LPValuationLib.valueInUsd(2e18, 1e8, _cfg(address(feed0), address(feed1)), 18, 8);
         assertEq(usd, 2e8 + 100_000e8);
     }
 
     /// @dev The funded-leg-only invariant: a zero amount must NOT consult its feed. Proven by
     ///      passing address(0) as the unfunded leg's oracle — any consultation would revert.
     function test_valueInUsd_zeroLeg_neverConsultsItsFeed() public view {
-        uint256 usd = LPValuationLib.valueInUsd(0, 1e18, address(0), address(feed1), 18, 18, MAX_DELAY);
+        uint256 usd = LPValuationLib.valueInUsd(0, 1e18, _cfg(address(0), address(feed1)), 18, 18);
         assertEq(usd, 1e8);
 
-        usd = LPValuationLib.valueInUsd(1e18, 0, address(feed0), address(0), 18, 18, MAX_DELAY);
+        usd = LPValuationLib.valueInUsd(1e18, 0, _cfg(address(feed0), address(0)), 18, 18);
         assertEq(usd, 1e8);
     }
 
@@ -119,23 +251,16 @@ contract LPValuationLibUnitTest is Test {
         feed1.setAnswer(3e8); // $3.00 — distinct from feed0's $1.00
         uint256 n = bound(tokens, 1, 1e10);
         uint256 a = n * 1e18;
+        LPValuationLib.OracleConfig memory cfg = _cfg(address(feed0), address(feed1));
 
-        uint256 leg0 = LPValuationLib.valueInUsd(a, 0, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        uint256 leg0 = LPValuationLib.valueInUsd(a, 0, cfg, 18, 18);
         assertEq(leg0, n * 1e8, "leg0 priced by feed0 at $1");
 
-        uint256 leg1 = LPValuationLib.valueInUsd(0, a, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        uint256 leg1 = LPValuationLib.valueInUsd(0, a, cfg, 18, 18);
         assertEq(leg1, 3 * n * 1e8, "leg1 must consult ITS OWN feed ($3), not feed0");
 
-        assertEq(
-            LPValuationLib.valueInUsd(2 * a, 0, address(feed0), address(feed1), 18, 18, MAX_DELAY),
-            2 * leg0,
-            "linear in amount"
-        );
-        assertEq(
-            LPValuationLib.valueInUsd(a, a, address(feed0), address(feed1), 18, 18, MAX_DELAY),
-            leg0 + leg1,
-            "legs additive under distinct prices"
-        );
+        assertEq(LPValuationLib.valueInUsd(2 * a, 0, cfg, 18, 18), 2 * leg0, "linear in amount");
+        assertEq(LPValuationLib.valueInUsd(a, a, cfg, 18, 18), leg0 + leg1, "legs additive under distinct prices");
     }
 
     /// @dev Edge (upstream-guarded caller contract documented here): a nonzero tokenId with ZERO
@@ -144,17 +269,17 @@ contract LPValuationLibUnitTest is Test {
         MiniPositionManager pm = new MiniPositionManager();
         pm.set(-400, 400, 0);
         uint256 v = LPValuationLib.principalValue(
-            address(pm), 77, TickMath.getSqrtRatioAtTick(0), address(0), address(0), 18, 18, MAX_DELAY
+            address(pm), 77, TickMath.getSqrtRatioAtTick(0), _cfg(address(0), address(0)), 18, 18
         );
         assertEq(v, 0);
     }
 
-    // ─── principalValue ──────────────────────────────────────────────────────
+    // ─── principalValue / principalAmounts ───────────────────────────────────
 
     function test_principalValue_zeroTokenId_isZero() public {
         MiniPositionManager pm = new MiniPositionManager();
         uint256 v = LPValuationLib.principalValue(
-            address(pm), 0, TickMath.getSqrtRatioAtTick(0), address(feed0), address(feed1), 18, 18, MAX_DELAY
+            address(pm), 0, TickMath.getSqrtRatioAtTick(0), _cfg(address(feed0), address(feed1)), 18, 18
         );
         assertEq(v, 0);
     }
@@ -165,14 +290,33 @@ contract LPValuationLibUnitTest is Test {
         MiniPositionManager pm = new MiniPositionManager();
         pm.set(-400, 400, 1e18);
         uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+        LPValuationLib.OracleConfig memory cfg = _cfg(address(feed0), address(feed1));
 
         (uint256 a0, uint256 a1) = LPGeometryLib.amountsForLiquidityAtTicks(sqrtP, -400, 400, 1e18);
-        uint256 expected = LPValuationLib.valueInUsd(a0, a1, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        uint256 expected = LPValuationLib.valueInUsd(a0, a1, cfg, 18, 18);
 
-        uint256 v =
-            LPValuationLib.principalValue(address(pm), 77, sqrtP, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+        uint256 v = LPValuationLib.principalValue(address(pm), 77, sqrtP, cfg, 18, 18);
         assertEq(v, expected);
         assertGt(v, 0);
+    }
+
+    /// @dev principalAmounts is the ORACLE-FREE half the swap-rebalance snapshot depends on: it must
+    ///      return the geometry amounts and consult no feed at all (proven by the address(0) oracles
+    ///      that principalValue could not tolerate on a funded position).
+    function test_principalAmounts_matchesGeometry_andReadsNoFeed() public {
+        MiniPositionManager pm = new MiniPositionManager();
+        pm.set(-400, 400, 1e18);
+        uint160 sqrtP = TickMath.getSqrtRatioAtTick(0);
+
+        (uint256 e0, uint256 e1) = LPGeometryLib.amountsForLiquidityAtTicks(sqrtP, -400, 400, 1e18);
+        (uint256 a0, uint256 a1) = LPValuationLib.principalAmounts(address(pm), 77, sqrtP);
+        assertEq(a0, e0);
+        assertEq(a1, e1);
+        assertGt(a0 + a1, 0);
+
+        (uint256 z0, uint256 z1) = LPValuationLib.principalAmounts(address(pm), 0, sqrtP);
+        assertEq(z0, 0);
+        assertEq(z1, 0);
     }
 
     // ─── contractPairValue ───────────────────────────────────────────────────
@@ -183,7 +327,7 @@ contract LPValuationLibUnitTest is Test {
         MockERC20(token1).mint(holder, 1e18);
 
         uint256 v =
-            LPValuationLib.contractPairValue(token0, token1, holder, address(feed0), address(feed1), 18, 18, MAX_DELAY);
+            LPValuationLib.contractPairValue(token0, token1, holder, _cfg(address(feed0), address(feed1)), 18, 18);
         assertEq(v, 4e8);
     }
 }

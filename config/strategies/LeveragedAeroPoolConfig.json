@@ -16,7 +16,7 @@
   "legBFeed": "CHAINLINK_USDC_USD",
   "tokenFeed": "CHAINLINK_USDC_USD",
   "aeroUsdFeed": "CHAINLINK_AERO_USD",
-  "sequencerFeed": "CHAINLINK_BASE_SEQUENCER_UPTIME",
+  "sequencerFeed": "CHAINLINK_L2_SEQUENCER_UPTIME_FEED",
   "rebalancer": "MAMO_REBALANCER",
   "feeRecipient": "MAMO_MULTISIG",
   "strategyTemplate": "LEVERAGED_AERO_STRATEGY_TEMPLATE",

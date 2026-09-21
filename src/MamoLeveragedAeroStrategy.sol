@@ -156,7 +156,7 @@ contract MamoLeveragedAeroStrategy is Initializable, UUPSUpgradeable, BaseStrate
      * @return shares Vault shares minted to this account (12dp).
      */
     function depositIdle(uint256 assets, uint256 minShares) external returns (uint256 shares) {
-        require(msg.sender == owner() || msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not owner or backend");
+        require(msg.sender == owner() || _isBackend(msg.sender), "Not owner or backend");
         _pruneSettled();
 
         require(assets > 0, "Amount must be greater than 0");

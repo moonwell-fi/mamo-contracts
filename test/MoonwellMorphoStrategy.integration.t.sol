@@ -152,7 +152,6 @@ contract MoonwellMorphoStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -835,14 +834,30 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.stopPrank();
     }
 
-    function testRevertIfNoFundsToRebalance() public {
+    /// @notice updatePosition has to run on an EMPTY strategy. It is the only way to repair the
+    ///         split configuration after a market is deactivated, and deposit() refuses to run
+    ///         while the active splits are incomplete — so a strategy that happened to hold
+    ///         nothing at that moment would otherwise be bricked with no way back.
+    function testUpdatePositionWithNoFundsStillSetsSplits() public {
         // No funds deposited
+        assertEq(underlying.balanceOf(address(strategy)), 0, "strategy starts empty");
 
-        // Backend attempts to update position
         vm.startPrank(multicall);
-        vm.expectRevert("Nothing to rebalance");
         strategy.updatePosition(_buildUpdatePositionArray(6000, 4000));
         vm.stopPrank();
+
+        assertEq(strategy.marketSplitBps(address(mToken)), 6000, "mToken split applied");
+        assertEq(strategy.marketSplitBps(address(metaMorphoVault)), 4000, "vault split applied");
+
+        // And the new allocation is live for the next deposit.
+        uint256 depositAmount = 1000 * 10 ** assetConfig.decimals;
+        deal(address(underlying), owner, depositAmount);
+        vm.startPrank(owner);
+        underlying.approve(address(strategy), depositAmount);
+        strategy.deposit(depositAmount);
+        vm.stopPrank();
+
+        assertApproxEqAbs(mToken.balanceOfUnderlying(address(strategy)), (depositAmount * 6000) / 10000, deltaThreshold);
     }
 
     function testDepositIdleTokens() public {
@@ -1006,8 +1021,8 @@ contract MoonwellMorphoStrategyTest is Test {
         // between the Chainlink oracle and the CoW API
         vm.startPrank(owner);
         strategy.setSlippage(2500); // 25% slippage (maximum allowed)
-        strategy.approveCowSwap(address(well), type(uint256).max);
         vm.stopPrank();
+        strategy.sweepRewardFees(address(well));
 
         // Set up parameters for the order
         uint256 buyAmount;
@@ -1092,8 +1107,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 1000e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes; // 24 hours from now
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals; // Mock buy amount
@@ -1126,8 +1140,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 1000e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1158,8 +1171,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         // Set validTo to less than 5 minutes in the future
         uint32 validTo = uint32(block.timestamp) + 4 minutes;
@@ -1191,8 +1203,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1223,8 +1234,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1255,8 +1265,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1287,8 +1296,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         // Create a mock token that is different from the strategy token
         MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
@@ -1322,8 +1330,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1357,8 +1364,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1389,8 +1395,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 30 minutes;
         uint256 buyAmount = 1000 * 10 ** assetConfig.decimals;
@@ -1421,7 +1426,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testRevertIfInvalidInitializationParameters() public {
         // Deploy a new implementation
-        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy implementation = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Whitelist the implementation
         vm.prank(admin);
@@ -1442,7 +1447,6 @@ contract MoonwellMorphoStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(0), // Invalid address
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -1470,7 +1474,6 @@ contract MoonwellMorphoStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -1494,7 +1497,6 @@ contract MoonwellMorphoStrategyTest is Test {
             MamoMultiMarketStrategy.initialize.selector,
             MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: address(registry),
-                mamoBackend: backend,
                 token: address(underlying),
                 slippagePriceChecker: address(slippagePriceChecker),
                 feeRecipient: admin,
@@ -1556,10 +1558,12 @@ contract MoonwellMorphoStrategyTest is Test {
     }
 
     function testSlippageAffectsPriceCheck() public {
+        _freshenPriceFeeds();
+
         uint256 wellAmount = 10000e18;
         deal(address(well), address(strategy), wellAmount);
-        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the slippage logic.
-        freshenRewardTokenPriceFeeds();
+        // The fee gate runs before the price check, so settle first — this test is about slippage.
+        strategy.sweepRewardFees(address(well));
 
         // First check with default slippage (1%)
         uint256 defaultSlippage = 100; // 1%
@@ -1647,14 +1651,43 @@ contract MoonwellMorphoStrategyTest is Test {
         assertEq(result, MAGIC_VALUE, "Order should be valid with high slippage");
     }
 
+    /// @notice Re-stamps every configured price feed's `updatedAt` to now, keeping its real answer.
+    /// @dev These tests fork at `latest` and assert a SPECIFIC revert reason from checkPrice. Any feed
+    ///      whose last update is older than its configured heartbeat reverts first with
+    ///      "Price feed update time exceeds heartbeat", so the assertion becomes a coin flip on where
+    ///      in the feed's update cycle the fork block happens to land. That is not theoretical: the
+    ///      WETH config allows 1200s for CHAINLINK_ETH_USD while that feed's observed cadence on Base
+    ///      is ~1230s (five consecutive 1230s gaps measured 2026-08-14), so the tail of every cycle is
+    ///      stale by the configured bound and CI fails there. Freezing freshness keeps these tests
+    ///      about the price check they name. The heartbeat bound itself is covered by
+    ///      SlippagePriceChecker.integration.t.sol, and the live config value is an on-chain concern
+    ///      tracked separately — do NOT widen a heartbeat to make a test pass.
+    function _freshenPriceFeeds() internal {
+        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
+            DeployAssetConfig.PriceFeedConfig[] memory feeds = assetConfig.rewardTokens[i].priceFeeds;
+
+            for (uint256 j = 0; j < feeds.length; j++) {
+                address feed = addresses.getAddress(feeds[j].priceFeed);
+
+                // Read the live round FIRST: the point is to preserve the real price and move only
+                // its timestamp, so the arithmetic under test stays the production arithmetic.
+                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
+
+                vm.mockCall(
+                    feed,
+                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
+                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
+                );
+            }
+        }
+    }
+
     function testRevertIfPriceCheckFails() public {
+        _freshenPriceFeeds();
+
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
-        // Pin the feed staleness clock so the heartbeat gate can't pre-empt the price check.
-        freshenRewardTokenPriceFeeds();
-
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
@@ -1768,66 +1801,74 @@ contract MoonwellMorphoStrategyTest is Test {
         vm.clearMockedCalls();
     }
 
-    // Tests for approveCowSwap function
+    // Tests for the CoW relayer allowance, which is now owned by sweepRewardFees rather than by an
+    // owner-callable approveCowSwap. The strategy has to be the ONLY writer of that allowance and
+    // it has to stay finite: the drop from what was granted to what is left is how a later
+    // settlement learns how much CoW pulled, which is what stops a stale fee anchor from masking
+    // rewards that arrived after a swap. An owner-set unlimited approval erased both properties.
 
-    function testOwnerCanApproveCowSwap() public {
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), 1e18);
+    function testSweepRewardFeesArmsRelayerAtSettledBalance() public {
+        uint256 wellAmount = 1000e18;
+        deal(address(well), address(strategy), wellAmount);
 
-        // Verify the approval was successful
+        uint256 expectedFee = (wellAmount * strategy.compoundFee()) / strategy.SPLIT_TOTAL();
+
+        strategy.sweepRewardFees(address(well));
+
         uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(finalAllowance, 1e18, "Allowance should be set to maximum");
+        assertEq(finalAllowance, wellAmount - expectedFee, "relayer armed at the post-fee balance");
+        assertEq(IERC20(address(well)).balanceOf(address(strategy)), wellAmount - expectedFee, "strategy keeps net");
     }
 
-    function testRevertIfNonOwnerApproveCowSwap() public {
-        // Create a non-owner address
-        address nonOwner = makeAddr("nonOwner");
+    function testSweepRewardFeesIsPermissionless() public {
+        deal(address(well), address(strategy), 1000e18);
 
-        // Non-owner attempts to approve the vault relayer
-        vm.prank(nonOwner);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        // Merkl's distributor claim is permissionless, so rewards can land here without the
+        // backend involved; settling them must not need a privileged caller either.
+        vm.prank(makeAddr("anyone"));
+        strategy.sweepRewardFees(address(well));
 
-        // Verify the approval was not granted
-        uint256 allowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(allowance, type(uint256).max, "Allowance should remain maximum");
+        assertGt(IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER()), 0);
     }
 
     function testRevertIfTokenNotConfiguredInSlippagePriceChecker() public {
         // Create a mock token that is not configured in the swap checker
         MockERC20 mockToken = new MockERC20("Mock Token", "MOCK");
 
-        // Owner attempts to approve the vault relayer for an unconfigured token
-        vm.prank(owner);
         vm.expectRevert("Token not allowed");
-        strategy.approveCowSwap(address(mockToken), type(uint256).max);
+        strategy.sweepRewardFees(address(mockToken));
 
         // Verify the approval was not granted
         uint256 allowance = IERC20(address(mockToken)).allowance(address(strategy), strategy.VAULT_RELAYER());
         assertEq(allowance, 0, "Allowance should remain zero");
     }
 
-    function testApproveCowSwapZeroAmountRemovesApproval() public {
-        // First set a non-zero approval
-        vm.startPrank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+    function testRevertIfSweepingTheStrategyToken() public {
+        // Approving the relayer on the underlying would put every user deposit inside a CoW order.
+        vm.expectRevert("Not a reward token");
+        strategy.sweepRewardFees(address(underlying));
 
-        // Verify the initial approval was set
-        uint256 initialAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(initialAllowance, type(uint256).max, "Initial allowance should be maximum");
-
-        // Now set approval to zero
-        strategy.approveCowSwap(address(well), 0);
-        vm.stopPrank();
-
-        // Verify the approval was removed
-        uint256 finalAllowance = IERC20(address(well)).allowance(address(strategy), strategy.VAULT_RELAYER());
-        assertEq(finalAllowance, 0, "Allowance should be set to zero");
+        assertEq(
+            IERC20(address(underlying)).allowance(address(strategy), strategy.VAULT_RELAYER()),
+            0,
+            "underlying is never approved to the relayer"
+        );
     }
+
+    // MERGE NOTE (#74 into #73): `testApproveCowSwapZeroAmountStillRevokesAfterTokenDeconfigured`
+    // lived here. It pinned that `_approveCowSwap`'s reward-token gate exempted `amount == 0`, so a
+    // standing relayer allowance stayed revocable after MOO-726 made `isRewardToken` follow live pair
+    // configuration instead of latching forever. Both the test and the exemption are removed because
+    // #73 deleted `approveCowSwap`/`_approveCowSwap` outright: the allowance is now written only by
+    // `sweepRewardFees`, at the settled balance, and there is no owner-callable path left to grant an
+    // unlimited one — so the stranded-allowance failure mode the exemption defended against can no
+    // longer be created. The invariant that replaced it is covered by the tests above
+    // (`testSweepRewardFeesArmsRelayerAtSettledBalance` in particular): the allowance is finite and
+    // the strategy is its only writer.
 
     function testAuthorizeUpgrade() public {
         // Deploy a new implementation for upgrade
-        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy newImplementation = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Create an unauthorized address
         address unauthorizedAddress = makeAddr("unauthorized");
@@ -1848,8 +1889,7 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 wellAmount = 100e18;
         deal(address(well), address(strategy), wellAmount);
 
-        vm.prank(owner);
-        strategy.approveCowSwap(address(well), type(uint256).max);
+        strategy.sweepRewardFees(address(well));
 
         // Set validTo to more than 24 hours in the future
         uint32 validTo = uint32(block.timestamp) + 25 hours; // 25 hours from now
@@ -2096,7 +2136,7 @@ contract MoonwellMorphoStrategyTest is Test {
 
     function testInitializeWithRewardTokens() public {
         // Deploy a new implementation for testing initialization
-        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy();
+        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy(address(marketRegistry));
 
         // Whitelist the implementation
         vm.prank(admin);
@@ -2126,7 +2166,6 @@ contract MoonwellMorphoStrategyTest is Test {
                 MamoMultiMarketStrategy.initialize.selector,
                 MamoMultiMarketStrategy.InitParams({
                     mamoStrategyRegistry: address(registry),
-                    mamoBackend: backend,
                     token: address(underlying),
                     slippagePriceChecker: address(slippagePriceChecker),
                     feeRecipient: admin,
@@ -2147,10 +2186,58 @@ contract MoonwellMorphoStrategyTest is Test {
         // Verify the strategy was initialized properly
         assertEq(strategyWithRewards.owner(), owner);
 
-        // Verify the reward token was approved
+        // Initialization validates the reward tokens but deliberately grants NO standing
+        // allowance. The relayer is armed for exactly the fee-settled balance by sweepRewardFees,
+        // and that finite, strategy-written allowance is the only record of how much CoW pulled —
+        // an unlimited approval set at init would erase it.
         uint256 allowance =
             IERC20(address(well)).allowance(address(strategyWithRewards), strategyWithRewards.VAULT_RELAYER());
-        assertEq(allowance, type(uint256).max, "Reward token should be approved for the vault relayer");
+        assertEq(allowance, 0, "no standing relayer allowance at init");
+
+        deal(address(well), address(strategyWithRewards), 100e18);
+        strategyWithRewards.sweepRewardFees(address(well));
+
+        assertEq(
+            IERC20(address(well)).allowance(address(strategyWithRewards), strategyWithRewards.VAULT_RELAYER()),
+            IERC20(address(well)).balanceOf(address(strategyWithRewards)),
+            "relayer armed at the fee-settled balance"
+        );
+    }
+
+    /// @notice A token that was never declared as a reward token at init can still be settled, as
+    ///         long as the price checker prices it — the fee is a property of the balance, not of
+    ///         the init parameters.
+    function testInitializeRejectsRewardTokenThatIsTheStrategyToken() public {
+        address[] memory badRewardTokens = new address[](1);
+        badRewardTokens[0] = address(underlying);
+
+        uint256[] memory initSplits = new uint256[](2);
+        initSplits[0] = 5000;
+        initSplits[1] = 5000;
+
+        MamoMultiMarketStrategy newImpl = new MamoMultiMarketStrategy(address(marketRegistry));
+
+        vm.expectRevert("Not a reward token");
+        new ERC1967Proxy(
+            address(newImpl),
+            abi.encodeWithSelector(
+                MamoMultiMarketStrategy.initialize.selector,
+                MamoMultiMarketStrategy.InitParams({
+                    mamoStrategyRegistry: address(registry),
+                    token: address(underlying),
+                    slippagePriceChecker: address(slippagePriceChecker),
+                    feeRecipient: admin,
+                    strategyTypeId: strategyTypeId,
+                    rewardTokens: badRewardTokens,
+                    owner: owner,
+                    hookGasLimit: config.hookGasLimit,
+                    allowedSlippageInBps: config.allowedSlippageInBps,
+                    compoundFee: config.compoundFee,
+                    marketRegistry: address(marketRegistry),
+                    defaultSplitBps: initSplits
+                })
+            )
+        );
     }
 
     function testRevertIfMTokenRedeemFails() public {
@@ -2415,29 +2502,6 @@ contract MoonwellMorphoStrategyTest is Test {
         uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
 
         return metaMorphoBalance + mTokenBalance + tokenBalance;
-    }
-
-    /**
-     * @notice Neutralize fork-time Chainlink staleness for every configured reward-token price feed.
-     * @dev Forked at `latest`, a feed can be past its heartbeat and SlippagePriceChecker's staleness
-     *      gate fires before the logic under test. Re-mocks only the timestamps, keeping real answers.
-     */
-    function freshenRewardTokenPriceFeeds() internal {
-        for (uint256 i = 0; i < assetConfig.rewardTokens.length; i++) {
-            DeployAssetConfig.RewardToken memory rewardToken = assetConfig.rewardTokens[i];
-
-            for (uint256 j = 0; j < rewardToken.priceFeeds.length; j++) {
-                address feed = addresses.getAddress(rewardToken.priceFeeds[j].priceFeed);
-
-                (uint80 roundId, int256 answer,,, uint80 answeredInRound) = IPriceFeed(feed).latestRoundData();
-
-                vm.mockCall(
-                    feed,
-                    abi.encodeWithSelector(IPriceFeed.latestRoundData.selector),
-                    abi.encode(roundId, answer, block.timestamp, block.timestamp, answeredInRound)
-                );
-            }
-        }
     }
 
     /**
