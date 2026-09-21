@@ -147,9 +147,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     /// @notice Sets the TWAP observation window in seconds
+    /// @param newTwapWindow The new window; it takes effect first, so every non-halted token is re-probed
+    ///        against it and a window no pool can serve is refused
     function setTwapWindow(uint32 newTwapWindow) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newTwapWindow == twapWindow) revert AlreadySet();
         _setTwapWindow(newTwapWindow);
+
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokenConfig[_tokens[i]].status != TokenStatus.Halted) _requirePriceable(_tokens[i]);
+        }
     }
 
     /// @notice Sets the minimum total value a single stock account must hold after a deposit

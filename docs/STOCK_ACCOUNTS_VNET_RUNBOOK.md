@@ -111,6 +111,14 @@ the checker cannot quote — no pool against `asset`, or a pool whose history is
 `twapWindow` — is refused at listing instead of breaking `getNAV` for every holder. Lowering a
 token to `SellOnly` or `Halted` never probes.
 
+`setPriceChecker` and `setTwapWindow` change what "priceable" means for every listing at once, so both
+apply the new value first and then re-probe every token that is not `Halted`, reverting the whole call
+with `TokenNotPriceable(token)` if any of them stops quoting. A window no pool can serve is therefore
+refused rather than silently bricking every holder's valuation. One broken pool blocks both calls until
+that token is halted, which is deliberate: auto-halting would change account value as a side effect of
+an unrelated admin action. Both calls probe on-chain, so they are not cheap — on a Base fork one
+pool-TWAP listing costs about 107k gas and one Chainlink listing about 113k.
+
 ## Why the smoke test only deposits USDC
 
 B20 stock tokens are node-native precompiles on Base: their code is the single byte `0xef`, which revm

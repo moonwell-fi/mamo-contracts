@@ -6,10 +6,12 @@ import {Test} from "@forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
+import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
 import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
+import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
 import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "@test/mocks/MockPriceChecker.sol";
 import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol";
@@ -861,5 +863,122 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.setPriceChecker(other);
         assertEq(address(registry.priceChecker()), address(other), "checker not swapped");
+    }
+}
+
+/// @notice setTwapWindow against the real StockAccountPriceChecker, whose TWAP path reads the window live
+contract StockAccountRegistryTwapWindowUnitTest is Test {
+    uint32 internal constant WINDOW = 180;
+
+    StockAccountRegistry internal registry;
+    StockAccountPriceChecker internal checker;
+    MockPriceChecker internal existingChecker;
+
+    MockERC20Decimals internal usdc;
+    MockERC20Decimals internal stock;
+    MockERC20Decimals internal alt;
+    MockCLPoolObserve internal stockPool;
+    MockCLPoolObserve internal altPool;
+
+    address internal admin = makeAddr("admin");
+    address internal guardian = makeAddr("guardian");
+    address internal orderSigner = makeAddr("orderSigner");
+
+    function setUp() public {
+        usdc = new MockERC20Decimals("USDC", 6);
+        stock = new MockERC20Decimals("STOCK", 8);
+        alt = new MockERC20Decimals("ALT", 8);
+        stockPool = new MockCLPoolObserve(address(usdc), address(stock));
+        altPool = new MockCLPoolObserve(address(usdc), address(alt));
+        stockPool.setMeanTick(0, WINDOW);
+        altPool.setMeanTick(0, WINDOW);
+
+        existingChecker = new MockPriceChecker();
+
+        registry = new StockAccountRegistry(
+            StockAccountRegistry.Config({
+                admin: admin,
+                aerodromeRouter: ISwapRouter(address(new Stub())),
+                asset: address(usdc),
+                guardian: guardian,
+                managementFeeBps: 100,
+                maxBackendSlippageBps: 100,
+                maxDeviationBps: 500,
+                maxPositions: 10,
+                maxStrategyDeposit: 1_000_000e6,
+                maxWithdrawSlippageBps: 200,
+                minStrategyDeposit: 100e6,
+                minTargetBps: 250,
+                orderSigner: orderSigner,
+                priceChecker: existingChecker,
+                twapWindow: WINDOW
+            })
+        );
+
+        checker = new StockAccountPriceChecker(IStockAccountRegistry(address(registry)), address(usdc), existingChecker);
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(address(checker)));
+
+        _list(address(stock), address(stockPool));
+        _list(address(alt), address(altPool));
+    }
+
+    function _list(address token, address pool) internal {
+        vm.prank(admin);
+        registry.listToken(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: IStockAccountRegistry.TokenStatus.Active,
+                source: IStockAccountRegistry.PriceSource.PoolTwap,
+                pool: pool,
+                chainlinkFeed: address(0)
+            })
+        );
+    }
+
+    function testSetTwapWindowSucceedsWhenEveryListingStaysPriceable() public {
+        vm.expectEmit(false, false, false, true, address(registry));
+        emit StockAccountRegistry.TwapWindowUpdated(WINDOW, 3600);
+        vm.prank(admin);
+        registry.setTwapWindow(3600);
+
+        assertEq(registry.twapWindow(), 3600, "window mismatch");
+        assertGt(checker.getExpectedOut(1e8, address(stock), address(usdc)), 0, "stock should still quote");
+        assertGt(checker.getExpectedOut(1e8, address(alt), address(usdc)), 0, "alt should still quote");
+    }
+
+    function testSetTwapWindowRevertsWhenAListingBecomesUnpriceable() public {
+        stockPool.setMaxObservableWindow(600);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, address(stock)));
+        vm.prank(admin);
+        registry.setTwapWindow(3600);
+
+        assertEq(registry.twapWindow(), WINDOW, "window should be unchanged");
+        assertEq(
+            uint256(registry.tokenConfig(address(stock)).status),
+            uint256(IStockAccountRegistry.TokenStatus.Active),
+            "status should be unchanged"
+        );
+        assertGt(checker.getExpectedOut(1e8, address(stock), address(usdc)), 0, "stock should still quote");
+    }
+
+    function testSetTwapWindowSkipsHaltedListings() public {
+        stockPool.setMaxObservableWindow(600);
+
+        vm.prank(guardian);
+        registry.setTokenStatus(address(stock), IStockAccountRegistry.TokenStatus.Halted);
+
+        vm.prank(admin);
+        registry.setTwapWindow(3600);
+        assertEq(registry.twapWindow(), 3600, "window mismatch");
+    }
+
+    function testSetTwapWindowRevertsOnSameValueBeforeProbing() public {
+        stockPool.setMaxObservableWindow(60);
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        vm.prank(admin);
+        registry.setTwapWindow(WINDOW);
     }
 }
