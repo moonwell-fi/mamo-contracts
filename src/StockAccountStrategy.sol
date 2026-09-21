@@ -143,12 +143,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @notice Sends a token held by the account to the owner without selling anything
      * @param token The token to send, the asset included
      * @param amount The amount to send
+     * @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
      */
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
         if (_isFeeToken(token)) {
-            _payFees(token);
+            try this.payFees(token) {} catch {}
         } else {
-            _payFeesFromAny();
+            try this.payFeesFromAny() {} catch {}
         }
 
         if (amount == 0) revert ZeroAmount();
@@ -160,8 +161,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /// @notice Sends every balance held by the account to the owner without selling anything
+    /// @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
     function withdrawAllInKind() external override onlyOwner {
-        _payFeesFromAny();
+        try this.payFeesFromAny() {} catch {}
 
         address to = owner();
 
@@ -373,11 +375,11 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (usdcAmount == 0) revert ZeroAmount();
         _checkWithdrawSlippage(maxSlippageBps);
 
-        uint256 idle = asset.balanceOf(address(this));
+        uint256 shortfall = _shortfall(usdcAmount);
         uint256 sold;
 
-        if (idle < usdcAmount) {
-            (address[] memory tokens, uint256[] memory amounts,,) = _planSells(usdcAmount - idle, maxSlippageBps);
+        if (shortfall > 0) {
+            (address[] memory tokens, uint256[] memory amounts,,) = _planSells(shortfall, maxSlippageBps);
             sold = _executeSells(tokens, amounts, maxSlippageBps);
         }
 
@@ -423,12 +425,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     {
         _checkWithdrawSlippage(maxSlippageBps);
 
-        uint256 idle = asset.balanceOf(address(this));
-        if (idle >= usdcAmount) {
+        uint256 shortfall = _shortfall(usdcAmount);
+        if (shortfall == 0) {
             return (new address[](0), new uint256[](0), 0, 0);
         }
 
-        return _planSells(usdcAmount - idle, maxSlippageBps);
+        return _planSells(shortfall, maxSlippageBps);
     }
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
@@ -607,8 +609,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return status != IStockAccountRegistry.TokenStatus.None && status != IStockAccountRegistry.TokenStatus.Halted;
     }
 
+    /// @notice Pays the fee accrued since the last payment out of the balances the account holds, callable by anyone
     /// @dev Walks the balances until the fee is settled, so an exit cannot leave a remainder nothing can collect
-    function _payFeesFromAny() internal {
+    function payFeesFromAny() external override {
         if (asset.balanceOf(address(this)) > 0) {
             _payFees(address(asset));
         }
@@ -702,6 +705,15 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
     }
 
+    /// @dev The fee is charged on the account value, which selling does not move, so the sells are sized for it
+    function _shortfall(uint256 usdcAmount) internal view returns (uint256) {
+        uint256 needed = usdcAmount + feeDue();
+        uint256 idle = asset.balanceOf(address(this));
+
+        return needed > idle ? needed - idle : 0;
+    }
+
+    /// @dev The largest leg carries the rounding the other legs drop, so the plan cannot come in under its target
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)
         internal
         view
@@ -711,8 +723,17 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
 
         uint256 total;
+        uint256 largest;
+        uint256 largestValue;
+
         for (uint256 i = 0; i < sellable.length; i++) {
-            total += priceChecker.getExpectedOut(balances[i], sellable[i], address(asset));
+            uint256 value = priceChecker.getExpectedOut(balances[i], sellable[i], address(asset));
+            total += value;
+
+            if (value > largestValue) {
+                largestValue = value;
+                largest = i;
+            }
         }
 
         if (shortfall > total) revert InsufficientBalance();
@@ -730,7 +751,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 count;
 
         for (uint256 i = 0; i < sellable.length; i++) {
-            planned[i] = (balances[i] * target) / total;
+            uint256 numerator = balances[i] * target;
+            planned[i] = i == largest ? (numerator + total - 1) / total : numerator / total;
+
             if (planned[i] > 0) {
                 count++;
             }
