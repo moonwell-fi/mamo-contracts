@@ -30,6 +30,14 @@ struct HandlerConfig {
     uint256[4] prices;
 }
 
+struct FeeProbe {
+    uint64 clock;
+    uint256 elapsed;
+    uint256 due;
+    uint256 nav;
+    uint256 collected;
+}
+
 contract StockAccountStrategyHandler is Test {
     using GPv2Order for GPv2Order.Data;
 
@@ -69,6 +77,7 @@ contract StockAccountStrategyHandler is Test {
     uint256 public callsWarp;
     uint256 public callsPayFees;
     uint256 public callsSetFeeRate;
+    uint256 public callsSetSlippageCap;
     uint256 public callsSubmitOrder;
 
     uint256 public acceptedOrders;
@@ -86,11 +95,18 @@ contract StockAccountStrategyHandler is Test {
     uint256 public feeValueCollected;
     uint64 public lastFeePaidSeen;
     bool public feeClockWentBackwards;
+    bool public feeCreditedTooMuch;
+    bool public feeCreditWentUnbacked;
+
+    uint256 public feePayments;
+    uint256 public cappedPayments;
+    uint256 public zeroConversionPayments;
 
     uint256 public maxSellValueDrift;
 
     bool public rangeViolated;
     bool public fillCapViolated;
+    bool public zeroFloorViolated;
     bool public valueLossViolated;
     bool public statusViolated;
     bool public settlementFailed;
@@ -182,8 +198,12 @@ contract StockAccountStrategyHandler is Test {
 
         amount = bound(amount, 1, available);
 
+        FeeProbe memory probe = _probeFee();
+
         vm.prank(user);
         try strategy.withdrawToken(token, amount) {} catch {}
+
+        _checkFeeValue(probe);
 
         _observe();
     }
@@ -194,8 +214,12 @@ contract StockAccountStrategyHandler is Test {
 
         if (seed % 16 != 0) return;
 
+        FeeProbe memory probe = _probeFee();
+
         vm.prank(user);
         try strategy.withdrawAllInKind() {} catch {}
+
+        _checkFeeValue(probe);
 
         _observe();
     }
@@ -287,10 +311,128 @@ contract StockAccountStrategyHandler is Test {
 
         address token = _feeToken(seed);
         if (token != address(0)) {
-            try strategy.payFees(token) {} catch {}
+            _payFeesChecked(token);
         }
 
         _observe();
+    }
+
+    /// @dev A long drought makes the fee outgrow any one balance, which is the branch that pays short
+    function payFeesAfterALongDrought(uint256 seed) external {
+        _observe();
+        callsPayFees++;
+
+        vm.warp(block.timestamp + bound(seed, 365 days, 50 * 365 days));
+
+        address token = _thinnestBalance();
+        if (token != address(0)) {
+            _payFeesChecked(token);
+        }
+
+        _observe();
+    }
+
+    /// @dev One unit of the token priced above the fee is the branch where the conversion floors to nothing
+    function payFeesTheFeeCannotBuy(uint256 seed) external {
+        _observe();
+        callsPayFees++;
+
+        address token = tokens[_stockIndex(uint8(seed))];
+        if (IERC20(token).balanceOf(address(strategy)) == 0) return;
+        if (_status(token) == IStockAccountRegistry.TokenStatus.Halted) return;
+
+        if (IERC20(tokens[0]).balanceOf(address(strategy)) > 0) {
+            try strategy.payFees(tokens[0]) {} catch {}
+        }
+
+        vm.warp(block.timestamp + 1);
+        priceChecker.setRate(tokens[0], token, 1);
+
+        if (strategy.feeDueIn(token) == 0) {
+            _payFeesChecked(token);
+        }
+
+        _syncRates();
+        _observe();
+    }
+
+    function _payFeesChecked(address token) internal {
+        uint256 elapsed = block.timestamp - strategy.lastFeePaid();
+        uint256 full = strategy.feeDueIn(token);
+        uint256 balance = IERC20(token).balanceOf(address(strategy));
+        uint256 collectedBefore = IERC20(token).balanceOf(feeRecipient);
+        FeeProbe memory probe = _probeFee();
+
+        try strategy.payFees(token) {
+            feePayments++;
+            if (elapsed > 0 && probe.due > 0 && full == 0) zeroConversionPayments++;
+            if (full > balance) cappedPayments++;
+
+            _checkFeeCredit(
+                elapsed,
+                full,
+                IERC20(token).balanceOf(feeRecipient) - collectedBefore,
+                strategy.lastFeePaid() - probe.clock
+            );
+            _checkFeeValue(probe);
+        } catch {}
+    }
+
+    function _checkFeeCredit(uint256 elapsed, uint256 full, uint256 amount, uint256 credited) internal {
+        uint256 allowed = amount >= full ? elapsed : (elapsed * amount) / full;
+
+        if (credited > allowed) {
+            feeCreditedTooMuch = true;
+            _latch("the fee clock advanced past the slice the payment covered");
+        }
+    }
+
+    function _probeFee() internal returns (FeeProbe memory probe) {
+        _observe();
+
+        probe.clock = strategy.lastFeePaid();
+        probe.elapsed = block.timestamp - probe.clock;
+        probe.due = strategy.feeDue();
+        probe.nav = strategy.getNAV();
+        probe.collected = feeValueCollected;
+    }
+
+    /**
+     * @dev Every second the clock moves has to be bought with value at the recipient. A call can pay out of
+     * several balances and each payment values the fee on a NAV the previous one has already shrunk, so the
+     * value collected can fall short of the opening rate by at most that shrink, which is collected x due / nav.
+     * The reference rates are floored integers, which costs another 2e-15 of the fee on the round trip.
+     */
+    function _checkFeeValue(FeeProbe memory probe) internal {
+        _observe();
+
+        uint256 credited = strategy.lastFeePaid() - probe.clock;
+        if (credited == 0 || probe.elapsed == 0 || probe.nav == 0) return;
+
+        uint256 collected = feeValueCollected - probe.collected;
+        uint256 paidFor = (probe.due * credited) / probe.elapsed;
+        uint256 slack = (probe.due * collected) / probe.nav + probe.due / 1e12 + VALUE_TOLERANCE;
+
+        if (collected + slack < paidFor) {
+            feeCreditWentUnbacked = true;
+            _latch("the fee clock moved further than the value collected pays for");
+        }
+    }
+
+    function _thinnestBalance() internal view returns (address token) {
+        uint256 least = type(uint256).max;
+
+        for (uint256 i = 0; i < 4; i++) {
+            uint256 balance = IERC20(tokens[i]).balanceOf(address(strategy));
+            if (balance == 0) continue;
+            if (i > 0 && _status(tokens[i]) == IStockAccountRegistry.TokenStatus.Halted) continue;
+
+            uint256 value = (balance * prices[i]) / 1e18;
+            if (value < least) {
+                least = value;
+                token = tokens[i];
+            }
+        }
     }
 
     function payFeesOnTheAsset() external {
@@ -324,6 +466,14 @@ contract StockAccountStrategyHandler is Test {
         stockRegistry.setManagementFeeBps(bounded);
 
         if (bounded > maxRateSeen) maxRateSeen = bounded;
+    }
+
+    /// @dev The mock registry takes any value, so the draw includes the 10_000 the real one refuses
+    function setSlippageCap(uint16 bps) external {
+        _observe();
+        callsSetSlippageCap++;
+
+        stockRegistry.setMaxBackendSlippageBps(uint16(bound(uint256(bps), 0, TOTAL_BPS)));
     }
 
     function submitOrder(uint8 sellIdx, uint8 buyIdx, uint256 sellAmount, uint256 buyAmountBps) external {
@@ -377,8 +527,8 @@ contract StockAccountStrategyHandler is Test {
     }
 
     function violation() external view returns (bool) {
-        return rangeViolated || fillCapViolated || valueLossViolated || statusViolated || settlementFailed
-            || feeClockWentBackwards;
+        return rangeViolated || fillCapViolated || zeroFloorViolated || valueLossViolated || statusViolated
+            || settlementFailed || feeClockWentBackwards || feeCreditedTooMuch || feeCreditWentUnbacked;
     }
 
     function _settle(address sellToken, address buyToken, uint256 sellAmount, uint256 buyAmount)
@@ -442,6 +592,11 @@ contract StockAccountStrategyHandler is Test {
         if (buyAmount < floor) {
             fillCapViolated = true;
             _latch("an order priced under the account slippage cap was accepted");
+        }
+
+        if (expectedOut > 0 && floor == 0) {
+            zeroFloorViolated = true;
+            _latch("an order was accepted against a fair price floor of zero");
         }
     }
 
@@ -659,7 +814,7 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
         startTimestamp = block.timestamp;
 
-        bytes4[] memory selectors = new bytes4[](17);
+        bytes4[] memory selectors = new bytes4[](20);
         selectors[0] = StockAccountStrategyHandler.deposit.selector;
         selectors[1] = StockAccountStrategyHandler.depositToken.selector;
         selectors[2] = StockAccountStrategyHandler.withdrawToken.selector;
@@ -670,8 +825,11 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
         selectors[7] = StockAccountStrategyHandler.warp.selector;
         selectors[8] = StockAccountStrategyHandler.payFees.selector;
         selectors[9] = StockAccountStrategyHandler.setFeeRate.selector;
+        selectors[10] = StockAccountStrategyHandler.payFeesAfterALongDrought.selector;
+        selectors[11] = StockAccountStrategyHandler.payFeesTheFeeCannotBuy.selector;
+        selectors[12] = StockAccountStrategyHandler.setSlippageCap.selector;
 
-        for (uint256 i = 10; i < selectors.length; i++) {
+        for (uint256 i = 13; i < selectors.length; i++) {
             selectors[i] = StockAccountStrategyHandler.submitOrder.selector;
         }
 
@@ -685,6 +843,10 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
     function invariant_acceptedOrdersFillWithinTheSlippageCap() public view {
         assertFalse(handler.fillCapViolated(), handler.lastViolation());
+    }
+
+    function invariant_acceptedOrdersAlwaysHaveANonZeroFairPriceFloor() public view {
+        assertFalse(handler.zeroFloorViolated(), handler.lastViolation());
     }
 
     function invariant_derivedSellReferenceMatchesAFreshQuote() public view {
@@ -709,14 +871,29 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
         assertLe(
             handler.feeValueCollected(),
-            ceiling + FEE_VALUE_TOLERANCE,
+            ceiling + FEE_VALUE_TOLERANCE + _flooringSlack(),
             "fee value collected exceeds feeBps x the largest account value ever seen x the elapsed time"
         );
+    }
+
+    /// @dev Credited seconds floor, so every payment can leave up to a second of the period chargeable again
+    function _flooringSlack() internal view returns (uint256) {
+        uint256 payments = handler.callsPayFees() + handler.callsWithdrawToken() + handler.callsWithdrawAllInKind();
+
+        return (payments * handler.maxNavSeen() * handler.maxRateSeen()) / (TOTAL_BPS * 365 days);
     }
 
     function invariant_theFeeClockOnlyEverMovesForward() public view {
         assertFalse(handler.feeClockWentBackwards(), handler.lastViolation());
         assertLe(strategy.lastFeePaid(), block.timestamp, "the fee clock is ahead of the current block");
+    }
+
+    function invariant_theFeeClockNeverOutrunsThePaymentThatMovedIt() public view {
+        assertFalse(handler.feeCreditedTooMuch(), handler.lastViolation());
+    }
+
+    function invariant_everySecondTheClockMovesIsBoughtWithValue() public view {
+        assertFalse(handler.feeCreditWentUnbacked(), handler.lastViolation());
     }
 
     function invariant_payFeesOnTheAssetNeverReverts() public {
@@ -770,6 +947,7 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
         emit log_named_uint("calls warp", handler.callsWarp());
         emit log_named_uint("calls payFees", handler.callsPayFees());
         emit log_named_uint("calls setFeeRate", handler.callsSetFeeRate());
+        emit log_named_uint("calls setSlippageCap", handler.callsSetSlippageCap());
         emit log_named_uint("calls submitOrder", handler.callsSubmitOrder());
         emit log_named_uint("orders accepted", handler.acceptedOrders());
         emit log_named_uint("orders rejected", handler.rejectedOrders());
@@ -781,6 +959,9 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
         emit log_named_uint("rejected SellExceedsBalance", handler.rejectSellExceedsBalance());
         emit log_named_uint("rejected other", handler.rejectOther());
         emit log_named_uint("max derived sell reference drift, wei", handler.maxSellValueDrift());
+        emit log_named_uint("fee payments that went through", handler.feePayments());
+        emit log_named_uint("of those, capped by the balance", handler.cappedPayments());
+        emit log_named_uint("of those, a fee the token cannot express", handler.zeroConversionPayments());
     }
 
     function testFuzz_rangeRuleBoundary(uint16 targetBps, uint256 sellBps) public {

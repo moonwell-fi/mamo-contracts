@@ -291,30 +291,52 @@ event_word() { # event_word <receipt-json> <event-signature> <word-index>
   bn "0x${data:$((2 + $3 * 64)):64}"
 }
 
-# FeesPaid(elapsed, token, amount): one token per payment, so the event is three flat words.
+# FeesPaid(credited, token, amount): the token is indexed, so the data is two flat words and the
+# credited seconds are the slice of the period the payment covered, not the whole elapsed time.
 FEES_PAID_SIG='FeesPaid(uint256,address,uint256)'
+
+# An account's FeesPaid log, refused when its shape is not the two topics and two data words of the
+# current event: a deployment still carrying the flat three-word event would otherwise decode silently.
+fees_paid_log() { # fees_paid_log <receipt-json> <account>
+  local log topics data
+  log=$(printf '%s' "$1" | jq -c --arg t "$(cast keccak "$FEES_PAID_SIG")" --arg a "$(lc "$2")" \
+    '[.logs[] | select(.topics[0] == $t) | select((.address | ascii_downcase) == $a)] | first // empty')
+  [ -n "$log" ] || return 0
+
+  topics=$(printf '%s' "$log" | jq -r '.topics | length')
+  data=$(printf '%s' "$log" | jq -r '.data')
+
+  if [ "$topics" != 2 ] || [ ${#data} != 130 ]; then
+    echo "FeesPaid carries $topics topics and ${#data} chars of data, not the 2 and 130 this decoder reads" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$log"
+}
 
 # The token an account's fee payment was taken in, empty when it paid nothing in this transaction.
 fees_paid_token() { # fees_paid_token <receipt-json> <account>
-  local data
-  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
-  [ -n "$data" ] || return 0
-  printf '0x%s\n' "${data:90:40}"
+  local log
+  log=$(fees_paid_log "$1" "$2") || return 1
+  [ -n "$log" ] || return 0
+  printf '0x%s\n' "$(printf '%s' "$log" | jq -r '.topics[1]' | cut -c27-66)"
 }
 
 # What an account's fee payment moved in one token; zero when it paid in another token or not at all.
 fees_paid() { # fees_paid <receipt-json> <account> <token>
-  local data
-  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
-  [ -n "$data" ] || { echo 0; return 0; }
-  [ "$(lc "0x${data:90:40}")" = "$(lc "$3")" ] || { echo 0; return 0; }
-  bn "0x${data:130:64}"
+  local log data
+  log=$(fees_paid_log "$1" "$2") || return 1
+  [ -n "$log" ] || { echo 0; return 0; }
+  [ "$(lc "$(fees_paid_token "$1" "$2")")" = "$(lc "$3")" ] || { echo 0; return 0; }
+  data=$(printf '%s' "$log" | jq -r '.data')
+  bn "0x${data:66:64}"
 }
 
-fees_paid_elapsed() { # fees_paid_elapsed <receipt-json> <account>
-  local data
-  data=$(event_data "$1" "$FEES_PAID_SIG" "$2")
-  [ -n "$data" ] || { echo 0; return 0; }
+fees_paid_credited() { # fees_paid_credited <receipt-json> <account>
+  local log data
+  log=$(fees_paid_log "$1" "$2") || return 1
+  [ -n "$log" ] || { echo 0; return 0; }
+  data=$(printf '%s' "$log" | jq -r '.data')
   bn "0x${data:2:64}"
 }
 

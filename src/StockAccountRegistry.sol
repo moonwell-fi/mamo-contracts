@@ -171,7 +171,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     /// @notice Sets the key the backend signs orders with, invalidating any order signed by the old one
-    function setOrderSigner(address newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+    /// @dev Stays available while paused: rotating the key is a remediation lever
+    function setOrderSigner(address newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (newSigner == orderSigner) revert AlreadySet();
         _setOrderSigner(newSigner);
     }
@@ -211,7 +212,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
     /// @param status The new status; the guardian may only tighten it, and any loosening re-probes the price
-    function setTokenStatus(address token, TokenStatus status) external whenNotPaused {
+    /// @dev Stays available while paused: halting a token is a remediation lever
+    function setTokenStatus(address token, TokenStatus status) external {
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian();
 
@@ -228,12 +230,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit TokenStatusUpdated(token, oldStatus, status);
     }
 
-    /// @notice Pauses the configuration surface in case of emergency
+    /// @notice Stops order validation and ordinary configuration changes in an emergency
+    /// @dev Rotating the order signer and tightening a token status stay available while paused,
+    ///      so that the guardian's pause does not lock out the remediation levers it exists to enable
     function pause() external onlyRole(GUARDIAN_ROLE) {
         _pause();
     }
 
-    /// @notice Unpauses the configuration surface after an emergency is resolved
+    /// @notice Resumes order validation and ordinary configuration changes after an emergency is resolved
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
     }
@@ -247,6 +251,11 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Returns every token that has ever been configured
     function allTokens() external view override returns (address[] memory) {
         return _tokens;
+    }
+
+    /// @notice Returns whether stock accounts are barred from validating orders
+    function paused() public view override(IStockAccountRegistry, Pausable) returns (bool) {
+        return super.paused();
     }
 
     function _requirePriceable(address token) internal view {
@@ -306,7 +315,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -315,7 +324,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;

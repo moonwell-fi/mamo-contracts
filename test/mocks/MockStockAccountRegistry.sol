@@ -22,6 +22,7 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint256 public override maxStrategyDeposit;
     uint16 public override managementFeeBps;
     uint16 public override maxManagementFeeBps = 200;
+    bool public override paused;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     mapping(address => bool) internal _listed;
@@ -77,6 +78,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setAsset(address value) external {
         asset = value;
+    }
+
+    function setPaused(bool value) external {
+        paused = value;
     }
 
     /// @notice Stores a token configuration, appending the token to the list the first time it is set

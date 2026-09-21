@@ -309,6 +309,57 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(order);
     }
 
+    function testRevertsOnZeroBuyAmount() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 5000), 5000);
+        priceChecker.setRate(address(aapl), address(usdc), 1);
+
+        GPv2Order.Data memory order = _order(address(aapl), address(usdc), 1e18, 0);
+
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
+        _check(order);
+    }
+
+    /// @dev A cap of 10_000 would put the fair price floor at zero, so the strategy refuses it outright
+    function testRevertsWhenTheSlippageCapIsTheFullRange() public {
+        stockRegistry.setMaxBackendSlippageBps(10_000);
+
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 3e18, 1);
+
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        _check(order);
+    }
+
+    function testOneWeiBuyAmountIsRefusedAtTheHighestAcceptedCap() public {
+        stockRegistry.setMaxBackendSlippageBps(9_999);
+        assertEq(strategy.getAccountSlippage(), 9_999, "account slippage");
+
+        GPv2Order.Data memory dust = _order(address(nvda), address(usdc), 3e18, 1);
+
+        vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
+        _check(dust);
+
+        assertTrue(
+            _check(_order(address(nvda), address(usdc), 3e18, (600e18 * 1) / 10_000)) == MAGIC_VALUE, "magic value"
+        );
+    }
+
+    function testRevertsWhenTheRegistryIsPaused() public {
+        stockRegistry.setPaused(true);
+
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+
+        vm.expectRevert(IStockAccountStrategy.RegistryPaused.selector);
+        _check(order);
+    }
+
+    function testUnpausingTheRegistryRestoresOrderValidation() public {
+        stockRegistry.setPaused(true);
+        stockRegistry.setPaused(false);
+
+        assertTrue(_check(_order(address(nvda), address(usdc), 1e18, 199e18)) == MAGIC_VALUE, "magic value");
+    }
+
     function _check(GPv2Order.Data memory order) internal view returns (bytes4) {
         bytes32 digest = order.hash(SEPARATOR);
         return strategy.isValidSignature(digest, abi.encode(order, _sign(digest)));

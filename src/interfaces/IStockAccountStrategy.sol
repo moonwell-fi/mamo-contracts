@@ -13,7 +13,7 @@ interface IStockAccountStrategy {
     event WithdrawToken(address indexed token, uint256 amount);
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
-    event FeesPaid(uint256 elapsed, address token, uint256 amount);
+    event FeesPaid(uint256 credited, address indexed token, uint256 amount);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
     error ZeroAddress();
@@ -52,6 +52,7 @@ interface IStockAccountStrategy {
     error PriceCheckFailed();
     error FeeTokenNotAllowed(address token);
     error NoBalanceForFee(address token);
+    error RegistryPaused();
 
     function deposit(uint256 amount) external;
 
