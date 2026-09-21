@@ -18,8 +18,12 @@ contract StockAccountsConfig is Script {
     ///      wrong type in the right position does not: an address written as "" is encoded as a string
     ///      and reads back as the ABI offset, 0x...C0, a nonzero garbage address. _validate below is
     ///      what catches that. A PoolTwap entry uses the zero feed and a zero heartbeat
+    /// @dev `decimals` is carried in the config rather than read off the token because the four B20
+    ///      stocks are node-native: their onchain code is the single reserved byte 0xEF, which revm
+    ///      refuses to execute, so `decimals()` cannot be called on them from a fork simulation
     struct TokenListEntry {
         address chainlinkFeed;
+        uint8 decimals;
         uint256 heartbeat;
         address pool;
         string source;
@@ -117,6 +121,7 @@ contract StockAccountsConfig is Script {
 
         require(entry.token != address(0), string.concat("Token list: zero token, ", symbol));
         require(entry.pool != address(0), string.concat("Token list: zero pool, ", symbol));
+        require(entry.decimals != 0, string.concat("Token list: zero decimals, ", symbol));
 
         bytes32 source = keccak256(bytes(entry.source));
         bool isChainlink = source == keccak256(bytes("Chainlink"));

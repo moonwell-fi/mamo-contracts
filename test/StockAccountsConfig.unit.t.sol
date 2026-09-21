@@ -40,6 +40,9 @@ contract StockAccountsConfigUnitTest is Test {
             assertEq(entries[i].symbol, symbols[i], "symbol");
             assertEq(entries[i].token, tokens[i], "token");
             assertEq(entries[i].pool, pools[i], "pool");
+            // Carried in the config because the B20 tokens cannot be read from a fork, and used by
+            // proposal 016's stand-in and by every one-whole-token probe
+            assertEq(entries[i].decimals, 8, "decimals");
         }
     }
 
