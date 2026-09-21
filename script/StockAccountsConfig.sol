@@ -12,6 +12,21 @@ import {stdJson} from "@forge-std/StdJson.sol";
 contract StockAccountsConfig is Script {
     using stdJson for string;
 
+    /// @notice A token to list on the stock registry, fields alphabetized to match the JSON
+    /// @dev vm.parseJson types a JSON value by its shape and encodes the keys in alphabetical order, so
+    ///      every entry has to carry every key. A missing key does revert the decode, but a key of the
+    ///      wrong type in the right position does not: an address written as "" is encoded as a string
+    ///      and reads back as the ABI offset, 0x...C0, a nonzero garbage address. _validate below is
+    ///      what catches that. A PoolTwap entry uses the zero feed and a zero heartbeat
+    struct TokenListEntry {
+        address chainlinkFeed;
+        uint256 heartbeat;
+        address pool;
+        string source;
+        string symbol;
+        address token;
+    }
+
     /// @notice Deployment configuration, fields alphabetized to match the JSON
     struct DeploymentConfig {
         string admin;
@@ -32,9 +47,9 @@ contract StockAccountsConfig is Script {
         uint16 maxWithdrawSlippageBps;
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
+        string orderSigner;
         /// @dev Bootstrap only: satisfies the registry constructor, then setPriceChecker replaces it
         string placeholderPriceChecker;
-        bytes32 requiredAppDataHash;
         uint32 twapWindow;
     }
 
@@ -60,8 +75,8 @@ contract StockAccountsConfig is Script {
         config.maxWithdrawSlippageBps = uint16(json.readUint(".maxWithdrawSlippageBps"));
         config.minStrategyDeposit = json.readUint(".minStrategyDeposit");
         config.minTargetBps = uint16(json.readUint(".minTargetBps"));
+        config.orderSigner = json.readString(".orderSigner");
         config.placeholderPriceChecker = json.readString(".placeholderPriceChecker");
-        config.requiredAppDataHash = json.readBytes32(".requiredAppDataHash");
         config.twapWindow = uint32(json.readUint(".twapWindow"));
 
         require(config.chainId == block.chainid, "Config chain id does not match the current chain");
@@ -70,5 +85,45 @@ contract StockAccountsConfig is Script {
     /// @notice The full deployment configuration
     function getConfig() public view returns (DeploymentConfig memory) {
         return config;
+    }
+
+    /// @notice The tokens to list on the stock registry, from config/stock-accounts/<chainId>.json
+    /// @dev A missing or empty list is fatal rather than an empty array: every consumer loops over it,
+    ///      and an empty loop is a deploy that lists nothing and a readiness run that checks nothing.
+    ///      Every entry is validated here, so a malformed one fails before any consumer reads it
+    function loadTokenList() public view returns (TokenListEntry[] memory) {
+        string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
+        require(vm.isFile(path), string.concat("Token list: no such file, ", path));
+
+        bytes memory raw = vm.parseJson(vm.readFile(path), ".tokens");
+        require(raw.length != 0, string.concat("Token list: empty .tokens in ", path));
+
+        TokenListEntry[] memory entries = abi.decode(raw, (TokenListEntry[]));
+        for (uint256 i = 0; i < entries.length; i++) {
+            _validate(entries[i]);
+        }
+        return entries;
+    }
+
+    /// @notice Rejects a token list entry the deploy would otherwise carry into an admin batch
+    /// @dev The decode cannot do this on its own: a mistyped value reads back as garbage rather than
+    ///      reverting, and a mis-cased `source` compares unequal to both legal strings, which would
+    ///      drop the entry out of pool readiness while still listing it as pool-priced
+    function _validate(TokenListEntry memory entry) internal pure {
+        string memory symbol = entry.symbol;
+
+        require(entry.token != address(0), string.concat("Token list: zero token, ", symbol));
+        require(entry.pool != address(0), string.concat("Token list: zero pool, ", symbol));
+
+        bytes32 source = keccak256(bytes(entry.source));
+        bool isChainlink = source == keccak256(bytes("Chainlink"));
+        require(
+            isChainlink || source == keccak256(bytes("PoolTwap")), string.concat("Token list: bad source, ", symbol)
+        );
+
+        require(
+            (entry.chainlinkFeed != address(0)) == isChainlink, string.concat("Token list: feed vs source, ", symbol)
+        );
+        require((entry.heartbeat != 0) == isChainlink, string.concat("Token list: heartbeat vs source, ", symbol));
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
@@ -16,10 +17,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Guardian role for emergency pause and for tightening token status
     bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN_ROLE");
 
+    /// @notice Highest annual management fee the admin may set, in basis points
+    uint16 public constant override maxManagementFeeBps = 200;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
+        address asset;
         address guardian;
+        uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
         uint16 maxDeviationBps;
         uint8 maxPositions;
@@ -27,23 +33,25 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         uint16 maxWithdrawSlippageBps;
         uint256 minStrategyDeposit;
         uint16 minTargetBps;
+        address orderSigner;
         ISlippagePriceChecker priceChecker;
-        bytes32 requiredAppDataHash;
         uint32 twapWindow;
     }
 
     ISwapRouter public override aerodromeRouter;
     ISlippagePriceChecker public override priceChecker;
+    address public override asset;
 
     uint8 public override maxPositions;
     uint16 public override minTargetBps;
     uint16 public override maxDeviationBps;
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
+    uint16 public override managementFeeBps;
     uint32 public override twapWindow;
+    address public override orderSigner;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
-    bytes32 public override requiredAppDataHash;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     address[] internal _tokens;
@@ -58,7 +66,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
-    event RequiredAppDataHashUpdated(bytes32 indexed oldHash, bytes32 indexed newHash);
+    event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
+    event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
 
@@ -66,6 +75,9 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     constructor(Config memory config) {
         if (config.admin == address(0)) revert ZeroAddress();
         if (config.guardian == address(0)) revert ZeroAddress();
+        if (config.asset == address(0)) revert ZeroAddress();
+
+        asset = config.asset;
 
         _grantRole(DEFAULT_ADMIN_ROLE, config.admin);
         _grantRole(GUARDIAN_ROLE, config.guardian);
@@ -80,7 +92,8 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setTwapWindow(config.twapWindow);
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
-        _setRequiredAppDataHash(config.requiredAppDataHash);
+        _setOrderSigner(config.orderSigner);
+        _setManagementFeeBps(config.managementFeeBps);
     }
 
     /// @notice Sets the Aerodrome router used by stock accounts
@@ -97,6 +110,10 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     {
         if (address(newPriceChecker) == address(priceChecker)) revert AlreadySet();
         _setPriceChecker(newPriceChecker);
+
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokenConfig[_tokens[i]].status != TokenStatus.Halted) _requirePriceable(_tokens[i]);
+        }
     }
 
     /// @notice Sets the maximum number of positions a stock account may hold
@@ -130,9 +147,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     /// @notice Sets the TWAP observation window in seconds
+    /// @param newTwapWindow The new window; it takes effect first, so every non-halted token is re-probed
+    ///        against it and a window no pool can serve is refused
     function setTwapWindow(uint32 newTwapWindow) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newTwapWindow == twapWindow) revert AlreadySet();
         _setTwapWindow(newTwapWindow);
+
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokenConfig[_tokens[i]].status != TokenStatus.Halted) _requirePriceable(_tokens[i]);
+        }
     }
 
     /// @notice Sets the minimum total value a single stock account must hold after a deposit
@@ -147,15 +170,24 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMaxStrategyDeposit(newMaxDeposit);
     }
 
-    /// @notice Sets the CowSwap app data hash that orders must carry
-    function setRequiredAppDataHash(bytes32 newHash) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
-        if (newHash == requiredAppDataHash) revert AlreadySet();
-        _setRequiredAppDataHash(newHash);
+    /// @notice Sets the key the backend signs orders with, invalidating any order signed by the old one
+    /// @dev Stays available while paused: rotating the key is a remediation lever
+    function setOrderSigner(address newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (newSigner == orderSigner) revert AlreadySet();
+        _setOrderSigner(newSigner);
+    }
+
+    /// @notice Sets the annual management fee every stock account charges, in basis points
+    function setManagementFeeBps(uint16 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newFeeBps == managementFeeBps) revert AlreadySet();
+        _setManagementFeeBps(newFeeBps);
     }
 
     /// @notice Lists a new token as tradeable by stock accounts
     /// @param token The token to list
-    /// @param cfg The pricing source and venue recorded for the token
+    /// @param cfg The pricing source and venue recorded for the token. cfg.chainlinkFeed is advisory
+    ///        bookkeeping only. A Chainlink token is priced through the audited SlippagePriceChecker,
+    ///        whose feeds its own owner configures; this field is not read.
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
         if (cfg.status != TokenStatus.Active) revert MustListAsActive();
@@ -172,13 +204,17 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _tokenConfig[token] = cfg;
         _tokens.push(token);
 
+        _requirePriceable(token);
+
         emit TokenListed(token, cfg);
     }
 
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
-    /// @param status The new status; the guardian may only tighten it
-    function setTokenStatus(address token, TokenStatus status) external whenNotPaused {
+    /// @param status The new status; the guardian may only tighten it, and any loosening re-probes the price
+    /// @dev Tightening stays available while paused, because halting a token is a remediation lever;
+    ///      loosening is frozen, because it is the action that puts a token back into every account's value
+    function setTokenStatus(address token, TokenStatus status) external {
         bool isAdmin = hasRole(DEFAULT_ADMIN_ROLE, msg.sender);
         if (!isAdmin && !hasRole(GUARDIAN_ROLE, msg.sender)) revert NotAdminOrGuardian();
 
@@ -190,15 +226,22 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
 
         _tokenConfig[token].status = status;
 
+        if (status < oldStatus) {
+            _requireNotPaused();
+            _requirePriceable(token);
+        }
+
         emit TokenStatusUpdated(token, oldStatus, status);
     }
 
-    /// @notice Pauses the configuration surface in case of emergency
+    /// @notice Stops order validation and ordinary configuration changes in an emergency
+    /// @dev Rotating the order signer and tightening a token status stay available while paused,
+    ///      so that the guardian's pause does not lock out the remediation levers it exists to enable
     function pause() external onlyRole(GUARDIAN_ROLE) {
         _pause();
     }
 
-    /// @notice Unpauses the configuration surface after an emergency is resolved
+    /// @notice Resumes order validation and ordinary configuration changes after an emergency is resolved
     function unpause() external onlyRole(GUARDIAN_ROLE) {
         _unpause();
     }
@@ -212,6 +255,20 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Returns every token that has ever been configured
     function allTokens() external view override returns (address[] memory) {
         return _tokens;
+    }
+
+    /// @notice Returns whether stock accounts are barred from validating orders
+    function paused() public view override(IStockAccountRegistry, Pausable) returns (bool) {
+        return super.paused();
+    }
+
+    function _requirePriceable(address token) internal view {
+        uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
+        try priceChecker.getExpectedOut(oneToken, token, asset) returns (uint256 quote) {
+            if (quote == 0) revert TokenNotPriceable(token);
+        } catch {
+            revert TokenNotPriceable(token);
+        }
     }
 
     function _setAerodromeRouter(ISwapRouter newRouter) internal {
@@ -262,7 +319,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -271,7 +328,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;
@@ -302,10 +359,21 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit MaxStrategyDepositUpdated(oldValue, newMaxDeposit);
     }
 
-    function _setRequiredAppDataHash(bytes32 newHash) internal {
-        bytes32 oldHash = requiredAppDataHash;
-        requiredAppDataHash = newHash;
+    function _setOrderSigner(address newSigner) internal {
+        if (newSigner == address(0)) revert ZeroAddress();
 
-        emit RequiredAppDataHashUpdated(oldHash, newHash);
+        address oldSigner = orderSigner;
+        orderSigner = newSigner;
+
+        emit OrderSignerUpdated(oldSigner, newSigner);
+    }
+
+    function _setManagementFeeBps(uint16 newFeeBps) internal {
+        if (newFeeBps > maxManagementFeeBps) revert InvalidManagementFee();
+
+        uint16 oldValue = managementFeeBps;
+        managementFeeBps = newFeeBps;
+
+        emit ManagementFeeBpsUpdated(oldValue, newFeeBps);
     }
 }

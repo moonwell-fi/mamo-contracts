@@ -9,6 +9,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 contract MockStockAccountRegistry is IStockAccountRegistry {
     ISwapRouter public override aerodromeRouter;
     ISlippagePriceChecker public override priceChecker;
+    address public override asset;
 
     uint8 public override maxPositions;
     uint16 public override minTargetBps;
@@ -16,9 +17,12 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint16 public override maxBackendSlippageBps;
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
+    address public override orderSigner;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
-    bytes32 public override requiredAppDataHash;
+    uint16 public override managementFeeBps;
+    uint16 public override maxManagementFeeBps = 200;
+    bool public override paused;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     mapping(address => bool) internal _listed;
@@ -56,8 +60,12 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
         maxWithdrawSlippageBps = value;
     }
 
-    function setRequiredAppDataHash(bytes32 value) external {
-        requiredAppDataHash = value;
+    function setManagementFeeBps(uint16 value) external {
+        managementFeeBps = value;
+    }
+
+    function setOrderSigner(address value) external {
+        orderSigner = value;
     }
 
     function setAerodromeRouter(ISwapRouter value) external {
@@ -66,6 +74,14 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setPriceChecker(ISlippagePriceChecker value) external {
         priceChecker = value;
+    }
+
+    function setAsset(address value) external {
+        asset = value;
+    }
+
+    function setPaused(bool value) external {
+        paused = value;
     }
 
     /// @notice Stores a token configuration, appending the token to the list the first time it is set

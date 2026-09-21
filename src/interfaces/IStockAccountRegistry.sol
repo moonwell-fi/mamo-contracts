@@ -21,8 +21,6 @@ interface IStockAccountRegistry {
         TokenStatus status;
         PriceSource source;
         address pool;
-        /// @dev Advisory bookkeeping only. A Chainlink token is priced through the audited
-        ///      SlippagePriceChecker, whose feeds its own owner configures; this field is not read.
         address chainlinkFeed;
     }
 
@@ -33,6 +31,7 @@ interface IStockAccountRegistry {
     error InvalidSlippageCap();
     error InvalidTwapWindow();
     error AlreadySet();
+    error InvalidManagementFee();
     error NotAContract(address account);
     error TokenAlreadyListed(address token);
     error MustListAsActive();
@@ -42,10 +41,15 @@ interface IStockAccountRegistry {
     error InvalidStatus();
     error NotAdminOrGuardian();
     error GuardianCanOnlyLower();
+    error TokenNotPriceable(address token);
+
+    function asset() external view returns (address);
 
     function tokenConfig(address token) external view returns (TokenConfig memory);
 
     function allTokens() external view returns (address[] memory);
+
+    function paused() external view returns (bool);
 
     function maxPositions() external view returns (uint8);
 
@@ -63,7 +67,11 @@ interface IStockAccountRegistry {
 
     function maxWithdrawSlippageBps() external view returns (uint16);
 
-    function requiredAppDataHash() external view returns (bytes32);
+    function managementFeeBps() external view returns (uint16);
+
+    function maxManagementFeeBps() external view returns (uint16);
+
+    function orderSigner() external view returns (address);
 
     function aerodromeRouter() external view returns (ISwapRouter);
 

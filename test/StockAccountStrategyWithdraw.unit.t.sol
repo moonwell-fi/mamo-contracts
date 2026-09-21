@@ -57,6 +57,8 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
 
     function testWithdrawSellsProRataAboveIdle() public {
         (,, uint256 referenceValue,) = strategy.previewWithdraw(1_500e18, 100);
+        // Every other assertion here measures the sale against itself
+        assertApproxEqAbs(referenceValue, (uint256(1_000e18) * 10_000) / 9_900, 1e3, "grossed up by the cap");
 
         vm.expectEmit(address(strategy));
         emit IStockAccountStrategy.Withdraw(1_500e18, referenceValue);
@@ -82,6 +84,31 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         vm.prank(user);
         vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
         strategy.withdraw(1_500e18, 501);
+    }
+
+    /// @dev A cap of 10_000 used to divide by zero in the gross up, taking every withdrawal down with it
+    function testWithdrawRevertsAtAFullSlippageCap() public {
+        stockRegistry.setMaxWithdrawSlippageBps(10_000);
+
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        strategy.withdraw(1_500e18, 10_000);
+
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        strategy.withdrawAll(10_000);
+
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        strategy.previewWithdraw(1_500e18, 10_000);
+    }
+
+    function testWithdrawSucceedsAtTheHighestAcceptedSlippageCap() public {
+        stockRegistry.setMaxWithdrawSlippageBps(9_999);
+
+        vm.prank(user);
+        strategy.withdraw(1_500e18, 9_999);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
     }
 
     function testWithdrawRevertsWhenValueIsInsufficient() public {
