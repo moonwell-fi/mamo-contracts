@@ -2,7 +2,7 @@ DEPLOY_ENV ?= 8453_TESTING
 ADDRESSES_PATH ?= ./script/stock-accounts/addresses-dryrun
 
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountRouterSwapIntegrationTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
@@ -48,6 +48,11 @@ fee-splitter:
 stock-price-checker:
 	forge test --ffi --match-contract StockAccountPriceChecker -vvv
 
+# StockAccountRouterSwap (real-router coverage): self-forks Base at a PINNED block in setUp, same as the
+# price-checker suite above (no --fork-url), and needs BASE_RPC_URL.
+stock-router-swap:
+	forge test --ffi --match-contract StockAccountRouterSwapIntegrationTest -vvv
+
 deploy-stock-accounts:
 	rm -rf script/stock-accounts/addresses-dryrun && mkdir -p script/stock-accounts/addresses-dryrun && cp addresses/*.json script/stock-accounts/addresses-dryrun/
 	ADDRESSES_PATH=$(ADDRESSES_PATH) DEPLOY_ENV=$(DEPLOY_ENV) ADMIN_MODE=calldata forge script script/DeployStockAccounts.s.sol:DeployStockAccounts --fork-url base --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 -vv
@@ -63,6 +68,6 @@ tenderly-stock-accounts-scenarios:
 	./script/stock-accounts/scenarios/run.sh
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker stock-router-swap
 
-.PHONY: stock-price-checker deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
+.PHONY: stock-router-swap stock-price-checker deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all
