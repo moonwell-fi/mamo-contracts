@@ -249,11 +249,6 @@ contract DeployStockAccounts is Script {
     function _listTokens(address stockRegistry) internal {
         StockAccountsConfig.TokenListEntry[] memory entries = configLoader.loadTokenList();
 
-        if (entries.length == 0) {
-            console.log("step 8: no tokens to list");
-            return;
-        }
-
         for (uint256 i = 0; i < entries.length; i++) {
             bool isChainlink = keccak256(bytes(entries[i].source)) == keccak256(bytes("Chainlink"));
 

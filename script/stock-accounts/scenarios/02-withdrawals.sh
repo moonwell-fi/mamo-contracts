@@ -34,10 +34,13 @@ assert_eq "Withdraw event reports zero sold" "$(event_word "$RECEIPT" 'Withdraw(
 PREVIEW=$(callraw "$ACCT" 'previewWithdraw(uint256,uint16)(address[],uint256[],uint256,uint256)' "$BIG_WITHDRAW" "$SLIPPAGE")
 PREVIEW_TOKEN=$(list_at "$(printf '%s' "$PREVIEW" | sed -n 1p)" 0)
 PREVIEW_AMOUNT=$(list_at "$(printf '%s' "$PREVIEW" | sed -n 2p)" 0)
+PREVIEW_REF=$(printf '%s' "$PREVIEW" | sed -n 3p | awk '{print $1}')
 PREVIEW_MIN=$(printf '%s' "$PREVIEW" | sed -n 4p | awk '{print $1}')
 
 assert_eq "preview plans a NVDAc sale" "$PREVIEW_TOKEN" "$NVDA"
-assert_gt "preview floors the proceeds" "$PREVIEW_MIN" 0
+assert_gt "preview values the sale it plans" "$PREVIEW_REF" 0
+assert_eq "preview floors the proceeds at the reference less the slippage" \
+  "$PREVIEW_MIN" "$(bn "$PREVIEW_REF * (10000 - $SLIPPAGE) // 10000")"
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 OWNER_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_D")

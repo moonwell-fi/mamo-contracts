@@ -50,6 +50,7 @@ contract StockAccountsPoolReadiness is Script {
         );
 
         (string[] memory symbols, address[] memory pools) = _targets();
+        require(pools.length != 0, "Pool readiness: no pools to check");
 
         for (uint256 i = 0; i < pools.length; i++) {
             _check(symbols[i], ICLPool(pools[i]), twapWindow, required);

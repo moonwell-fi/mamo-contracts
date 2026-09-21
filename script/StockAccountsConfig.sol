@@ -88,14 +88,15 @@ contract StockAccountsConfig is Script {
     }
 
     /// @notice The tokens to list on the stock registry, from config/stock-accounts/<chainId>.json
-    /// @dev Returns an empty array when the file is missing or its `.tokens` array is empty. Every
-    ///      entry is validated here, so a malformed one fails before any consumer reads it
+    /// @dev A missing or empty list is fatal rather than an empty array: every consumer loops over it,
+    ///      and an empty loop is a deploy that lists nothing and a readiness run that checks nothing.
+    ///      Every entry is validated here, so a malformed one fails before any consumer reads it
     function loadTokenList() public view returns (TokenListEntry[] memory) {
         string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
-        if (!vm.isFile(path)) return new TokenListEntry[](0);
+        require(vm.isFile(path), string.concat("Token list: no such file, ", path));
 
         bytes memory raw = vm.parseJson(vm.readFile(path), ".tokens");
-        if (raw.length == 0) return new TokenListEntry[](0);
+        require(raw.length != 0, string.concat("Token list: empty .tokens in ", path));
 
         TokenListEntry[] memory entries = abi.decode(raw, (TokenListEntry[]));
         for (uint256 i = 0; i < entries.length; i++) {

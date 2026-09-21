@@ -1041,8 +1041,8 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
         registry.setTwapWindow(3600);
 
         assertEq(registry.twapWindow(), 3600, "window mismatch");
-        assertGt(checker.getExpectedOut(1e8, address(stock), address(usdc)), 0, "stock should still quote");
-        assertGt(checker.getExpectedOut(1e8, address(alt), address(usdc)), 0, "alt should still quote");
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8, "stock should still quote");
+        assertEq(checker.getExpectedOut(1e18, address(alt), address(usdc)), 1e18, "alt should still quote");
     }
 
     function testSetTwapWindowRevertsWhenAListingBecomesUnpriceable() public {
@@ -1058,7 +1058,7 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
             uint256(IStockAccountRegistry.TokenStatus.Active),
             "status should be unchanged"
         );
-        assertGt(checker.getExpectedOut(1e8, address(stock), address(usdc)), 0, "stock should still quote");
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8, "stock should still quote");
     }
 
     function testSetTwapWindowSkipsHaltedListings() public {

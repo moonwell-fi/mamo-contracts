@@ -89,6 +89,7 @@ rpc() { # rpc <method> <params-json>
   local out
   out=$(curl -sS -m 120 -X POST "$VNET" -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}")
+  [ -n "$out" ] || { echo "rpc $1 returned an empty body" >&2; return 1; }
   if [ "$(printf '%s' "$out" | jq -r 'has("error")')" = "true" ]; then
     echo "rpc $1 failed: $out" >&2
     return 1
@@ -104,8 +105,14 @@ body = [{'jsonrpc': '2.0', 'id': i, 'method': 'eth_call', 'params': [{'to': to, 
         for i, (to, data) in enumerate(calls)]
 if body:
     request = urllib.request.Request(rpc, json.dumps(body).encode(), {'content-type': 'application/json'})
-    for reply in sorted(json.load(urllib.request.urlopen(request, timeout=120)), key=lambda r: r['id']):
-        print(reply.get('result', '0x'))
+    replies = sorted(json.load(urllib.request.urlopen(request, timeout=120)), key=lambda r: r['id'])
+    # One line per call, or the caller pastes the answers against the wrong rows. 0x stays a reverted
+    # call: that is how an unusable pool is told from a usable one.
+    if len(replies) != len(calls):
+        sys.exit('batch_call: %d replies for %d calls' % (len(replies), len(calls)))
+    for reply in replies:
+        result = reply.get('result')
+        print(result if isinstance(result, str) else '0x')
 PYSRC
 
 # One http round trip for many eth_calls. Reads "to data" pairs on stdin, prints one result per line.
@@ -264,7 +271,10 @@ ensure_approve() { # ensure_approve <owner> <token> <spender>
 token_status() { call "$STOCK_REGISTRY" 'tokenConfig(address)(uint8,uint8,address,address)' "$1"; }
 
 ensure_listed() { # ensure_listed <token> <pool>
-  [ "$(token_status "$1")" != "0" ] && return 0
+  local status
+  status=$(token_status "$1")
+  [ -n "$status" ] || { echo "tokenConfig($1) on $STOCK_REGISTRY read nothing; cannot tell whether it is listed" >&2; exit 1; }
+  [ "$status" != "0" ] && return 0
   send "$DEPLOYER" "$STOCK_REGISTRY" 'listToken(address,(uint8,uint8,address,address))' \
     "$1" "(1,0,$2,0x0000000000000000000000000000000000000000)" >/dev/null
 }
