@@ -265,6 +265,26 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(_order(address(aapl), address(usdc), 1e18, 0));
     }
 
+    /// @dev A cap of 10_000 would put the fair price floor at zero, so the strategy refuses it outright
+    function testRevertsWhenTheSlippageCapIsTheFullRange() public {
+        stockRegistry.setMaxBackendSlippageBps(10_000);
+
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        _check(_order(address(nvda), address(usdc), 3e18, 1));
+    }
+
+    function testOneWeiBuyAmountIsRefusedAtTheHighestAcceptedCap() public {
+        stockRegistry.setMaxBackendSlippageBps(9_999);
+        assertEq(strategy.getAccountSlippage(), 9_999, "account slippage");
+
+        vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
+        _check(_order(address(nvda), address(usdc), 3e18, 1));
+
+        assertTrue(
+            _check(_order(address(nvda), address(usdc), 3e18, (600e18 * 1) / 10_000)) == MAGIC_VALUE, "magic value"
+        );
+    }
+
     function testRevertsWhenTheRegistryIsPaused() public {
         stockRegistry.setPaused(true);
 

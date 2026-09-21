@@ -283,7 +283,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -292,7 +292,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;
