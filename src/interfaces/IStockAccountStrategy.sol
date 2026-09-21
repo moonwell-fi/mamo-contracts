@@ -76,6 +76,8 @@ interface IStockAccountStrategy {
 
     function payFees(address token) external;
 
+    function payFeesFromAny() external;
+
     function getNAV() external view returns (uint256 valueUsdc);
 
     function getWeights()

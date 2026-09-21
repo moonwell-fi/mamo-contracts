@@ -511,4 +511,110 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(nvda.balanceOf(user), held, "halted token not withdrawn");
         assertEq(usdc.balanceOf(feeRecipient) - recipientBefore, due, "fee not paid from USDC");
     }
+
+    function testWithdrawAllInKindSurvivesAHoldingThatCannotBePriced() public {
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+
+        vm.warp(startTime + 30 days);
+        priceChecker.setRate(address(msft), address(usdc), 0);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(usdc.balanceOf(user), 1_000e18, "user asset");
+        assertEq(nvda.balanceOf(user), 10e18, "user nvda");
+        assertEq(aapl.balanceOf(user), 20e18, "user aapl");
+        assertEq(msft.balanceOf(user), 100e18, "user msft");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing could be charged");
+        assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
+    }
+
+    function testWithdrawTokenSurvivesAHoldingThatCannotBePricedAndTheFeeStaysCollectable() public {
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+
+        vm.warp(startTime + 30 days);
+        priceChecker.setRate(address(msft), address(usdc), 0);
+
+        vm.prank(user);
+        strategy.withdrawToken(address(msft), 100e18);
+
+        assertEq(msft.balanceOf(user), 100e18, "user msft");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing could be charged");
+        assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
+
+        priceChecker.setRate(address(msft), address(usdc), 50e18);
+
+        uint256 due = strategy.feeDue();
+        assertEq(due, _feeValue(5_000e18, 30 days), "the whole period is still owed");
+
+        strategy.payFees(address(usdc));
+
+        assertEq(usdc.balanceOf(feeRecipient), due, "and it is collected once the price is back");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the clock catches up");
+    }
+
+    function testInKindExitStillPaysWhenTheUnpriceableHoldingIsHalted() public {
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+
+        _setStatus(address(msft), IStockAccountRegistry.TokenStatus.Halted);
+        priceChecker.setRate(address(msft), address(usdc), 0);
+
+        vm.warp(startTime + 30 days);
+
+        uint256 due = strategy.feeDue();
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(msft.balanceOf(user), 100e18, "user msft");
+        assertEq(usdc.balanceOf(feeRecipient), due, "the fee is charged on what can be priced");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
+    }
+
+    function testWithdrawWhenIdleExactlyCoversStillPaysTheFee() public {
+        vm.warp(startTime + 30 days);
+
+        uint256 due = strategy.feeDue();
+
+        vm.prank(user);
+        strategy.withdraw(1_000e18, 100);
+
+        assertEq(usdc.balanceOf(user), 1_000e18, "user asset");
+        assertEq(usdc.balanceOf(feeRecipient), due, "asset fee");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
+        assertLt(nvda.balanceOf(address(strategy)), 10e18, "the fee was sold for");
+    }
+
+    function testWithdrawAtAZeroToleranceCoversTheFee() public {
+        vm.warp(startTime + 30 days);
+
+        uint256 due = strategy.feeDue();
+
+        vm.prank(user);
+        strategy.withdraw(1_500e18, 0);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+        assertEq(usdc.balanceOf(feeRecipient), due, "asset fee");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
+    }
+
+    function testPreviewWithdrawAgreesWithTheWithdrawalOnWhetherSellsAreNeeded() public {
+        vm.warp(startTime + 30 days);
+
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_000e18, 100);
+
+        assertEq(tokens.length, 2, "the preview plans the sells the fee needs");
+
+        vm.prank(user);
+        strategy.withdraw(1_000e18, 100);
+
+        assertEq(nvda.balanceOf(address(strategy)), 10e18 - amounts[0], "nvda sold");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18 - amounts[1], "aapl sold");
+    }
 }
