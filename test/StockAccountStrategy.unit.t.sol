@@ -6,6 +6,7 @@ import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MockERC20} from "./MockERC20.sol";
@@ -89,7 +90,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
     }
 
     function testInitializeCannotRunTwice() public {
-        vm.expectRevert();
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
         strategy.initialize(_defaultParams());
     }
 

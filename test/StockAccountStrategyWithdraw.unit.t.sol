@@ -57,6 +57,8 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
 
     function testWithdrawSellsProRataAboveIdle() public {
         (,, uint256 referenceValue,) = strategy.previewWithdraw(1_500e18, 100);
+        // Every other assertion here measures the sale against itself
+        assertApproxEqAbs(referenceValue, (uint256(1_000e18) * 10_000) / 9_900, 1e3, "grossed up by the cap");
 
         vm.expectEmit(address(strategy));
         emit IStockAccountStrategy.Withdraw(1_500e18, referenceValue);

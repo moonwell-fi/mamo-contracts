@@ -250,9 +250,15 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         );
     }
 
-    function testComputeStrategyAddressIsDeterministic() public view {
-        assertEq(factory.computeStrategyAddress(user), factory.computeStrategyAddress(user), "stable");
-        assertTrue(factory.computeStrategyAddress(user) != factory.computeStrategyAddress(stranger), "per user");
+    /// @dev Pinned across another user's deployment: the view compared to itself holds of any implementation
+    function testComputeStrategyAddressIsDeterministic() public {
+        address predicted = factory.computeStrategyAddress(user);
+        assertTrue(predicted != factory.computeStrategyAddress(stranger), "per user");
+
+        vm.prank(backend);
+        factory.createStrategyForUser(stranger, _entries(6000, 3000), 1000);
+
+        assertEq(factory.computeStrategyAddress(user), predicted, "stable");
     }
 
     function testBackendCreatesStrategyForUser() public {

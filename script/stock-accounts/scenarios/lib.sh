@@ -22,8 +22,21 @@ export FOUNDRY_CACHE_PATH=${FOUNDRY_CACHE_PATH:-cache}
 
 [ -f "$MANIFEST" ] || { echo "missing $MANIFEST; run 'make tenderly-stock-accounts' first" >&2; exit 1; }
 
-book() { jq -r --arg n "$1" '.[] | select(.name == $n) | .addr' "$ADDRESS_BOOK"; }
-mani() { jq -r --arg n "$1" '.[$n]' "$MANIFEST"; }
+# Both lookups are fatal on a miss: jq prints "" or "null" and exits 0, which would otherwise travel
+# on as an RPC url or a call target.
+book() { # book <name> -> its address in addresses/8453.json
+  local addr
+  addr=$(jq -r --arg n "$1" '.[] | select(.name == $n) | .addr' "$ADDRESS_BOOK")
+  [ -n "$addr" ] && [ "$addr" != "null" ] || { echo "no $1 in $ADDRESS_BOOK" >&2; exit 1; }
+  printf '%s\n' "$addr"
+}
+
+mani() { # mani <key> -> its value in the vnet manifest
+  local value
+  value=$(jq -r --arg n "$1" '.[$n]' "$MANIFEST")
+  [ -n "$value" ] && [ "$value" != "null" ] || { echo "no $1 in $MANIFEST" >&2; exit 1; }
+  printf '%s\n' "$value"
+}
 
 VNET=$(mani rpc)
 DEPLOYER=$(mani testUser)
@@ -41,7 +54,8 @@ RELAYER=$(book COWSWAP_VAULT_RELAYER)
 COW_AUTHENTICATOR=0x2c4c28DDBdAc9C5E7055b4C863b72eA0149D8aFE
 COW_AUTH_MANAGER=0xA03be496e67Ec29bC62F01a428683D7F9c204930
 
-# The one token the deploy config lists; its 0.05% Slipstream pool against USDC, tick spacing 10.
+# The stock token the scenarios trade, one of the four the deploy lists; its Slipstream pool against
+# USDC, tick spacing 10.
 NVDA=0xb20000000000000000000078ee7ce2fE4908108C
 NVDA_POOL=0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9
 
@@ -75,6 +89,7 @@ rpc() { # rpc <method> <params-json>
   local out
   out=$(curl -sS -m 120 -X POST "$VNET" -H 'content-type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}")
+  [ -n "$out" ] || { echo "rpc $1 returned an empty body" >&2; return 1; }
   if [ "$(printf '%s' "$out" | jq -r 'has("error")')" = "true" ]; then
     echo "rpc $1 failed: $out" >&2
     return 1
@@ -90,8 +105,14 @@ body = [{'jsonrpc': '2.0', 'id': i, 'method': 'eth_call', 'params': [{'to': to, 
         for i, (to, data) in enumerate(calls)]
 if body:
     request = urllib.request.Request(rpc, json.dumps(body).encode(), {'content-type': 'application/json'})
-    for reply in sorted(json.load(urllib.request.urlopen(request, timeout=120)), key=lambda r: r['id']):
-        print(reply.get('result', '0x'))
+    replies = sorted(json.load(urllib.request.urlopen(request, timeout=120)), key=lambda r: r['id'])
+    # One line per call, or the caller pastes the answers against the wrong rows. 0x stays a reverted
+    # call: that is how an unusable pool is told from a usable one.
+    if len(replies) != len(calls):
+        sys.exit('batch_call: %d replies for %d calls' % (len(replies), len(calls)))
+    for reply in replies:
+        result = reply.get('result')
+        print(result if isinstance(result, str) else '0x')
 PYSRC
 
 # One http round trip for many eth_calls. Reads "to data" pairs on stdin, prints one result per line.
@@ -105,7 +126,16 @@ call() { calln 1 "$@"; }
 
 # Nth returned value kept whole, for the "[a, b, c]" array returns.
 callline() { local n=$1; shift; callraw "$@" | sed -n "${n}p"; }
-list_at() { printf '%s' "$1" | tr -d '[]' | tr ',' '\n' | sed -n "$(($2 + 1))p" | awk '{print $1}'; }
+# A row of a "[a, b, c]" return, by index. A non-numeric index is a failed lookup, never row 0:
+# bash reads "" as the unary plus of nothing and would hand sed a 1.
+list_at() { # list_at <bracketed-list> <index>
+  case "${2-}" in '' | *[!0-9]*)
+    echo "list_at: '${2-}' is not a row index" >&2
+    return 1
+    ;;
+  esac
+  printf '%s' "$1" | tr -d '[]' | tr ',' '\n' | sed -n "$(($2 + 1))p" | awk '{print $1}'
+}
 
 send() { # send <from> <to> <sig> [args...]
   local from=$1 to=$2 out status
@@ -241,7 +271,10 @@ ensure_approve() { # ensure_approve <owner> <token> <spender>
 token_status() { call "$STOCK_REGISTRY" 'tokenConfig(address)(uint8,uint8,address,address)' "$1"; }
 
 ensure_listed() { # ensure_listed <token> <pool>
-  [ "$(token_status "$1")" != "0" ] && return 0
+  local status
+  status=$(token_status "$1")
+  [ -n "$status" ] || { echo "tokenConfig($1) on $STOCK_REGISTRY read nothing; cannot tell whether it is listed" >&2; exit 1; }
+  [ "$status" != "0" ] && return 0
   send "$DEPLOYER" "$STOCK_REGISTRY" 'listToken(address,(uint8,uint8,address,address))' \
     "$1" "(1,0,$2,0x0000000000000000000000000000000000000000)" >/dev/null
 }
@@ -343,6 +376,18 @@ fees_paid_credited() { # fees_paid_credited <receipt-json> <account>
 quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
   call "$QUOTER" 'quoteExactInputSingle((address,address,uint256,int24,uint160))(uint256,uint160,uint32,uint256)' \
     "($1,$2,$4,$3,0)"
+}
+
+# getWeights covers every registry-listed token, in registry order, so a token's own row has to be
+# looked up by address rather than assumed to be the first one. A token with no row is a fatal lookup
+# failure: the empty index used to reach list_at and read row 0 there.
+weights_index() { # weights_index <account> <token>
+  local index
+  index=$(callline 1 "$1" 'getWeights()(address[],uint256[],uint256[])' |
+    tr -d '[]' | tr ',' '\n' | awk '{print tolower($1)}' |
+    grep -n -x -- "$(lc "$2")" | cut -d: -f1 | awk '{print $1 - 1}') || true
+  [ -n "$index" ] || { echo "weights_index: $2 has no row in getWeights() of account $1" >&2; return 1; }
+  printf '%s\n' "$index"
 }
 
 expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint256)' "$1" "$2" "$3"; }

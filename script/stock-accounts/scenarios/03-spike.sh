@@ -52,8 +52,10 @@ assert_gte "reference price is at least 3x the pre-spike average" \
 
 WEIGHTS=$(callline 2 "$ACCT" 'getWeights()(address[],uint256[],uint256[])')
 TARGETS=$(callline 3 "$ACCT" 'getWeights()(address[],uint256[],uint256[])')
-NVDA_W=$(list_at "$WEIGHTS" 0)
-assert_gt "NVDAc far above its band after the spike" "$NVDA_W" "$(bn "$(list_at "$TARGETS" 0) + $MAX_DEVIATION")"
+NVDA_I=$(weights_index "$ACCT" "$NVDA")
+NVDA_W=$(list_at "$WEIGHTS" "$NVDA_I")
+assert_gt "NVDAc far above its band after the spike" "$NVDA_W" \
+  "$(bn "$(list_at "$TARGETS" "$NVDA_I") + $MAX_DEVIATION")"
 
 # Selling into the spike is exactly what the band wants, so the account signs it.
 SELL_NVDA=$(bn "$SETTLE_VALUE * $ONE_NVDA // $REF")
@@ -76,8 +78,9 @@ expect_call_revert "buying more NVDAc refused while overweight" "$(selector 'Sel
 
 USDC_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")
 RECEIPT=$(settle_sell "$ACCT" "$SELL_ORDER" "$SELL_NVDA" "$SELL_USDC")
+FEE_USDC=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
 assert_eq "de-risking sell settled" \
-  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT") - $USDC_BEFORE + $(fees_paid "$RECEIPT" "$ACCT" "$USDC")")" \
+  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT") - $USDC_BEFORE + $FEE_USDC")" \
   "$SELL_USDC"
 
 # Unwind the spike and let the average come back down with it.

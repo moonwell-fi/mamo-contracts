@@ -45,11 +45,14 @@ VALID_TO=$(bn "$(now_ts) + 900")
 BUY_AMT=$(bn "$(expected_out "$BUY_IN" "$USDC" "$NVDA") * 995 // 1000")
 ORDER=$(mk_order "$USDC" "$NVDA" "$ACCT" "$BUY_IN" "$BUY_AMT" "$VALID_TO")
 RECEIPT=$(settle_sell "$ACCT" "$ORDER" "$BUY_IN" "$BUY_AMT")
+BUY_FEE=$(fees_paid "$RECEIPT" "$ACCT" "$NVDA")
 assert_eq "buy-in settled into the account" \
-  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") + $(fees_paid "$RECEIPT" "$ACCT" "$NVDA")")" "$BUY_AMT"
+  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") + $BUY_FEE")" "$BUY_AMT"
 
 send "$USER_C" "$ACCT" 'setBasket((address,uint16)[],uint16)' "[($NVDA,7000)]" 3000 >/dev/null
-assert_eq "new NVDAc target read back" "$(list_at "$(callline 3 "$ACCT" 'getWeights()(address[],uint256[],uint256[])')" 0)" 7000
+NVDA_I=$(weights_index "$ACCT" "$NVDA")
+assert_eq "new NVDAc target read back" \
+  "$(list_at "$(callline 3 "$ACCT" 'getWeights()(address[],uint256[],uint256[])')" "$NVDA_I")" 7000
 assert_eq "new cash target read back" "$(call "$ACCT" 'cashTargetBps()(uint16)')" 3000
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
