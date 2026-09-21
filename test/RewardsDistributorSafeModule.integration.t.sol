@@ -54,6 +54,26 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
             vm.prank(admin);
             safe.enableModule(address(module));
         }
+
+        _settlePendingDrop();
+    }
+
+    /// @notice Settles a live drop that was queued but not yet notified, the way the operator would.
+    /// @dev The module is the real mainnet one, so the fork inherits its current state and every
+    ///      addRewards-based test below requires EXECUTED or UNINITIALIZED.
+    function _settlePendingDrop() internal {
+        if (module.paused()) return;
+        if (module.getCurrentState() != RewardsDistributorSafeModule.RewardState.PENDING_EXECUTION) return;
+
+        (uint256 amount1, uint256 amount2,,) = module.pendingRewards();
+        if (mamoToken.balanceOf(address(safe)) < amount1) {
+            deal(address(mamoToken), address(safe), amount1);
+        }
+        if (cbBtcToken.balanceOf(address(safe)) < amount2) {
+            deal(address(cbBtcToken), address(safe), amount2);
+        }
+
+        module.notifyRewards();
     }
 
     function test_enableModuleOnSafe() public view {

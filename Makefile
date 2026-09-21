@@ -1,5 +1,5 @@
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
@@ -56,13 +56,19 @@ lp-auto-balancer-v2:
 lp-v2-setup:
 	forge test --ffi --mc LPAutoBalancerV2SetupTest -vvv
 
+# Same op-revm note again. Both this target and lp-v2-setup are excluded from `make test`: they
+# build an FPS Addresses book, so their pinned block has to sit above the newest deployment in
+# addresses/8453.json, and at those blocks a CLI --fork-url triggers the panic.
+lp-v2-deploy:
+	forge test --ffi --mc DeployLPAutoBalancerV2Test -vvv
+
 # MamoLeveragedAeroStrategy account unit tests. Mocks only (no fork): the Sherwood strategy/vault are
 # stubbed, so NO --fork-url. Matches test/MamoLeveragedAeroStrategy*.unit.t.sol.
 leveraged-aero-account:
 	forge test --ffi --match-path "test/MamoLeveragedAeroStrategy*.unit.t.sol" -vvv
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
@@ -82,4 +88,4 @@ tenderly-matrix:
 tenderly-price-checker:
 	./script/tenderly/run-harness.sh price-checker
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker

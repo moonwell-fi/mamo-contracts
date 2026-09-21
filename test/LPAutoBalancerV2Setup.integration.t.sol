@@ -48,7 +48,9 @@ contract LPAutoBalancerV2SetupTest is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
-    uint256 constant PINNED_BLOCK = 50_600_000;
+    // At or above the newest `isContract: true` entry in addresses/8453.json (51_441_832), which the
+    // Addresses constructor validates against this fork.
+    uint256 constant PINNED_BLOCK = 51_500_000;
     /// @dev Lower tick of the main position minted in setUp; the lifecycle test asserts spot is pushed below it.
     int24 internal mainTickLower;
     int24 constant TICK_SPACING = 10;

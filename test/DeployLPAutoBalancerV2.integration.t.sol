@@ -12,7 +12,9 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 contract DeployLPAutoBalancerV2Test is Test {
     // Pinned Base block — the constructor runs against a forked post-Isthmus block, which under
     // foundry 1.7.x panics on operator-fee refund unless gas/base fee are zeroed (see below).
-    uint256 constant PINNED_BLOCK = 50_600_000;
+    // Must stay at or above the newest `isContract: true` entry in addresses/8453.json, which the
+    // Addresses constructor validates against this fork (LP pair deploys landed at 51_441_832).
+    uint256 constant PINNED_BLOCK = 51_500_000;
 
     Addresses internal addresses;
     DeployLPAutoBalancerV2 internal deployScript;
