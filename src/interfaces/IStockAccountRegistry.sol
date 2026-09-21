@@ -38,6 +38,7 @@ interface IStockAccountRegistry {
     error PoolIsToken();
     error FeedOnlyForChainlink();
     error TokenNotListed(address token);
+    error TokenNotHalted(address token);
     error InvalidStatus();
     error NotAdminOrGuardian();
     error GuardianCanOnlyLower();

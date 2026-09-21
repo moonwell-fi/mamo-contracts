@@ -84,6 +84,12 @@ contract StockAccountRegistryUnitTest is Test {
         registry.listToken(token, activeConfig());
     }
 
+    function listAndHaltDefaultToken() internal {
+        listDefaultToken();
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
+    }
+
     function expectNotAdmin(address caller) internal {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, caller, bytes32(0))
@@ -776,6 +782,113 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
     }
 
+    function testSetTokenPoolRepointsHaltedTokenAndEmits() public {
+        listAndHaltDefaultToken();
+        address newPool = _stub();
+
+        vm.expectEmit(true, true, true, false, address(registry));
+        emit StockAccountRegistry.TokenPoolUpdated(token, pool, newPool);
+        vm.prank(admin);
+        registry.setTokenPool(token, newPool);
+
+        IStockAccountRegistry.TokenConfig memory stored = registry.tokenConfig(token);
+        assertEq(stored.pool, newPool, "pool not repointed");
+        assertEq(uint256(stored.status), uint256(IStockAccountRegistry.TokenStatus.Halted), "status should stay halted");
+        assertEq(uint256(stored.source), uint256(IStockAccountRegistry.PriceSource.PoolTwap), "source should not move");
+        assertEq(stored.chainlinkFeed, address(0), "feed should not move");
+        assertEq(registry.allTokens().length, 1, "token list length mismatch");
+    }
+
+    function testSetTokenPoolRevertsWhenTokenActive() public {
+        listDefaultToken();
+        address newPool = _stub();
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
+        vm.prank(admin);
+        registry.setTokenPool(token, newPool);
+
+        assertEq(registry.tokenConfig(token).pool, pool, "pool should be unchanged");
+    }
+
+    function testSetTokenPoolRevertsWhenTokenSellOnly() public {
+        listDefaultToken();
+        address newPool = _stub();
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
+        vm.prank(admin);
+        registry.setTokenPool(token, newPool);
+    }
+
+    function testSetTokenPoolRevertsWhenTokenNotListed() public {
+        address newPool = _stub();
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotListed.selector, token));
+        vm.prank(admin);
+        registry.setTokenPool(token, newPool);
+    }
+
+    function testSetTokenPoolRevertsForNonAdmin() public {
+        listAndHaltDefaultToken();
+        address newPool = _stub();
+
+        expectNotAdmin(guardian);
+        vm.prank(guardian);
+        registry.setTokenPool(token, newPool);
+
+        expectNotAdmin(stranger);
+        vm.prank(stranger);
+        registry.setTokenPool(token, newPool);
+
+        assertEq(registry.tokenConfig(token).pool, pool, "pool should be unchanged");
+    }
+
+    function testSetTokenPoolIsFrozenWhilePaused() public {
+        listAndHaltDefaultToken();
+        address newPool = _stub();
+
+        vm.prank(guardian);
+        registry.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setTokenPool(token, newPool);
+
+        vm.prank(guardian);
+        registry.unpause();
+
+        vm.prank(admin);
+        registry.setTokenPool(token, newPool);
+        assertEq(registry.tokenConfig(token).pool, newPool, "pool not repointed");
+    }
+
+    function testSetTokenPoolRevertsOnSamePool() public {
+        listAndHaltDefaultToken();
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        vm.prank(admin);
+        registry.setTokenPool(token, pool);
+    }
+
+    function testSetTokenPoolRevertsWhenPoolNotContract() public {
+        listAndHaltDefaultToken();
+        address eoaPool = makeAddr("eoaPool");
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.NotAContract.selector, eoaPool));
+        vm.prank(admin);
+        registry.setTokenPool(token, eoaPool);
+    }
+
+    function testSetTokenPoolRevertsWhenPoolIsToken() public {
+        listAndHaltDefaultToken();
+
+        vm.expectRevert(IStockAccountRegistry.PoolIsToken.selector);
+        vm.prank(admin);
+        registry.setTokenPool(token, token);
+    }
+
     function testPauseBlocksWritesButNotReads() public {
         listDefaultToken();
         address otherToken = _stub();
@@ -1089,5 +1202,39 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         vm.prank(admin);
         registry.setTwapWindow(WINDOW);
+    }
+
+    function testRepointingAHaltedTokenGatesReactivationOnTheNewPool() public {
+        vm.prank(guardian);
+        registry.setTokenStatus(address(stock), IStockAccountRegistry.TokenStatus.Halted);
+
+        vm.prank(admin);
+        registry.setTokenPool(address(stock), address(altPool));
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, address(stock)));
+        vm.prank(admin);
+        registry.setTokenStatus(address(stock), IStockAccountRegistry.TokenStatus.Active);
+        assertEq(
+            uint256(registry.tokenConfig(address(stock)).status),
+            uint256(IStockAccountRegistry.TokenStatus.Halted),
+            "status should stay halted"
+        );
+
+        MockCLPoolObserve migratedPool = new MockCLPoolObserve(address(usdc), address(stock));
+        migratedPool.setMeanTick(0, WINDOW);
+
+        vm.prank(admin);
+        registry.setTokenPool(address(stock), address(migratedPool));
+
+        vm.prank(admin);
+        registry.setTokenStatus(address(stock), IStockAccountRegistry.TokenStatus.Active);
+
+        assertEq(registry.tokenConfig(address(stock)).pool, address(migratedPool), "pool not repointed");
+        assertEq(
+            uint256(registry.tokenConfig(address(stock)).status),
+            uint256(IStockAccountRegistry.TokenStatus.Active),
+            "status should be active"
+        );
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8, "stock should quote again");
     }
 }

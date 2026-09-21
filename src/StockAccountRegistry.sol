@@ -75,6 +75,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
     event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event TokenListed(address indexed token, TokenConfig cfg);
+    event TokenPoolUpdated(address indexed token, address indexed oldPool, address indexed newPool);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
 
     /// @param config The initial roles and global configuration
@@ -213,6 +214,21 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _requirePriceable(token);
 
         emit TokenListed(token, cfg);
+    }
+
+    /// @notice Repoints a halted token at a new pool, which re-activation then probes before the token counts again
+    function setTokenPool(address token, address newPool) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        TokenConfig storage cfg = _tokenConfig[token];
+        if (cfg.status == TokenStatus.None) revert TokenNotListed(token);
+        if (cfg.status != TokenStatus.Halted) revert TokenNotHalted(token);
+        if (newPool == cfg.pool) revert AlreadySet();
+        if (newPool.code.length == 0) revert NotAContract(newPool);
+        if (newPool == token) revert PoolIsToken();
+
+        address oldPool = cfg.pool;
+        cfg.pool = newPool;
+
+        emit TokenPoolUpdated(token, oldPool, newPool);
     }
 
     /// @notice Changes the trading status of a listed token
