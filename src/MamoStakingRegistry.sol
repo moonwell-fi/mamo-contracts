@@ -195,10 +195,20 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
     // ==================== DEX CONFIGURATION ====================
 
     /**
-     * @notice Update DEX router (backend only)
+     * @notice Update DEX router (admin only)
+     * @dev Restricted to DEFAULT_ADMIN_ROLE rather than BACKEND_ROLE: every compound() hands this
+     *      router an allowance over the strategy's reward tokens, so a backend able to swap it in
+     *      could route every accrual through a contract it controls. The minimum-out floor bounds
+     *      that loss but does not eliminate it, and the bound itself (setDefaultSlippage, capped at
+     *      MAX_SLIPPAGE_IN_BPS) is a BACKEND_ROLE knob.
+     * @dev Deliberately NOT whenNotPaused. Repointing the router is the remediation for the very
+     *      incident the guardian pauses for; gating it on the unpaused state would force
+     *      unpause -> fix -> pause and reopen compound() in between. Consistent with the registry
+     *      convention that DEFAULT_ADMIN_ROLE functions (recoverERC20, recoverETH) are not
+     *      pause-gated while BACKEND_ROLE configuration setters are.
      * @param newRouter The new DEX router address
      */
-    function setDEXRouter(ISwapRouter newRouter) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function setDEXRouter(ISwapRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(address(newRouter) != address(0), "Invalid router");
         require(address(newRouter) != address(dexRouter), "Router already set");
 
@@ -227,12 +237,14 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
      * @dev Restricted to DEFAULT_ADMIN_ROLE because the price checker is the on-chain
      *      reference price source for compound()'s minimum-out calculation. A malicious
      *      or misconfigured checker could let swaps execute at arbitrary prices.
+     * @dev Deliberately NOT whenNotPaused, for the same reason as setDEXRouter: replacing a
+     *      misconfigured checker is incident remediation, and requiring an unpause first would
+     *      reopen compound() while the fix lands.
      * @param _slippagePriceChecker The slippage price checker contract address
      */
     function setSlippagePriceChecker(ISlippagePriceChecker _slippagePriceChecker)
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
-        whenNotPaused
     {
         require(address(_slippagePriceChecker) != address(0), "Invalid slippage price checker");
         require(address(_slippagePriceChecker) != address(slippagePriceChecker), "Slippage price checker already set");

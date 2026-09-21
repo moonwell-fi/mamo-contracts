@@ -100,9 +100,15 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         // an implementation is whitelisted with id 0 (auto-assign); whitelisting with an explicit non-zero
         // id (as 010/011 and this proposal do) leaves it untouched. On Base mainnet it currently reads 4
         // while ids 1-4 are all filled, i.e. it is a stale lower bound, NOT the next free slot. We assert
-        // the counter has not advanced PAST our chosen slot so the registry's auto-assign path can never
-        // hand out our explicitly-claimed id to another type before this proposal executes.
-        assertLe(registry.nextStrategyTypeId(), strategyTypeId, "nextStrategyTypeId advanced past the configured id");
+        // the counter has not advanced TO OR PAST our chosen slot so the registry's auto-assign path can
+        // never hand out our explicitly-claimed id to another type before this proposal executes.
+        //
+        // Strictly less-than, not `<=`: equality is precisely the collision case. If the counter already
+        // reads our id, the very next auto-assigning whitelistImplementation(impl, 0) hands out that id
+        // and overwrites latestImplementationById for it, stranding this type permanently. The empty-slot
+        // assertion above is the real guard (an explicit id never advances the counter, so for any id >= 5
+        // this check can only ever pass); this one exists to catch the one state it cannot.
+        assertLt(registry.nextStrategyTypeId(), strategyTypeId, "nextStrategyTypeId reached the configured id");
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -115,6 +121,11 @@ contract DeployLeveragedAeroAccountSystem is MultisigProposal {
         registry.whitelistImplementation(implementation, strategyTypeId);
 
         // 2. Grant the factory BACKEND_ROLE so it can register user accounts with the registry.
+        //    ORDERING DEPENDENCY: this grants the FACTORY only. `MamoLeveragedAeroStrategy.depositIdle`
+        //    now gates on the registry's BACKEND_ROLE (Sherlock #41), and the OPERATOR's grant
+        //    (`MAMO_BACKEND`) lives in 011, not here. If 012 ships without 011 having executed,
+        //    depositIdle is operator-inaccessible — the account owner can still call it, so this is a
+        //    liveness gap and not a lockout, but 011 must land first.
         registry.grantRole(registry.BACKEND_ROLE(), factory);
 
         // 3. Open deposits on the SyndicateVault so the accounts can deposit USDC.

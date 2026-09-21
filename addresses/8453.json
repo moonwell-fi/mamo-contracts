@@ -410,13 +410,88 @@
     "isContract": true
   },
   {
-    "addr": "0x70aCDF2Ad0bf2402C957154f944c19Ef4e1cbAE1",
+    "addr": "0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b",
     "name": "WETH_CBBTC_CL_POOL",
     "isContract": true
   },
   {
-    "addr": "0x41b2126661C673C2beDd208cC72E85DC51a5320a",
+    "addr": "0x61E0B10423a0009C3f83ab4313813d29437d0817",
     "name": "WETH_CBBTC_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
+    "name": "AERODROME_SLIPSTREAM_NFPM_V2",
+    "isContract": true
+  },
+  {
+    "addr": "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433",
+    "name": "CHAINLINK_L2_SEQUENCER_UPTIME_FEED",
+    "isContract": true
+  },
+  {
+    "addr": "0xd4669fCee3BE73b51438ad1f1debEB3505Eab308",
+    "name": "MAMO_LP_REBALANCER",
+    "isContract": false
+  },
+  {
+    "addr": "0x6E5d79C41a358BE46D919c87F03683E9D8f48c36",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_TEST",
+    "isContract": true
+  },
+  {
+    "addr": "0xEA05B89CA6045f65E5040519354aBca93b695425",
+    "name": "MAMO_LP_COMPOUND_MODULE_TEST",
+    "isContract": true
+  },
+  {
+    "addr": "0x3FE04A59Ebd38cF06080a6F60a98D124eb59392A",
+    "name": "WETH_USDC_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0xA0B61fdB9f1FB9b917Fe38b49427Fd4D87472D28",
+    "name": "WETH_USDC_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0x160D7E9d948B16c163332a277b393c288408eb12",
+    "name": "USDC_CBBTC_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x7B0f1103746648FBfce9222f1266f79B934E16b2",
+    "name": "USDC_CBBTC_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0x0F0f89Edfd6BECebAa9cA13430Db474f2aA5cC0a",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_WETH_USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0x9b45E48882daaC69A902dE2A6A5Fc4fE6eA074B6",
+    "name": "MAMO_LP_COMPOUND_MODULE_WETH_USDC",
+    "isContract": true
+  },
+  {
+    "addr": "0xBe635FBdE3EABD6Fcc79935dF77602993682E252",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_USDC_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0xE0f5C2AE94cf81A8cEcf2a9e0935AfEbf1a675af",
+    "name": "MAMO_LP_COMPOUND_MODULE_USDC_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0xE559268df385ca2bb1A2649C109df0a8186CF56d",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC",
+    "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC",
     "isContract": true
   }
 ]

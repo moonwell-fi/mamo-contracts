@@ -37,7 +37,7 @@
         {
           "priceFeed": "CHAINLINK_ETH_USD",
           "reverse": true,
-          "heartbeat": 1200
+          "heartbeat": 3600
         }
       ]
     },
@@ -53,7 +53,7 @@
         {
           "priceFeed": "CHAINLINK_ETH_USD",
           "reverse": true,
-          "heartbeat": 1200
+          "heartbeat": 3600
         }
       ]
     }

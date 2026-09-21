@@ -76,6 +76,7 @@ resolve_vnet
 # ── 2. sanity-check the fork + protocol wiring ─────────────────────────────────
 section "Verify fork is Base + protocol wiring intact"
 chain_sanity
+ensure_address_book
 [ "$(ccall "$GAUGE" 'nft()(address)')" = "$NFPM" ] || die "gauge.nft() != expected NFPM"
 [ "$(ccall "$GAUGE" 'rewardToken()(address)')" = "$AERO" ] || die "gauge.rewardToken() != AERO"
 ok "gauge.nft()==NFPM and gauge.rewardToken()==AERO"
@@ -102,7 +103,7 @@ fund_sender() {
 
 capture_lab() {
   # forge names the broadcast artifact after the --sig entrypoint; the deploy happens in deployAndMint().
-  capture_created_address "broadcast/LPV2TenderlyHarness.s.sol/8453/deployAndMint-latest.json"
+  capture_created_address "$(broadcast_artifact deployAndMint)"
   HARNESS_LAB="$CREATED_ADDR"; export HARNESS_LAB
   info "deployed LPAutoBalancerV2 → $HARNESS_LAB"
 }

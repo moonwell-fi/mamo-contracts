@@ -15,7 +15,8 @@
 #   RPC         the resolved vnet RPC                     [set by resolve_vnet]
 # Optional knobs (with defaults):
 #   HARNESS_SLUG / HARNESS_DISPLAY   vnet naming          [resolve_vnet]
-#   EXPECTED_CHAIN=8453              chain assertion       [chain_sanity]
+#   EXPECTED_CHAIN=<id>              OPTIONAL hard chain assertion (unset = accept the vnet's own id)
+#   VNET_CHAIN_ID                    set by chain_sanity; drives broadcast_artifact + ensure_address_book
 #   ADDR_CHAIN=8453                 addresses/<id>.json    [addr]
 #   PHASE_MARKERS                   log lines surfaced     [run_forge_phase]
 #   FORCE_CREATE / KEEP_VNET        vnet lifecycle
@@ -91,6 +92,11 @@ teardown() {
   elif [ "${CREATED_VNET:-0}" = "1" ]; then
     warn "created vnet $VNET_ID kept (--keep or teardown skipped)"
   fi
+  # Drop the chain-id-shim address book (see ensure_address_book). Only ever removes a file this
+  # run created -- TEMP_ADDRESS_BOOK is unset when the book already existed.
+  if [ -n "${TEMP_ADDRESS_BOOK:-}" ] && [ -f "$TEMP_ADDRESS_BOOK" ]; then
+    rm -f "$TEMP_ADDRESS_BOOK" && info "removed $(basename "$TEMP_ADDRESS_BOOK")"
+  fi
 }
 
 # If account/project slugs aren't set explicitly, derive them from the vnet RPC URL path
@@ -136,12 +142,64 @@ resolve_vnet() {
   info "RPC: ${RPC:0:42}…"
 }
 
-# Assert the fork is the expected chain (default Base 8453).
+# Read the vnet's chain id into $VNET_CHAIN_ID and sanity-check it.
+#
+# The chain id is NOT what proves this is a Base fork -- a Tenderly vnet may be given any chain id,
+# and the dashboard's default for a Base fork is a 999-prefixed custom id (9998453). What proves the
+# fork is Base is the protocol wiring the callers assert immediately after this (gauge.nft() == the
+# real Base NFPM, gauge.rewardToken() == real AERO, both resolved from addresses/8453.json): those
+# addresses only answer correctly on a Base fork. So an unexpected chain id is logged, not fatal.
+#
+# Set EXPECTED_CHAIN to opt back into a hard assertion (e.g. pinning CI to an 8453-id vnet).
+# ADDR_CHAIN stays independent and keeps defaulting to 8453 -- it selects the ADDRESS BOOK, which is
+# real-Base addresses regardless of what id the vnet reports.
 chain_sanity() {
-  local expected="${EXPECTED_CHAIN:-8453}"
-  local chain; chain="$(cast chain-id --rpc-url "$RPC" 2>/dev/null)"
-  [ "$chain" = "$expected" ] || die "expected chain $expected, got '$chain'"
-  ok "chain id $chain, block $(cast block-number --rpc-url "$RPC" 2>/dev/null)"
+  VNET_CHAIN_ID="$(cast chain-id --rpc-url "$RPC" 2>/dev/null)"
+  [ -n "$VNET_CHAIN_ID" ] || die "could not read chain id from $RPC"
+  export VNET_CHAIN_ID
+  if [ -n "${EXPECTED_CHAIN:-}" ] && [ "$VNET_CHAIN_ID" != "$EXPECTED_CHAIN" ]; then
+    die "expected chain $EXPECTED_CHAIN, got '$VNET_CHAIN_ID'"
+  fi
+  ok "chain id $VNET_CHAIN_ID, block $(cast block-number --rpc-url "$RPC" 2>/dev/null)"
+  if [ "$VNET_CHAIN_ID" != "8453" ]; then
+    info "vnet chain id is not 8453; addresses/${ADDR_CHAIN:-8453}.json is still the address book"
+  fi
+}
+
+# Path of a broadcast artifact for --sig entrypoint $1, under whatever chain id the vnet reports.
+# forge names this directory after the LIVE chain id, so hardcoding 8453 breaks on any vnet given a
+# custom id. Requires chain_sanity to have run.
+broadcast_artifact() {
+  [ -n "${VNET_CHAIN_ID:-}" ] || die "broadcast_artifact called before chain_sanity"
+  printf '%s' "broadcast/LPV2TenderlyHarness.s.sol/${VNET_CHAIN_ID}/${1}-latest.json"
+}
+
+# Make addresses/<VNET_CHAIN_ID>.json exist when the vnet reports an id other than ADDR_CHAIN.
+#
+# WHY A COPY AND NOT A CONSTRUCTOR ARGUMENT: the harnesses build FPS `Addresses` with
+# `chainIds[0] = block.chainid`, but that is not the part that matters -- FPS's single-argument
+# `getAddress(name)` resolves against `block.chainid` internally
+# (lib/forge-proposal-simulator/addresses/Addresses.sol:110). So on a vnet reporting 9998453 the
+# lookup is `_addresses[name][9998453]` no matter what the constructor was handed, and the only
+# fixes are to rewrite every call site to the two-argument form or to give that chain id a book.
+# The book is real-Base addresses either way -- the vnet IS a Base fork -- so the copy is faithful,
+# and FPS's isContract validation still passes because those addresses genuinely have code on it.
+#
+# Removed again by teardown: addresses/ is not gitignored and a stray book would look like a real
+# deployment record.
+ensure_address_book() {
+  [ -n "${VNET_CHAIN_ID:-}" ] || die "ensure_address_book called before chain_sanity"
+  local src="$ROOT/addresses/${ADDR_CHAIN:-8453}.json"
+  local dst="$ROOT/addresses/${VNET_CHAIN_ID}.json"
+  [ "$dst" = "$src" ] && return 0
+  [ -f "$src" ] || die "address book $src not found"
+  if [ -f "$dst" ]; then
+    info "addresses/${VNET_CHAIN_ID}.json already present; leaving it alone"
+    return 0
+  fi
+  cp "$src" "$dst"
+  TEMP_ADDRESS_BOOK="$dst"
+  ok "materialized addresses/${VNET_CHAIN_ID}.json from ${ADDR_CHAIN:-8453}.json (removed on exit)"
 }
 
 # ── cheat-RPC fund + time helpers ───────────────────────────────────────────
@@ -213,9 +271,12 @@ PY
 run_forge_phase() {
   local fq="$1" sig="$2" broadcast="$3" mult="${4:-300}" sigargs="${5:-}"
   local full="$ROOT/script/tenderly/.phase-$(echo "$sig" | tr -cd 'a-zA-Z').log"
-  # --no-storage-caching is REQUIRED: this vnet reports chain id 8453 (same as real Base), so
-  # forge's fork cache (keyed by chain id) would otherwise mix stale real-Base slots with live
-  # vnet slots. (moonwell-tenderly avoids this by giving vnets a unique chain id, 73570+networkId.)
+  # --no-storage-caching is passed UNCONDITIONALLY. It is strictly required when the vnet reports
+  # chain id 8453 (the same id as real Base), because forge's fork cache is keyed by chain id and
+  # would otherwise mix stale real-Base slots with live vnet slots. A vnet given a custom id
+  # (Tenderly's dashboard default for a Base fork is 9998453; moonwell-tenderly uses 73570+networkId)
+  # does not collide -- but the flag stays on either way, since the cost is a few extra RPC reads and
+  # the failure mode it prevents is silent, chain-id-dependent state corruption.
   # NOTE: the broadcaster key is deliberately NOT passed here as --private-key. forge's argv is
   # world-readable (`ps aux`) on a shared host; instead load_env exports MAMO_DEPLOYER_PRIVATE_KEY
   # into the environment and the .s.sol reads it via vm.envUint + vm.startBroadcast(pk). Non-broadcast
