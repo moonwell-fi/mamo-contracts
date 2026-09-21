@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Order validation cost as a basket grows: the same sell order priced against accounts holding
-# 2, 4 and 10 listed stock tokens, with every extra position adding one more pool TWAP read.
+# Cost as a basket grows: the same sell order priced against accounts holding 2, 4 and 10 listed stock
+# tokens, with every extra position adding one more pool TWAP read, and the fee post-hook measured on
+# the widest of them against the gas limit the appData document declares.
 set -euo pipefail
 
 SCEN=05-gas
@@ -14,6 +15,9 @@ CASH_LEG=500000000
 STOCK_LEG=500000000
 ORDER_SIZE=25000000
 SIZES="2 4 10"
+DAY=86400
+# StockAccountStrategy.HOOK_GAS_LIMIT, the gas every appData document gives its post-hook.
+HOOK_GAS_LIMIT=1000000
 
 pools_from_logs() {
   rpc eth_getLogs "[{\"address\":\"$CL_FACTORY\",\"topics\":[\"$POOL_CREATED_TOPIC\",\"0x000000000000000000000000$(printf '%s' "${USDC#0x}" | tr 'A-Z' 'a-z')\"],\"fromBlock\":\"0x0\",\"toBlock\":\"latest\"}]" |
@@ -136,6 +140,19 @@ for SIZE in $SIZES; do
     fail "isValidSignature gas with $SIZE positions" "estimate failed"
   fi
   setup_note "gasAccount$SIZE" "$ACCT"
+  WIDEST=$ACCT
+  WIDEST_SIZE=$SIZE
 done
+
+# The fee is a post-hook inside the settlement, so paying it has to fit in HOOK_GAS_LIMIT on the widest
+# basket, where every position is one more TWAP read in the NAV the fee is valued on.
+increase_time "$DAY"
+GAS=$(estimate_gas "$DEPLOYER" "$WIDEST" 'payFees(address)' "${TOKENS[0]}")
+if [ -n "$GAS" ]; then
+  assert_gt "payFees with $WIDEST_SIZE positions fits the hook gas limit" "$HOOK_GAS_LIMIT" "$GAS"
+  record "$SCEN" "payFees gas with $WIDEST_SIZE positions" 1 "$GAS"
+else
+  fail "payFees gas with $WIDEST_SIZE positions" "estimate failed"
+fi
 
 finish

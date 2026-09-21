@@ -55,6 +55,8 @@ abstract contract StockAccountStrategyTestBase is Test {
         priceChecker = new MockPriceChecker();
         priceChecker.setRate(address(nvda), address(usdc), 200e18);
         priceChecker.setRate(address(aapl), address(usdc), 100e18);
+        priceChecker.setRate(address(usdc), address(nvda), 5e15);
+        priceChecker.setRate(address(usdc), address(aapl), 1e16);
 
         settlement = new MockGPv2Settlement(SEPARATOR, relayer);
 
@@ -65,6 +67,7 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMinStrategyDeposit(MIN_DEPOSIT);
         stockRegistry.setMaxStrategyDeposit(CAP);
         stockRegistry.setMaxBackendSlippageBps(100);
+        stockRegistry.setManagementFeeBps(100);
         stockRegistry.setPriceChecker(priceChecker);
 
         (orderSigner, orderSignerKey) = makeAddrAndKey("orderSigner");
@@ -123,7 +126,6 @@ abstract contract StockAccountStrategyTestBase is Test {
             entries: _entries(address(nvda), 5000, address(aapl), 5000),
             feeRecipient: feeRecipient,
             mamoStrategyRegistry: address(registry),
-            managementFeeBps: 100,
             owner: user,
             stockRegistry: address(stockRegistry),
             strategyTypeId: strategyTypeId

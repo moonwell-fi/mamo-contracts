@@ -74,6 +74,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 admin: admin,
                 aerodromeRouter: ISwapRouter(AERODROME_CL_ROUTER),
                 guardian: admin,
+                managementFeeBps: 100,
                 maxBackendSlippageBps: 100,
                 maxDeviationBps: 1000,
                 maxPositions: 10,
@@ -83,7 +84,6 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 minTargetBps: 100,
                 orderSigner: admin,
                 priceChecker: ISlippagePriceChecker(address(this)),
-                requiredAppDataHash: bytes32(0),
                 twapWindow: WINDOW
             })
         );
