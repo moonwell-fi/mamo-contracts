@@ -8,8 +8,11 @@ test-unit:
 # (.s.sol) AND test/harness/*Harness.sol only by naming accident. A test helper named e.g.
 # FooHelper.sol or FooMock.sol would match neither s.sol nor t.sol and silently pollute coverage:
 # keep test-only contracts suffixed "Harness.sol" (or extend the skip list here).
+# Explicitly skipped for exactly that reason: script/tenderly/FreshFeed.sol (a vnet-only Chainlink
+# aggregator mock, code-replaced onto the real feed addresses via tenderly_setCode) and
+# script/tenderly/TenderlySwapHelper.sol (the price-sim swap-callback holder). Neither is product code.
 coverage:
-	forge coverage --fork-url base --ffi --report lcov --skip s.sol --no-match-coverage t.sol --ir-minimum -vvv && genhtml lcov.info --branch-coverage --output-dir coverage
+	forge coverage --fork-url base --ffi --report lcov --skip s.sol --skip FreshFeed.sol --skip TenderlySwapHelper.sol --no-match-coverage t.sol --ir-minimum -vvv && genhtml lcov.info --branch-coverage --output-dir coverage
 
 deploy-broadcast:
 	export DEPLOY_ENV="8453_PROD" && forge script script/DeploySystem.s.sol:DeploySystem --fork-url base --account mamo-test --verify --slow -vvvvv --broadcast --sender   0xDca82E03057329f53Ed4173429D46B0511E46Fb8
@@ -35,8 +38,13 @@ weth-price-checker:
 strategy-factory:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationTest
 
+# NO --fork-url here: MulticallIntegrationTest self-forks at a PINNED block via vm.createSelectFork in
+# setUp (with the vm.fee(0) op-revm Isthmus workaround). Passing --fork-url base in addition makes
+# foundry init the OP-stack L1Block handler against the CLI fork and panic before vm.fee(0) runs — the
+# same reason lp-auto-balancer-v2 / lp-v2-setup omit it. Pinning also removes the "could not calculate
+# block delta" flake the unpinned `latest` fork produced inside Moonwell's timestamp accrual.
 strategy-multicall:
-	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MulticallIntegrationTest
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --ffi --mc MulticallIntegrationTest
 
 mamo-staking:
 	forge test --fork-url base --ffi --mc MamoStaking -vvv
@@ -62,13 +70,36 @@ lp-v2-setup:
 lp-v2-deploy:
 	forge test --ffi --mc DeployLPAutoBalancerV2Test -vvv
 
-# MamoLeveragedAeroStrategy account unit tests. Mocks only (no fork): the Sherwood strategy/vault are
+# MamoLeveragedAeroStrategy account unit tests. Mocks only (no fork): the pooled strategy/vault are
 # stubbed, so NO --fork-url. Matches test/MamoLeveragedAeroStrategy*.unit.t.sol.
 leveraged-aero-account:
 	forge test --ffi --match-path "test/MamoLeveragedAeroStrategy*.unit.t.sol" -vvv
 
+# LeveragedAeroVault + vendored-strategy unit tests. Mocks only (no fork): the vendored strategy is
+# stubbed by test/mocks/MockVaultStrategy.sol for the vault suite, and the strategy's own suite runs
+# against venue mocks, so NO --fork-url.
+#
+# BOTH paths are listed explicitly. `test-unit`'s "test/*.unit.t.sol" glob does cross `/` on the
+# pinned forge nightly and picks up test/leveraged-aero/ as well, but that is a property of the
+# matcher, not something the suite should depend on — naming the directory here keeps the vendored
+# strategy's tests running if a toolchain bump ever tightens the glob.
+leveraged-aero-vault:
+	forge test --ffi --match-path "test/LeveragedAeroVault.unit.t.sol" -vvv
+	forge test --ffi --match-path "test/leveraged-aero/*.unit.t.sol" -vvv
+
+# Base-fork exercise of the two leveraged-Aero deployment proposals in mainnet order — 015 (pooled
+# layer: strategy template + LeveragedAeroVault + cloneAndBind + activate) then 012 (account impl +
+# factory + whitelist + open deposits) — followed by a real user lifecycle on the result.
+#
+# Same op-revm note as lp-v2-setup: NO --fork-url here. The test self-forks at a PINNED block via
+# vm.createSelectFork in setUp with the vm.fee(0) Isthmus workaround; passing --fork-url base in
+# addition makes foundry 1.7.x init the OP-stack L1Block handler against the CLI fork and panic
+# ("Missing operator fee scalar for isthmus L1 Block") before that workaround runs.
+leveraged-aero-setup:
+	forge test --ffi --match-path "test/LeveragedAeroSystemSetup.integration.t.sol" -vvv
+
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
@@ -88,4 +119,61 @@ tenderly-matrix:
 tenderly-price-checker:
 	./script/tenderly/run-harness.sh price-checker
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account test-all tenderly-harness tenderly-matrix tenderly-price-checker
+# Vnet heartbeat (MOO-768). A Tenderly vnet mines a block ONLY when a tx arrives, so an idle chain
+# mints nothing and wallets misbehave: any waitForTransactionReceipt with confirmations > 1 deadlocks
+# between interactive legs, and MetaMask's activity tracker keeps mined txs as "submitted/pending"
+# (the stale-queue banner). This calls evm_mine every 15s so the chain keeps ticking while a human is
+# clicking through a manual QA session. Foreground; Ctrl-C to stop. Holds no state — safe to start and
+# stop at will, and it does NOT fast-forward chain time (Tenderly stamps each block with the real
+# elapsed time). Uses TENDERLY_VNET_RPC_URL; `--once` catches a drifted vnet up before a run.
+tenderly-mine:
+	./script/tenderly/mine-ticker.sh
+
+# Same heartbeat, detached — for an all-day ticker the team can share. Logs to
+# script/tenderly/mine-ticker.log (gitignored). Run it on an always-on host: a laptop that
+# sleeps stops the chain, which is the failure the ticker exists to prevent. See the launchd
+# recipe under "Vnet heartbeat" in script/tenderly/README.md.
+tenderly-mine-start:
+	./script/tenderly/mine-ticker.sh --daemon
+
+tenderly-mine-stop:
+	./script/tenderly/mine-ticker.sh --stop
+
+tenderly-mine-status:
+	./script/tenderly/mine-ticker.sh --status
+
+# POOLED-layer deploy against the LIVE persistent Base-fork vnet (runbook Phase B). B.0 FreshFeed-
+# overrides the 5 venue Chainlink feeds via tenderly_setCode (never stale, warping safe) → B.1 deploys
+# the LeveragedAerodromeCLStrategy TEMPLATE + LeveragedAeroVault(USDC, owner=MAMO_MULTISIG) as
+# DEPLOYER_EOA → B.2/B.3 as the multisig: vault.cloneAndBind(template, MAMO_REBALANCER, initData), the
+# atomic clone+initialize+bind → B.4 seed USDC, approve the vault, activateStrategy(SEED) → B.5 asserts
+# every post-condition the account layer depends on. Run this BEFORE tenderly-leveraged-aero-account on
+# a fresh vnet. ALWAYS reuses TENDERLY_VNET_RPC_URL; NEVER time-warps. Key env: MAMO_REBALANCER (the
+# strategy proposer — a dedicated operator address, NOT MAMO_BACKEND), SEED (default 100k USDC), LP_POOL
+# (pending product decision) and the rest of the venue book — see run-leveraged-aero-stack.sh.
+tenderly-leveraged-aero-stack:
+	./script/tenderly/run-harness.sh leveraged-aero-stack
+
+# Account-layer deploy-drive + e2e smoke against the LIVE persistent Base-fork vnet where the POOLED
+# layer (LeveragedAeroVault + a LeveragedAerodromeCLStrategy clone) is already deployed — by
+# `make tenderly-leveraged-aero-stack`, which must run first on a fresh vnet. Replays proposal 012
+# (deploy impl+factory, the 3 multisig actions, validate) then the full account lifecycle
+# (create→deposit→withdraw→request→fulfill→claim→depositIdle gate) as unlocked-impersonation broadcast
+# txs. ALWAYS reuses TENDERLY_VNET_RPC_URL. The pooled addresses default to whatever
+# script/tenderly/leveraged-aero-vnet.json records (env vars still override).
+tenderly-leveraged-aero-account:
+	./script/tenderly/run-harness.sh leveraged-aero-account
+
+# Withdraw-flow EDGE matrix against the LIVE persistent vnet. The account harness proves the HAPPY
+# path (deposit / fast withdraw / request-fulfill-claim); this runs the states a frontend has to
+# RENDER and that path never reaches: quote drift between preview and signature, request->cancel,
+# emergency after the 2-day FULFILL_WINDOW, a stuck fulfil with an unreachable floor, the
+# MAX_OPEN_REQUESTS cap, claim-on-empty, claim sweeping a plain transfer, fulfilled-but-unclaimed
+# (the state with no account-side event), and both exits closing when state != Executed. Each
+# scenario runs behind an evm_snapshot and reverts, so the shared vnet is left as found. Emits
+# script/tenderly/leveraged-aero-withdraw-findings.json — the measured input to the FE artifact.
+# Run AFTER tenderly-leveraged-aero-account (it reads mamo.accountFactory from the manifest).
+tenderly-leveraged-aero-withdraw:
+	./script/tenderly/run-harness.sh leveraged-aero-withdraw
+
+.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
