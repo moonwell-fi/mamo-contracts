@@ -264,6 +264,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         address buyToken = address(order.buyToken);
         if (sellToken == buyToken) revert TokensMustDiffer();
         if (order.sellAmount == 0) revert ZeroAmount();
+        if (order.buyAmount == 0) revert ZeroAmount();
+        if (stockRegistry.paused()) revert RegistryPaused();
 
         if (sellToken != address(asset)) {
             IStockAccountRegistry.TokenStatus status = stockRegistry.tokenConfig(sellToken).status;
@@ -285,7 +287,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (expectedOut == 0) revert PriceCheckFailed();
 
         uint256 slip = getAccountSlippage();
-        if (slip > TOTAL_BPS) revert SlippageExceedsMaximum();
+        if (slip >= TOTAL_BPS) revert SlippageExceedsMaximum();
         if (order.buyAmount < (expectedOut * (TOTAL_BPS - slip)) / TOTAL_BPS) revert PriceCheckFailed();
 
         _checkRange(sellToken, buyToken, order.sellAmount, order.buyAmount, expectedOut);
@@ -369,7 +371,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      */
     function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
         if (usdcAmount == 0) revert ZeroAmount();
-        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
+        _checkWithdrawSlippage(maxSlippageBps);
 
         uint256 idle = asset.balanceOf(address(this));
         uint256 sold;
@@ -393,7 +395,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
      */
     function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
-        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
+        _checkWithdrawSlippage(maxSlippageBps);
 
         (address[] memory tokens, uint256[] memory balances) = _sellable();
         uint256 sold = _executeSells(tokens, balances, maxSlippageBps);
@@ -419,6 +421,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         override
         returns (address[] memory tokensToSell, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds)
     {
+        _checkWithdrawSlippage(maxSlippageBps);
+
         uint256 idle = asset.balanceOf(address(this));
         if (idle >= usdcAmount) {
             return (new address[](0), new uint256[](0), 0, 0);
@@ -689,6 +693,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function _isSellable(address token) internal view returns (bool) {
         return IERC20(token).balanceOf(address(this)) > 0
             && stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Halted;
+    }
+
+    /// @dev A full cap would zero every sell floor, and zero the divisor the gross up below divides by
+    function _checkWithdrawSlippage(uint16 maxSlippageBps) internal view {
+        if (maxSlippageBps >= TOTAL_BPS || maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) {
+            revert SlippageExceedsMaximum();
+        }
     }
 
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)

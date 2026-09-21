@@ -52,6 +52,7 @@ interface IStockAccountStrategy {
     error PriceCheckFailed();
     error FeeTokenNotAllowed(address token);
     error NoBalanceForFee(address token);
+    error RegistryPaused();
 
     function deposit(uint256 amount) external;
 

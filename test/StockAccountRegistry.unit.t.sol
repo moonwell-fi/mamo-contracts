@@ -211,6 +211,32 @@ contract StockAccountRegistryUnitTest is Test {
         new StockAccountRegistry(config);
     }
 
+    /// @dev A full cap would zero the fair price floor every account order is checked against
+    function testConstructorRevertsOnASlippageCapOfTenThousand() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxBackendSlippageBps = 10_000;
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        new StockAccountRegistry(config);
+
+        config = defaultConfig();
+        config.maxWithdrawSlippageBps = 10_000;
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testConstructorAcceptsASlippageCapOfNineThousandNineHundredNinetyNine() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxBackendSlippageBps = 9_999;
+        config.maxWithdrawSlippageBps = 9_999;
+
+        StockAccountRegistry created = new StockAccountRegistry(config);
+
+        assertEq(created.maxBackendSlippageBps(), 9_999, "backend slippage mismatch");
+        assertEq(created.maxWithdrawSlippageBps(), 9_999, "withdraw slippage mismatch");
+    }
+
     function testConstructorRevertsOnZeroTwapWindow() public {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.twapWindow = 0;
@@ -416,7 +442,13 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxBackendSlippageBps(10_001);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        registry.setMaxBackendSlippageBps(10_000);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(10_001);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        registry.setMaxWithdrawSlippageBps(10_000);
 
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
@@ -448,6 +480,16 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert(IStockAccountRegistry.InvalidManagementFee.selector);
         new StockAccountRegistry(config);
+    }
+
+    function testSlippageSettersAcceptOneBpsUnderTheFullCap() public {
+        vm.startPrank(admin);
+        registry.setMaxBackendSlippageBps(9_999);
+        registry.setMaxWithdrawSlippageBps(9_999);
+        vm.stopPrank();
+
+        assertEq(registry.maxBackendSlippageBps(), 9_999, "backend slippage mismatch");
+        assertEq(registry.maxWithdrawSlippageBps(), 9_999, "withdraw slippage mismatch");
     }
 
     function testListTokenStoresConfigAndEmits() public {
@@ -630,6 +672,10 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.listToken(otherToken, activeConfig());
 
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setManagementFeeBps(50);
+
         assertEq(registry.maxPositions(), 10, "max positions mismatch");
         assertEq(registry.allTokens().length, 1, "token list length mismatch");
         assertEq(
@@ -650,6 +696,33 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.setMaxPositions(7);
         assertEq(registry.maxPositions(), 7, "max positions mismatch");
+    }
+
+    function testSetOrderSignerWorksWhilePaused() public {
+        vm.prank(guardian);
+        registry.pause();
+
+        address rotated = makeAddr("rotatedSigner");
+        vm.prank(admin);
+        registry.setOrderSigner(rotated);
+
+        assertEq(registry.orderSigner(), rotated, "order signer mismatch");
+    }
+
+    function testSetTokenStatusWorksWhilePaused() public {
+        listDefaultToken();
+
+        vm.prank(guardian);
+        registry.pause();
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Halted);
+
+        assertEq(
+            uint256(registry.tokenConfig(token).status),
+            uint256(IStockAccountRegistry.TokenStatus.Halted),
+            "status mismatch"
+        );
     }
 
     function testOnlyGuardianCanPause() public {

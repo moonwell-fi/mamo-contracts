@@ -77,6 +77,7 @@ contract StockAccountStrategyHandler is Test {
     uint256 public callsWarp;
     uint256 public callsPayFees;
     uint256 public callsSetFeeRate;
+    uint256 public callsSetSlippageCap;
     uint256 public callsSubmitOrder;
 
     uint256 public acceptedOrders;
@@ -105,6 +106,7 @@ contract StockAccountStrategyHandler is Test {
 
     bool public rangeViolated;
     bool public fillCapViolated;
+    bool public zeroFloorViolated;
     bool public valueLossViolated;
     bool public statusViolated;
     bool public settlementFailed;
@@ -466,6 +468,14 @@ contract StockAccountStrategyHandler is Test {
         if (bounded > maxRateSeen) maxRateSeen = bounded;
     }
 
+    /// @dev The mock registry takes any value, so the draw includes the 10_000 the real one refuses
+    function setSlippageCap(uint16 bps) external {
+        _observe();
+        callsSetSlippageCap++;
+
+        stockRegistry.setMaxBackendSlippageBps(uint16(bound(uint256(bps), 0, TOTAL_BPS)));
+    }
+
     function submitOrder(uint8 sellIdx, uint8 buyIdx, uint256 sellAmount, uint256 buyAmountBps) external {
         _observe();
         callsSubmitOrder++;
@@ -517,8 +527,8 @@ contract StockAccountStrategyHandler is Test {
     }
 
     function violation() external view returns (bool) {
-        return rangeViolated || fillCapViolated || valueLossViolated || statusViolated || settlementFailed
-            || feeClockWentBackwards || feeCreditedTooMuch || feeCreditWentUnbacked;
+        return rangeViolated || fillCapViolated || zeroFloorViolated || valueLossViolated || statusViolated
+            || settlementFailed || feeClockWentBackwards || feeCreditedTooMuch || feeCreditWentUnbacked;
     }
 
     function _settle(address sellToken, address buyToken, uint256 sellAmount, uint256 buyAmount)
@@ -582,6 +592,11 @@ contract StockAccountStrategyHandler is Test {
         if (buyAmount < floor) {
             fillCapViolated = true;
             _latch("an order priced under the account slippage cap was accepted");
+        }
+
+        if (expectedOut > 0 && floor == 0) {
+            zeroFloorViolated = true;
+            _latch("an order was accepted against a fair price floor of zero");
         }
     }
 
@@ -799,7 +814,7 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
         startTimestamp = block.timestamp;
 
-        bytes4[] memory selectors = new bytes4[](19);
+        bytes4[] memory selectors = new bytes4[](20);
         selectors[0] = StockAccountStrategyHandler.deposit.selector;
         selectors[1] = StockAccountStrategyHandler.depositToken.selector;
         selectors[2] = StockAccountStrategyHandler.withdrawToken.selector;
@@ -812,8 +827,9 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
         selectors[9] = StockAccountStrategyHandler.setFeeRate.selector;
         selectors[10] = StockAccountStrategyHandler.payFeesAfterALongDrought.selector;
         selectors[11] = StockAccountStrategyHandler.payFeesTheFeeCannotBuy.selector;
+        selectors[12] = StockAccountStrategyHandler.setSlippageCap.selector;
 
-        for (uint256 i = 12; i < selectors.length; i++) {
+        for (uint256 i = 13; i < selectors.length; i++) {
             selectors[i] = StockAccountStrategyHandler.submitOrder.selector;
         }
 
@@ -827,6 +843,10 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
 
     function invariant_acceptedOrdersFillWithinTheSlippageCap() public view {
         assertFalse(handler.fillCapViolated(), handler.lastViolation());
+    }
+
+    function invariant_acceptedOrdersAlwaysHaveANonZeroFairPriceFloor() public view {
+        assertFalse(handler.zeroFloorViolated(), handler.lastViolation());
     }
 
     function invariant_derivedSellReferenceMatchesAFreshQuote() public view {
@@ -927,6 +947,7 @@ contract StockAccountStrategyInvariantsUnitTest is StockAccountStrategyTestBase 
         emit log_named_uint("calls warp", handler.callsWarp());
         emit log_named_uint("calls payFees", handler.callsPayFees());
         emit log_named_uint("calls setFeeRate", handler.callsSetFeeRate());
+        emit log_named_uint("calls setSlippageCap", handler.callsSetSlippageCap());
         emit log_named_uint("calls submitOrder", handler.callsSubmitOrder());
         emit log_named_uint("orders accepted", handler.acceptedOrders());
         emit log_named_uint("orders rejected", handler.rejectedOrders());
