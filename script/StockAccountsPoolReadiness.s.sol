@@ -22,6 +22,12 @@ import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 contract StockAccountsPoolReadiness is Script {
     string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
 
+    /// @notice Seconds per Base block, the rate at which a pool writes observations
+    uint256 internal constant BLOCK_SECONDS = 2;
+
+    /// @notice How many times the window's own observation count the ring is sized at
+    uint256 internal constant RING_HEADROOM = 2;
+
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
 
@@ -58,9 +64,12 @@ contract StockAccountsPoolReadiness is Script {
         return configLoader.getConfig().twapWindow;
     }
 
-    /// @notice Observations a window needs at two second blocks, doubled for headroom
+    /// @notice Observations a window needs at Base's block rate, times the headroom factor
+    /// @dev BLOCK_SECONDS and RING_HEADROOM are both 2 today, so the two cancel and the target equals
+    ///      the window in seconds: 180 for the configured 180-second window. They are named rather than
+    ///      folded away because moving either one is what changes the target
     function _requiredCardinality(uint32 twapWindow) internal pure returns (uint16) {
-        uint256 required = (uint256(twapWindow) / 2) * 2;
+        uint256 required = (uint256(twapWindow) / BLOCK_SECONDS) * RING_HEADROOM;
         return required > type(uint16).max ? type(uint16).max : uint16(required);
     }
 

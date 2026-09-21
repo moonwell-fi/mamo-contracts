@@ -13,9 +13,11 @@ contract StockAccountsConfig is Script {
     using stdJson for string;
 
     /// @notice A token to list on the stock registry, fields alphabetized to match the JSON
-    /// @dev Every entry carries every key: vm.parseJson types a JSON value by its shape, so an entry
-    ///      missing one, or writing a feed as "" rather than the zero address, breaks the array decode.
-    ///      A PoolTwap entry uses the zero feed and a zero heartbeat
+    /// @dev vm.parseJson types a JSON value by its shape and encodes the keys in alphabetical order, so
+    ///      every entry has to carry every key. A missing key does revert the decode, but a key of the
+    ///      wrong type in the right position does not: an address written as "" is encoded as a string
+    ///      and reads back as the ABI offset, 0x...C0, a nonzero garbage address. _validate below is
+    ///      what catches that. A PoolTwap entry uses the zero feed and a zero heartbeat
     struct TokenListEntry {
         address chainlinkFeed;
         uint256 heartbeat;
@@ -86,12 +88,41 @@ contract StockAccountsConfig is Script {
     }
 
     /// @notice The tokens to list on the stock registry, from config/stock-accounts/<chainId>.json
-    /// @dev Returns an empty array when the file is missing or its `.tokens` array is empty
+    /// @dev Returns an empty array when the file is missing or its `.tokens` array is empty. Every
+    ///      entry is validated here, so a malformed one fails before any consumer reads it
     function loadTokenList() public view returns (TokenListEntry[] memory) {
         string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
         if (!vm.isFile(path)) return new TokenListEntry[](0);
 
         bytes memory raw = vm.parseJson(vm.readFile(path), ".tokens");
-        return raw.length == 0 ? new TokenListEntry[](0) : abi.decode(raw, (TokenListEntry[]));
+        if (raw.length == 0) return new TokenListEntry[](0);
+
+        TokenListEntry[] memory entries = abi.decode(raw, (TokenListEntry[]));
+        for (uint256 i = 0; i < entries.length; i++) {
+            _validate(entries[i]);
+        }
+        return entries;
+    }
+
+    /// @notice Rejects a token list entry the deploy would otherwise carry into an admin batch
+    /// @dev The decode cannot do this on its own: a mistyped value reads back as garbage rather than
+    ///      reverting, and a mis-cased `source` compares unequal to both legal strings, which would
+    ///      drop the entry out of pool readiness while still listing it as pool-priced
+    function _validate(TokenListEntry memory entry) internal pure {
+        string memory symbol = entry.symbol;
+
+        require(entry.token != address(0), string.concat("Token list: zero token, ", symbol));
+        require(entry.pool != address(0), string.concat("Token list: zero pool, ", symbol));
+
+        bytes32 source = keccak256(bytes(entry.source));
+        bool isChainlink = source == keccak256(bytes("Chainlink"));
+        require(
+            isChainlink || source == keccak256(bytes("PoolTwap")), string.concat("Token list: bad source, ", symbol)
+        );
+
+        require(
+            (entry.chainlinkFeed != address(0)) == isChainlink, string.concat("Token list: feed vs source, ", symbol)
+        );
+        require((entry.heartbeat != 0) == isChainlink, string.concat("Token list: heartbeat vs source, ", symbol));
     }
 }

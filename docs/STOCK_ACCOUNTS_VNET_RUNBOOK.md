@@ -61,6 +61,12 @@ account's NAV after that (see below). The whole rerun is a no-op.
      does 8a: the probe routes straight through `existingPriceChecker`, which quotes nothing for an
      unconfigured pair.
 
+If a Chainlink pair is ever removed from `existingPriceChecker` after its token is listed, a re-run of
+the deploy does **not** restore it: step 8b sees the token already listed and skips the entry before
+step 8a runs. The repair is manual — call `addTokenConfiguration(token, USDC, [feed, USDC/USD
+reversed])` and `setMaxTimePriceValid(token, heartbeat)` on the checker as its own owner, with the
+values from the token list and `USDC_USD_HEARTBEAT` for the second hop.
+
 Every step checks the address book (steps 1, 2, 4, 6) or the onchain state (steps 3, 5, 7, 8) first,
 so a rerun against the same address book is a no-op. Deploying a name that is already recorded is
 refused by the address book rather than silently overwritten.
@@ -151,7 +157,7 @@ vnet run needs no impersonation for the stock registry itself — step 3 and ste
 
 `config/stock-accounts/8453.json` is the token list. It holds five entries: the four launch stocks —
 AAPLc, GOOGLc, METAc, NVDAc — priced from their Aerodrome CL pool against USDC, and cbBTC priced from
-Chainlink through `existingPriceChecker`:
+Chainlink through `existingPriceChecker`. One of each kind, abridged from the committed file:
 
 ```json
 {"tokens":[
@@ -165,20 +171,36 @@ Chainlink through `existingPriceChecker`:
 ```
 
 `source` is `PoolTwap` or `Chainlink`, `heartbeat` is the Chainlink feed's staleness bound in seconds —
-it is both the first hop's heartbeat and the `setMaxTimePriceValid` value, while the USDC/USD hop is
-fixed at a day — and every token is listed as `Active`. A `PoolTwap` entry still carries a `pool` — the
-registry refuses a listing without one — and writes the zero feed with a zero heartbeat.
+it is both the first hop's heartbeat and the `setMaxTimePriceValid` value — and every token is listed
+as `Active`. A `PoolTwap` entry still carries a `pool` — the registry refuses a listing without one —
+and writes the zero feed with a zero heartbeat.
+
+The second hop, USDC/USD, is not configured from the file: `DeployStockAccounts.USDC_USD_HEARTBEAT`
+fixes it at **90,000 seconds**, deliberately above the feed's nominal 86,400 heartbeat. Walking the
+live Base aggregator `0x7e860098F58bBFC8648a4311b374B1D669a2bc6B` over 31.8 days, 31 of its 32 round
+gaps ran past 86,400 — median 86,418, longest 86,490 — so the node fires tens of seconds late almost
+every cycle. The checker enforces the bound strictly and valuation has no `try`/`catch`, so at 86,400
+the cbBTC quote would revert for roughly a minute a day and take account value, weights, both deposits,
+every withdrawal, the preview, the fee and order validation down with it for any account holding it.
+**Do not tighten it back to the nominal heartbeat.** The cbBTC hop's own 3,600 is loose the other way —
+that feed's real interval measures 1,200 with a longest gap of 1,232 — and is left as it is, matching
+how `config/strategies/cbBTCStrategyConfig.json` configures the same feed.
 
 Three rules the file has to follow, because `vm.parseJson` types each JSON value by its shape and the
 whole `.tokens` array is decoded as one Solidity type:
 
 - every entry carries every key, in alphabetical order;
-- an unused feed is the **zero address**, never `""` — an empty string decodes as a string while a
-  real address decodes as an address, and one entry of each makes the array undecodable;
+- an unused feed is the **zero address**, never `""` — a missing key does revert the decode, but a key
+  of the wrong type in the right position does not: `""` is encoded as a string and reads back as the
+  ABI offset `0x…C0`, a nonzero garbage address. `StockAccountsConfig._validate` and the exact
+  addresses pinned in the unit test are what catch that, not the decode;
 - entries are sorted by symbol, which is only cosmetic.
 
-`test/StockAccountsConfig.unit.t.sol` decodes the committed file in CI, so a malformed entry fails
-there rather than at deploy time.
+`loadTokenList` validates every entry it decodes — token and pool non-zero, `source` exactly one of
+the two legal strings, feed and heartbeat non-zero exactly when the source is `Chainlink` — so a bad
+entry fails at load rather than reaching an admin batch that only breaks when the Safe executes it.
+`test/StockAccountsConfig.unit.t.sol` runs that load against the committed file in CI, pinning all five
+entries by exact address and counting the pool-priced ones.
 
 `asset` (USDC) is the quote asset: it goes to the registry constructor, the price checker and the
 factory. The registry probes every listing and every raise back to `Active` through it, so a token
@@ -370,7 +392,8 @@ delegation on Base, which would make it an ERC-1271 signer rather than the plain
 with.
 
 `prepare.sh` still calls `ensure_listed NVDAc`, which is now a no-op: the deploy lists all four stocks
-before the harness ever runs. `05-gas.sh` likewise skips the four and lists whatever else it discovers,
+before the harness ever runs, so the registry already holds four B20 tokens plus cbBTC when the first
+scenario starts. `05-gas.sh` likewise skips the four and lists whatever else it discovers,
 up to its target of ten. cbBTC is not a B20 token, so it never appears in that discovery — it is listed
 by the deploy and nothing else in the harness touches it.
 

@@ -61,7 +61,7 @@ annotate() { # annotate <pools-file>
 # A pool whose history is shorter than the window becomes usable once the ring is grown and an
 # observation is written; the wait that makes it count happens after every such pool is poked.
 widen_window() { # widen_window <pool> <tick-spacing> <token>
-  send "$DEPLOYER" "$1" 'increaseObservationCardinalityNext(uint16)' 200 >/dev/null
+  send "$DEPLOYER" "$1" 'increaseObservationCardinalityNext(uint16)' "$RING" >/dev/null
   swap "$DEPLOYER" "$USDC" "$3" "$2" 1000000 0
 }
 
@@ -69,6 +69,12 @@ CANDIDATES=$STATE_DIR/candidates.tsv
 DEEP=$STATE_DIR/deep.tsv
 ANNOTATED=$STATE_DIR/annotated.tsv
 TWAP_WINDOW=$(call "$STOCK_REGISTRY" 'twapWindow()(uint32)')
+# The ring these pools are grown to, derived the way StockAccountsPoolReadiness derives it rather than
+# pinned at a number that happens to cover today's window: one observation per Base block, times the
+# headroom factor.
+BLOCK_SECONDS=2
+RING_HEADROOM=2
+RING=$(((TWAP_WINDOW / BLOCK_SECONDS) * RING_HEADROOM))
 
 deep_pools >"$DEEP"
 annotate "$DEEP" >"$ANNOTATED"

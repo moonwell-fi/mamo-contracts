@@ -22,8 +22,21 @@ export FOUNDRY_CACHE_PATH=${FOUNDRY_CACHE_PATH:-cache}
 
 [ -f "$MANIFEST" ] || { echo "missing $MANIFEST; run 'make tenderly-stock-accounts' first" >&2; exit 1; }
 
-book() { jq -r --arg n "$1" '.[] | select(.name == $n) | .addr' "$ADDRESS_BOOK"; }
-mani() { jq -r --arg n "$1" '.[$n]' "$MANIFEST"; }
+# Both lookups are fatal on a miss: jq prints "" or "null" and exits 0, which would otherwise travel
+# on as an RPC url or a call target.
+book() { # book <name> -> its address in addresses/8453.json
+  local addr
+  addr=$(jq -r --arg n "$1" '.[] | select(.name == $n) | .addr' "$ADDRESS_BOOK")
+  [ -n "$addr" ] && [ "$addr" != "null" ] || { echo "no $1 in $ADDRESS_BOOK" >&2; exit 1; }
+  printf '%s\n' "$addr"
+}
+
+mani() { # mani <key> -> its value in the vnet manifest
+  local value
+  value=$(jq -r --arg n "$1" '.[$n]' "$MANIFEST")
+  [ -n "$value" ] && [ "$value" != "null" ] || { echo "no $1 in $MANIFEST" >&2; exit 1; }
+  printf '%s\n' "$value"
+}
 
 VNET=$(mani rpc)
 DEPLOYER=$(mani testUser)
@@ -106,7 +119,16 @@ call() { calln 1 "$@"; }
 
 # Nth returned value kept whole, for the "[a, b, c]" array returns.
 callline() { local n=$1; shift; callraw "$@" | sed -n "${n}p"; }
-list_at() { printf '%s' "$1" | tr -d '[]' | tr ',' '\n' | sed -n "$(($2 + 1))p" | awk '{print $1}'; }
+# A row of a "[a, b, c]" return, by index. A non-numeric index is a failed lookup, never row 0:
+# bash reads "" as the unary plus of nothing and would hand sed a 1.
+list_at() { # list_at <bracketed-list> <index>
+  case "${2-}" in '' | *[!0-9]*)
+    echo "list_at: '${2-}' is not a row index" >&2
+    return 1
+    ;;
+  esac
+  printf '%s' "$1" | tr -d '[]' | tr ',' '\n' | sed -n "$(($2 + 1))p" | awk '{print $1}'
+}
 
 send() { # send <from> <to> <sig> [args...]
   local from=$1 to=$2 out status
@@ -325,11 +347,15 @@ quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
 }
 
 # getWeights covers every registry-listed token, in registry order, so a token's own row has to be
-# looked up by address rather than assumed to be the first one.
+# looked up by address rather than assumed to be the first one. A token with no row is a fatal lookup
+# failure: the empty index used to reach list_at and read row 0 there.
 weights_index() { # weights_index <account> <token>
-  callline 1 "$1" 'getWeights()(address[],uint256[],uint256[])' |
+  local index
+  index=$(callline 1 "$1" 'getWeights()(address[],uint256[],uint256[])' |
     tr -d '[]' | tr ',' '\n' | awk '{print tolower($1)}' |
-    grep -n -x "$(lc "$2")" | cut -d: -f1 | awk '{print $1 - 1}'
+    grep -n -x -- "$(lc "$2")" | cut -d: -f1 | awk '{print $1 - 1}') || true
+  [ -n "$index" ] || { echo "weights_index: $2 has no row in getWeights() of account $1" >&2; return 1; }
+  printf '%s\n' "$index"
 }
 
 expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint256)' "$1" "$2" "$3"; }

@@ -33,6 +33,15 @@ contract DeployStockAccounts is Script {
     string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
     string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
+    /// @notice Staleness bound of the USDC/USD hop every Chainlink entry is quoted through
+    /// @dev Deliberately above the feed's nominal 86,400 heartbeat. Walking the live Base aggregator
+    ///      over 31.8 days, 31 of its 32 round gaps ran past 86,400 (median 86,418, longest 86,490):
+    ///      the node fires tens of seconds late almost every cycle. The checker enforces the bound
+    ///      strictly and valuation has no try/catch, so at 86,400 the quote reverts for a minute or so
+    ///      each day, taking account value, weights, deposits, withdrawals and order validation with
+    ///      it. Do not tighten this back to the nominal heartbeat
+    uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
+
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
     StockAccountsConfig.DeploymentConfig internal config;
@@ -301,7 +310,7 @@ contract DeployStockAccounts is Script {
             cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
                 chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"),
                 reverse: true,
-                heartbeat: 86_400
+                heartbeat: USDC_USD_HEARTBEAT
             });
 
             _adminCall(
