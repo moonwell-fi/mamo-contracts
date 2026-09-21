@@ -2,7 +2,7 @@ DEPLOY_ENV ?= 8453_TESTING
 ADDRESSES_PATH ?= ./script/stock-accounts/addresses-dryrun
 
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountRouterSwapIntegrationTest|StockAccountSystemSetupTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountStrategyInvariantsUnitTest|StockAccountRouterSwapIntegrationTest|StockAccountSystemSetupTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
