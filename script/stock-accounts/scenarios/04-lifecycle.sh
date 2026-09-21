@@ -3,6 +3,11 @@
 # paid outside a settlement -- a cash withdrawal paying in USDC, an in-kind withdrawal paying in the
 # token it sends, a poke on an idle account, and a halted token that can no longer settle the fee but
 # is still withdrawable, the fee then coming out of the cash instead.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, the asserts refuse
+# an empty operand outright (see lib.sh), so it is recorded as a FAIL and cannot pass, and `send` will
+# not build a transaction out of one. Reads that decide control flow are captured into a variable
+# first, where the shell's own -e catches them.
+# shellcheck disable=SC2312
 set -euo pipefail
 
 SCEN=04-lifecycle
@@ -26,7 +31,11 @@ USER_C=$(actor C)
 fund "$USER_C" "$DEPOSIT"
 
 PREDICTED=$(call "$FACTORY" 'computeStrategyAddress(address)(address)' "$USER_C")
-if [ "$(cast code "$PREDICTED" --rpc-url "$VNET" 2>>"$LOG")" = "0x" ]; then
+# Captured, not compared inline: an empty answer from a failed call is not "0x", so the account would
+# never be created and every check below would run against an address with nothing behind it.
+PREDICTED_CODE=$(cast code "$PREDICTED" --rpc-url "$VNET" 2>>"$LOG") || true
+[ -n "$PREDICTED_CODE" ] || { echo "cannot read the code at $PREDICTED (see $LOG)" >&2; exit 1; }
+if [ "$PREDICTED_CODE" = "0x" ]; then
   RECEIPT=$(send "$USER_C" "$FACTORY" 'createStrategyForUser(address,(address,uint16)[],uint16)' \
     "$USER_C" "[($NVDA,5000)]" 5000)
   CREATED=0x$(printf '%s' "$RECEIPT" |
@@ -115,7 +124,10 @@ PAID_NVDA=$(fees_paid "$RECEIPT" "$ACCT" "$NVDA")
 assert_eq "the poke paid the day of fee in NVDAc" \
   "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID_NVDA"
 assert_approx "the poked fee is feeDueIn(NVDAc) read before it" "$PAID_NVDA" "$FEE_DUE_NVDA" "$FEE_TOL_BPS"
-assert_eq "lastFeePaid moved to the poke" "$(call "$ACCT" 'lastFeePaid()(uint64)')" "$(now_ts)"
+# Both sides captured: two failed reads would otherwise compare empty against empty and pass.
+LAST_FEE_PAID=$(call "$ACCT" 'lastFeePaid()(uint64)')
+POKE_TS=$(now_ts)
+assert_eq "lastFeePaid moved to the poke" "$LAST_FEE_PAID" "$POKE_TS"
 assert_eq "nothing is due straight after" "$(fee_due "$ACCT")" 0
 record "$SCEN" "poked fee: paid vs feeDueIn(NVDAc)" 1 "$PAID_NVDA vs $FEE_DUE_NVDA"
 
@@ -123,7 +135,10 @@ record "$SCEN" "poked fee: paid vs feeDueIn(NVDAc)" 1 "$PAID_NVDA vs $FEE_DUE_NV
 send "$DEPLOYER" "$STOCK_REGISTRY" 'setTokenStatus(address,uint8)' "$NVDA" "$HALTED" >/dev/null
 increase_time "$DAY"
 
-assert_eq "halted token drops out of the NAV" "$(nav "$ACCT")" "$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")"
+# Both sides captured, for the same reason: empty NAV against empty balance would read as agreement.
+HALTED_NAV=$(nav "$ACCT")
+HALTED_CASH=$(call "$USDC" 'balanceOf(address)(uint256)' "$ACCT")
+assert_eq "halted token drops out of the NAV" "$HALTED_NAV" "$HALTED_CASH"
 assert_eq "halted token is still held" "$(list_at "$(callline 1 "$ACCT" 'heldTokens()(address[])')" 0)" "$NVDA"
 expect_revert "the fee cannot be taken in a halted token" "$(selector 'FeeTokenNotAllowed(address)')" \
   "$DEPLOYER" "$ACCT" 'payFees(address)' "$NVDA"

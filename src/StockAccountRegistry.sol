@@ -20,6 +20,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Highest annual management fee the admin may set, in basis points
     uint16 public constant override maxManagementFeeBps = 200;
 
+    /// @notice Highest backend slippage cap the admin may set, in basis points
+    uint16 public constant override backendSlippageCeilingBps = 500;
+
+    /// @notice Highest withdrawal slippage cap the admin may set, in basis points
+    uint16 public constant override withdrawSlippageCeilingBps = 1_000;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
@@ -69,6 +75,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
     event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event TokenListed(address indexed token, TokenConfig cfg);
+    event TokenPoolUpdated(address indexed token, address indexed oldPool, address indexed newPool);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
 
     /// @param config The initial roles and global configuration
@@ -209,6 +216,21 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit TokenListed(token, cfg);
     }
 
+    /// @notice Repoints a halted token at a new pool, which re-activation then probes before the token counts again
+    function setTokenPool(address token, address newPool) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        TokenConfig storage cfg = _tokenConfig[token];
+        if (cfg.status == TokenStatus.None) revert TokenNotListed(token);
+        if (cfg.status != TokenStatus.Halted) revert TokenNotHalted(token);
+        if (newPool == cfg.pool) revert AlreadySet();
+        if (newPool.code.length == 0) revert NotAContract(newPool);
+        if (newPool == token) revert PoolIsToken();
+
+        address oldPool = cfg.pool;
+        cfg.pool = newPool;
+
+        emit TokenPoolUpdated(token, oldPool, newPool);
+    }
+
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
     /// @param status The new status; the guardian may only tighten it, and any loosening re-probes the price
@@ -319,7 +341,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps > backendSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -328,7 +350,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps >= 10_000) revert InvalidSlippageCap();
+        if (newSlippageBps > withdrawSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;

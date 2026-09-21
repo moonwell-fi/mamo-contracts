@@ -38,6 +38,7 @@ interface IStockAccountRegistry {
     error PoolIsToken();
     error FeedOnlyForChainlink();
     error TokenNotListed(address token);
+    error TokenNotHalted(address token);
     error InvalidStatus();
     error NotAdminOrGuardian();
     error GuardianCanOnlyLower();
@@ -70,6 +71,10 @@ interface IStockAccountRegistry {
     function managementFeeBps() external view returns (uint16);
 
     function maxManagementFeeBps() external view returns (uint16);
+
+    function backendSlippageCeilingBps() external view returns (uint16);
+
+    function withdrawSlippageCeilingBps() external view returns (uint16);
 
     function orderSigner() external view returns (address);
 

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Withdrawals: idle cash is paid without touching a pool, a shortfall sells exactly what the preview
 # said, and the TWAP floor blocks a sale into a spot price the average has not absorbed.
+# Reads here are arguments to an assert or to `send`: a failed read prints nothing, the asserts refuse
+# an empty operand outright (see lib.sh), so it is recorded as a FAIL and cannot pass, and `send` will
+# not build a transaction out of one. Reads that decide control flow are captured into a variable
+# first, where the shell's own -e catches them.
+# shellcheck disable=SC2312
 set -euo pipefail
 
 SCEN=02-withdrawals

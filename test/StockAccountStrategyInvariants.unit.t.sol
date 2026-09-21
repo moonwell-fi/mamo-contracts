@@ -468,12 +468,13 @@ contract StockAccountStrategyHandler is Test {
         if (bounded > maxRateSeen) maxRateSeen = bounded;
     }
 
-    /// @dev The mock registry takes any value, so the draw includes the 10_000 the real one refuses
     function setSlippageCap(uint16 bps) external {
         _observe();
         callsSetSlippageCap++;
 
-        stockRegistry.setMaxBackendSlippageBps(uint16(bound(uint256(bps), 0, TOTAL_BPS)));
+        stockRegistry.setMaxBackendSlippageBps(
+            uint16(bound(uint256(bps), 0, stockRegistry.backendSlippageCeilingBps()))
+        );
     }
 
     function submitOrder(uint8 sellIdx, uint8 buyIdx, uint256 sellAmount, uint256 buyAmountBps) external {
