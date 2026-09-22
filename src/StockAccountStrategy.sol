@@ -294,6 +294,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             if (stockRegistry.tokenConfig(buyToken).status != IStockAccountRegistry.TokenStatus.Active) {
                 revert BuyTokenNotActive(buyToken);
             }
+            if (_targetBps(buyToken) == 0) revert BuyTokenNotInBasket(buyToken);
         }
 
         if (order.sellAmount > IERC20(sellToken).balanceOf(address(this))) revert SellExceedsBalance();
@@ -376,7 +377,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _targetOf(address token) internal view returns (uint16) {
-        return token == address(asset) ? cashTargetBps : _targetBps(token);
+        if (token == address(asset)) return cashTargetBps;
+
+        // A SellOnly token is being wound down, so it is sold toward zero whatever the basket says
+        if (stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.SellOnly) return 0;
+
+        return _targetBps(token);
     }
 
     /**
@@ -467,7 +473,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         for (uint256 i = 0; i < tokens.length; i++) {
             currentBps[i] = nav == 0 ? 0 : (values[i] * TOTAL_BPS) / nav;
-            targetBps[i] = _targetBps(tokens[i]);
+            targetBps[i] = _targetOf(tokens[i]);
         }
     }
 
