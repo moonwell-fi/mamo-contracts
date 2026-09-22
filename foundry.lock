@@ -1,0 +1,23 @@
+{
+  "lib/forge-proposal-simulator": {
+    "rev": "896ea50203a2631b54ecd3d0da08d21773c9c44a"
+  },
+  "lib/forge-std": {
+    "rev": "3b20d60d14b343ee4f908cb8079495c07f5e8981"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "acd4ff74de833399287ed6b31b4debf6b2b35527"
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "3d5fa5c24c411112bab47bec25cfa9ad0af0e6e8"
+  },
+  "lib/openzeppelin-foundry-upgrades": {
+    "rev": "cbce1e00305e943aa1661d43f41e5ac72c662b07"
+  },
+  "lib/safe-smart-account": {
+    "rev": "bf943f80fec5ac647159d26161446ac5d716a294"
+  },
+  "lib/surl": {
+    "rev": "034c912ae9b5e707a5afd21f145b452ad8e800df"
+  }
+}

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.25;
 
+/// @notice Mirrors the Aerodrome Slipstream NonfungiblePositionManager deployed at
+///         0x827922686190790b37229fd06084350E74485b72 on Base (chain 8453) — NOT the Uniswap V3
+///         NFPM. Slipstream replaced Uniswap's `uint24 fee` with `int24 tickSpacing` in both
+///         `MintParams` and the `positions()` return tuple; this interface declares the
+///         `positions()` slot with its real Slipstream type. (`MintParams` here is kept in the
+///         Uniswap shape because nothing in this repo mints through THIS interface — the
+///         Slipstream mint path goes through ICLPositionManager.MintParams, which already carries
+///         `int24 tickSpacing`.)
 interface INonfungiblePositionManager {
     struct DecreaseLiquidityParams {
         uint256 tokenId;
@@ -83,7 +91,10 @@ interface INonfungiblePositionManager {
     /// @return operator The address that is approved for spending
     /// @return token0 The address of the token0 for a specific pool
     /// @return token1 The address of the token1 for a specific pool
-    /// @return fee The fee associated with the pool
+    /// @return tickSpacing The tick spacing of the pool the position was minted against. Uniswap V3
+    ///         returns `uint24 fee` in this slot; Aerodrome Slipstream returns `int24 tickSpacing`.
+    ///         Declared with the SIGNED Slipstream type: the two only coincide while spacings are
+    ///         positive, and a `uint24` decode would silently wrap a negative word.
     /// @return tickLower The lower end of the tick range for the position
     /// @return tickUpper The higher end of the tick range for the position
     /// @return liquidity The liquidity of the position
@@ -99,7 +110,7 @@ interface INonfungiblePositionManager {
             address operator,
             address token0,
             address token1,
-            uint24 fee,
+            int24 tickSpacing,
             int24 tickLower,
             int24 tickUpper,
             uint128 liquidity,

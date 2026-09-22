@@ -89,9 +89,7 @@ contract StockAccountsSmoke is Script {
         vm.serializeAddress(json, "AERODROME_STOCKS_CL_FACTORY", addresses.getAddress("AERODROME_STOCKS_CL_FACTORY"));
         vm.serializeAddress(json, "AERODROME_STOCKS_SWAP_ROUTER", addresses.getAddress("AERODROME_STOCKS_SWAP_ROUTER"));
         vm.serializeAddress(json, "AERODROME_STOCKS_QUOTER", addresses.getAddress("AERODROME_STOCKS_QUOTER"));
-        vm.serializeAddress(
-            json, "AERODROME_STOCKS_POSITION_MANAGER", addresses.getAddress("AERODROME_STOCKS_POSITION_MANAGER")
-        );
+        vm.serializeAddress(json, "AERODROME_SLIPSTREAM_NFPM_V2", addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2"));
         vm.serializeUint(json, "strategyTypeId", factory.strategyTypeId());
         vm.serializeAddress(json, "testUser", user);
         vm.serializeAddress(json, "testUserAccount", account);

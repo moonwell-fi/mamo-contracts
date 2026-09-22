@@ -22,7 +22,7 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         router.setRate(address(aapl), address(usdc), 100e18);
         usdc.mint(address(router), 1_000_000e18);
 
-        pool = new MockCLPool(100);
+        pool = new MockCLPool(address(0), address(0), 100);
         _listWithPool(address(nvda));
         _listWithPool(address(aapl));
 

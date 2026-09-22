@@ -16,7 +16,6 @@ import {console} from "@forge-std/console.sol";
 // Import all the necessary deployment scripts
 import {DeploySlippagePriceChecker} from "./DeploySlippagePriceChecker.s.sol";
 
-import {StrategyFactoryDeployer} from "./StrategyFactoryDeployer.s.sol";
 import {StrategyRegistryDeploy} from "./StrategyRegistryDeploy.s.sol";
 import {USDCStrategyImplDeployer} from "./USDCStrategyImplDeployer.s.sol";
 
@@ -95,13 +94,8 @@ contract DeploySystem is Script {
 
         vm.stopBroadcast();
 
-        // Step 8: Deploy the USDCStrategyFactory
-        console.log("\n%s", StdStyle.bold(StdStyle.green("Step 8: Deploying USDCStrategyFactory...")));
-        StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
-        address factoryAddress = factoryDeployer.deployStrategyFactory(
-            addresses, config.getConfig(), strategyTypeId, addresses.getAddress("DEPLOYER_EOA")
-        );
-        console.log("USDCStrategyFactory deployed at: %s", StdStyle.yellow(vm.toString(factoryAddress)));
+        // Step 8: Deploy StrategyFactory (deprecated - use MultiMarketStrategyFactoryDeployer instead)
+        // StrategyFactoryDeployer was removed. Deploy factories separately using MultiMarketStrategyFactoryDeployer.
 
         // Update the JSON file with all the new addresses
         addresses.updateJson();

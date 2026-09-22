@@ -64,7 +64,7 @@ contract StockAccountSystemSetupTest is Test {
     ///      At this block the strategy type slot 5 is free, `nextStrategyTypeId()` reads 4, the cbBTC/USDC
     ///      pair is NOT yet configured on CHAINLINK_SWAP_CHECKER_PROXY, and every `isContract` entry of
     ///      addresses/8453.json already has code — so 016's preconditions hold exactly as written.
-    uint256 internal constant PINNED_BLOCK = 51_181_271;
+    uint256 internal constant PINNED_BLOCK = 51_651_514;
 
     uint16 internal constant CBBTC_TARGET_BPS = 5_000;
     uint16 internal constant CASH_TARGET_BPS = 5_000;

@@ -30,7 +30,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         priceChecker.setRate(address(msft), address(usdc), 50e18);
         priceChecker.setRate(address(usdc), address(msft), 2e16);
 
-        pool = new MockCLPool(100);
+        pool = new MockCLPool(address(0), address(0), 100);
         _listWithPool(address(nvda));
         _listWithPool(address(aapl));
         _listWithPool(address(msft));

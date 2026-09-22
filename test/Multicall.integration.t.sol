@@ -3,11 +3,11 @@ pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 
+import {MultiMarketStrategyFactory} from "@contracts/MultiMarketStrategyFactory.sol";
 import {Multicall} from "@contracts/Multicall.sol";
-import {StrategyFactory} from "@contracts/StrategyFactory.sol";
 
 import {console} from "@forge-std/console.sol";
 
@@ -15,7 +15,6 @@ import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 
 import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
-import {StrategyFactoryDeployer} from "@script/StrategyFactoryDeployer.s.sol";
 import {StrategyRegistryDeploy} from "@script/StrategyRegistryDeploy.s.sol";
 
 import {IERC4626} from "@interfaces/IERC4626.sol";
@@ -73,9 +72,9 @@ contract MaliciousReentrantContract {
 
 contract MulticallIntegrationTest is BaseTest {
     Multicall public multicall;
-    StrategyFactory public factory;
+    MultiMarketStrategyFactory public factory;
     MamoStrategyRegistry public registry;
-    ERC20MoonwellMorphoStrategy public implementation;
+    MamoMultiMarketStrategy public implementation;
     ISlippagePriceChecker public slippagePriceChecker;
 
     // Configuration
@@ -98,7 +97,17 @@ contract MulticallIntegrationTest is BaseTest {
     // Events
     event MulticallExecuted(address indexed initiator, uint256 callsCount);
 
+    /// @dev PINNED Base fork (repo policy for fork tests): at `latest`, Moonwell's timestamp-based
+    ///      `accrueInterest` intermittently reverts `could not calculate block delta`. `make
+    ///      strategy-multicall` drops `--fork-url base`; `vm.fee(0)`/`vm.txGasPrice(0)` is the op-revm
+    ///      Isthmus operator-fee workaround. The pin must also sit ABOVE the newest deployment in
+    ///      addresses/8453.json, since the FPS book validates that every entry has code on the fork.
+    uint256 internal constant PINNED_BLOCK = 51_500_000;
+
     function setUp() public override {
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
+        vm.txGasPrice(0);
+        vm.fee(0);
         // workaround to make test contract work with mappings
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
         super.setUp();
@@ -122,7 +131,7 @@ contract MulticallIntegrationTest is BaseTest {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
 
-        factory = StrategyFactory(payable(addresses.getAddress("cbBTC_STRATEGY_FACTORY")));
+        factory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
         multicall = Multicall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
@@ -189,13 +198,13 @@ contract MulticallIntegrationTest is BaseTest {
         // User1 deposits into strategy1
         vm.startPrank(user1);
         cbBTC.approve(strategy1, depositAmount);
-        ERC20MoonwellMorphoStrategy(payable(strategy1)).deposit(depositAmount);
+        MamoMultiMarketStrategy(payable(strategy1)).deposit(depositAmount);
         vm.stopPrank();
 
         // User2 deposits into strategy2
         vm.startPrank(user2);
         cbBTC.approve(strategy2, depositAmount);
-        ERC20MoonwellMorphoStrategy(payable(strategy2)).deposit(depositAmount);
+        MamoMultiMarketStrategy(payable(strategy2)).deposit(depositAmount);
         vm.stopPrank();
 
         // Step 2: Call updatePosition function from the multicall
@@ -229,8 +238,8 @@ contract MulticallIntegrationTest is BaseTest {
         vm.stopPrank();
 
         // Verify that the position updates were successful
-        ERC20MoonwellMorphoStrategy strategyContract1 = ERC20MoonwellMorphoStrategy(payable(strategy1));
-        ERC20MoonwellMorphoStrategy strategyContract2 = ERC20MoonwellMorphoStrategy(payable(strategy2));
+        MamoMultiMarketStrategy strategyContract1 = MamoMultiMarketStrategy(payable(strategy1));
+        MamoMultiMarketStrategy strategyContract2 = MamoMultiMarketStrategy(payable(strategy2));
 
         assertEq(strategyContract1.splitMToken(), newSplitMToken, "Strategy1 split mToken not updated");
         assertEq(strategyContract1.splitVault(), newSplitVault, "Strategy1 split vault not updated");
@@ -336,7 +345,7 @@ contract MulticallIntegrationTest is BaseTest {
 
             vm.startPrank(users[i]);
             cbBTC.approve(strategies[i], depositAmount);
-            ERC20MoonwellMorphoStrategy(payable(strategies[i])).deposit(depositAmount);
+            MamoMultiMarketStrategy(payable(strategies[i])).deposit(depositAmount);
             vm.stopPrank();
         }
 
@@ -366,7 +375,7 @@ contract MulticallIntegrationTest is BaseTest {
 
         // Verify all strategies were updated
         for (uint256 i = 0; i < 3; i++) {
-            ERC20MoonwellMorphoStrategy strategyContract = ERC20MoonwellMorphoStrategy(payable(strategies[i]));
+            MamoMultiMarketStrategy strategyContract = MamoMultiMarketStrategy(payable(strategies[i]));
             assertEq(strategyContract.splitMToken(), newSplitMToken, "Strategy split mToken not updated");
             assertEq(strategyContract.splitVault(), newSplitVault, "Strategy split vault not updated");
         }
@@ -385,7 +394,7 @@ contract MulticallIntegrationTest is BaseTest {
         deal(address(cbBTC), user, depositAmount);
         vm.startPrank(user);
         cbBTC.approve(strategy, depositAmount);
-        ERC20MoonwellMorphoStrategy(payable(strategy)).deposit(depositAmount);
+        MamoMultiMarketStrategy(payable(strategy)).deposit(depositAmount);
         vm.stopPrank();
 
         // Prepare multicall with an invalid call that will fail

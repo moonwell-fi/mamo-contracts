@@ -37,13 +37,25 @@
     }
   ],
   "strategyParams": {
+    "splitMToken": 10000,
+    "splitVault": 0,
     "allowedSlippageInBps": 100,
     "compoundFee": 500,
     "hookGasLimit": 100000,
-    "splitMToken": 10000,
-    "splitVault": 0,
     "strategyTypeId": 1
   },
+  "markets": [
+    {
+      "target": "MOONWELL_cbBTC",
+      "marketType": "MTOKEN",
+      "splitBps": 10000
+    },
+    {
+      "target": "cbBTC_METAMORPHO_VAULT",
+      "marketType": "ERC4626",
+      "splitBps": 0
+    }
+  ],
   "symbol": "cbBTC",
   "token": "cbBTC",
   "strategyImplementation": "MOONWELL_MORPHO_STRATEGY_IMPL"

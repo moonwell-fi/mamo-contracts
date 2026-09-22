@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.28;
 
-import {ERC20MoonwellMorphoStrategy} from "@contracts/ERC20MoonwellMorphoStrategy.sol";
+import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 import {MamoStakingStrategy} from "@contracts/MamoStakingStrategy.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
@@ -58,7 +58,7 @@ contract DeployMamoStaking is Script {
 
         // Strategy configuration
         uint256 strategyTypeId = 2; // Assuming staking strategy type ID is 2
-        uint256 defaultSlippageInBps = 100; // 1% default slippage
+        // Slippage is configured on MamoStakingRegistry (defaultSlippageInBps), not on the factory.
 
         vm.startBroadcast(deployer);
         // Deploy the MamoStakingStrategyFactory
@@ -71,8 +71,7 @@ contract DeployMamoStaking is Script {
             multiRewardsAddr,
             mamoToken,
             strategyImplementation,
-            strategyTypeId,
-            defaultSlippageInBps
+            strategyTypeId
         );
         vm.stopBroadcast();
 
