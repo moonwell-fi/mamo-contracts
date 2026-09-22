@@ -46,6 +46,7 @@ interface IStockAccountStrategy {
     error TokensMustDiffer();
     error SellTokenNotSellable(address token);
     error BuyTokenNotActive(address token);
+    error BuyTokenNotInBasket(address token);
     error SellExceedsBalance();
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);

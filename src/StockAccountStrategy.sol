@@ -79,8 +79,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 strategyTypeId;
     }
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     modifier onlyBackend() {
-        if (msg.sender != mamoStrategyRegistry.getBackendAddress()) revert NotBackend();
+        if (!_isBackend(msg.sender)) revert NotBackend();
         _;
     }
 
@@ -146,11 +151,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
      */
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
-        if (_isFeeToken(token)) {
-            try this.payFees(token) {} catch {}
-        } else {
-            try this.payFeesFromAny() {} catch {}
-        }
+        _tryPayFeesBefore(token);
 
         if (amount == 0) revert ZeroAmount();
         if (amount > IERC20(token).balanceOf(address(this))) revert ExceedsBalance(token);
@@ -158,6 +159,18 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         IERC20(token).safeTransfer(owner(), amount);
 
         emit WithdrawToken(token, amount);
+    }
+
+    /**
+     * @notice Recovers a token held by the account, settling the fee first like the other exits
+     * @param tokenAddress The token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount to send
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) public override onlyOwner {
+        _tryPayFeesBefore(tokenAddress);
+
+        super.recoverERC20(tokenAddress, to, amount);
     }
 
     /// @notice Sends every balance held by the account to the owner without selling anything
@@ -281,6 +294,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             if (stockRegistry.tokenConfig(buyToken).status != IStockAccountRegistry.TokenStatus.Active) {
                 revert BuyTokenNotActive(buyToken);
             }
+            if (_targetBps(buyToken) == 0) revert BuyTokenNotInBasket(buyToken);
         }
 
         if (order.sellAmount > IERC20(sellToken).balanceOf(address(this))) revert SellExceedsBalance();
@@ -363,7 +377,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _targetOf(address token) internal view returns (uint16) {
-        return token == address(asset) ? cashTargetBps : _targetBps(token);
+        if (token == address(asset)) return cashTargetBps;
+
+        // A SellOnly token is being wound down, so it is sold toward zero whatever the basket says
+        if (stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.SellOnly) return 0;
+
+        return _targetBps(token);
     }
 
     /**
@@ -454,7 +473,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         for (uint256 i = 0; i < tokens.length; i++) {
             currentBps[i] = nav == 0 ? 0 : (values[i] * TOTAL_BPS) / nav;
-            targetBps[i] = _targetBps(tokens[i]);
+            targetBps[i] = _targetOf(tokens[i]);
         }
     }
 
@@ -577,7 +596,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         uint256 due = _feeDue(elapsed);
         if (due == 0) {
-            lastFeePaid = uint64(block.timestamp);
+            // Only a zero rate or an empty account owes nothing, a due that merely rounds down stays owed
+            if (stockRegistry.managementFeeBps() == 0 || getNAV() == 0) lastFeePaid = uint64(block.timestamp);
             return;
         }
 
@@ -599,6 +619,15 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         IERC20(token).safeTransfer(feeRecipient, amount);
 
         emit FeesPaid(credited, token, amount);
+    }
+
+    /// @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
+    function _tryPayFeesBefore(address token) internal {
+        if (_isFeeToken(token)) {
+            try this.payFees(token) {} catch {}
+        } else {
+            try this.payFeesFromAny() {} catch {}
+        }
     }
 
     function _isFeeToken(address token) internal view returns (bool) {

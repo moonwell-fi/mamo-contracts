@@ -248,6 +248,33 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(order);
     }
 
+    function testRevertsWhenBuyingATokenOutsideTheBasket() public {
+        MockERC20 msft = new MockERC20("MSFT Coin", "MSFTc");
+        _setStatus(address(msft), IStockAccountRegistry.TokenStatus.Active);
+        priceChecker.setRate(address(msft), address(usdc), 100e18);
+        priceChecker.setRate(address(nvda), address(msft), 2e18);
+
+        GPv2Order.Data memory order = _order(address(nvda), address(msft), 1e18, 2e18);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyTokenNotInBasket.selector, address(msft)));
+        _check(order);
+    }
+
+    function testSellOnlyTokenCanBeSoldBelowItsBasketTarget() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 4000), 2000);
+
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.SellOnly);
+
+        // nvda 50% -> 25%, past its basket target less the band, into cash at 25% of a 20% target
+        assertTrue(_check(_order(address(nvda), address(usdc), 5e18, 1000e18)) == MAGIC_VALUE, "magic value");
+
+        (address[] memory tokens,, uint256[] memory targetBps) = strategy.getWeights();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (tokens[i] == address(nvda)) assertEq(targetBps[i], 0, "a SellOnly token targets zero");
+        }
+    }
+
     function testTokenWithZeroTargetCanBeSoldDown() public {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 5000), 5000);
