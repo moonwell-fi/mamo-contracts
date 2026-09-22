@@ -89,6 +89,11 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         _deployProxy(params);
     }
 
+    function testTheImplementationCannotBeInitialized() public {
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        implementation.initialize(_defaultParams());
+    }
+
     function testInitializeCannotRunTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         strategy.initialize(_defaultParams());

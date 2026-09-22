@@ -152,6 +152,28 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
     }
 
+    function testAFeeThatRoundsToZeroInTheAssetStaysOwed() public {
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18 - 1_000);
+        strategy.withdrawToken(address(nvda), 10e18);
+        strategy.withdrawToken(address(aapl), 20e18);
+        vm.stopPrank();
+
+        uint256 lastPaid = strategy.lastFeePaid();
+        vm.warp(lastPaid + 1);
+        assertEq(strategy.feeDue(), 0, "one second on 1,000 wei rounds to nothing");
+
+        strategy.payFees(address(usdc));
+        assertEq(strategy.lastFeePaid(), lastPaid, "the second is not forgiven");
+
+        vm.warp(lastPaid + 365 days);
+        uint256 owed = strategy.feeDue();
+        assertGt(owed, 0, "a year is owed");
+
+        strategy.payFees(address(usdc));
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the whole year is collected");
+    }
+
     function testPromoRateAdvancesTheClockOnATokenWithNoBalance() public {
         stockRegistry.setManagementFeeBps(0);
 

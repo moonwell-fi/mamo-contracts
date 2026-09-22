@@ -79,6 +79,11 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 strategyTypeId;
     }
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     modifier onlyBackend() {
         if (!_isBackend(msg.sender)) revert NotBackend();
         _;
@@ -585,7 +590,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         uint256 due = _feeDue(elapsed);
         if (due == 0) {
-            lastFeePaid = uint64(block.timestamp);
+            // Only a zero rate or an empty account owes nothing, a due that merely rounds down stays owed
+            if (stockRegistry.managementFeeBps() == 0 || getNAV() == 0) lastFeePaid = uint64(block.timestamp);
             return;
         }
 
