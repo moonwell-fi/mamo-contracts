@@ -190,9 +190,29 @@ defaults to **false**; the run only prints the four new keys (`STOCK_ACCOUNT_REG
 `0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761` (`Constants.SAFE_MULTISEND_COTNRACT` in the FPS library)
 as the `delegatecall` target of its simulated `execTransaction`, while `docs/SAFE_CALLDATA_GUIDE.md`
 tells the signer to use `0x40A2aCCbd92BCA938b02010E17A5b8929b49130D`. Both are canonical Safe v1.3.0
-deployments — the first is `MultiSendCallOnly`, the second `MultiSend`. The batch has no delegatecalls
-of its own, so either one produces the same ten calls; this is recorded, not reconciled. Whoever
-builds the Safe transaction follows the signing guide, not the simulator.
+deployments, and the labels are the other way round from what you might assume: the simulator's
+`0xA238…7761` is **MultiSend** (629 bytes, carrying the "should only be called via delegatecall"
+guard) and the guide's `0x40A2…130D` is **MultiSendCallOnly** (410 bytes, no such branch). Identified
+by their runtime bytecode, not by a registry. Every action in this batch is a plain call, so either
+one produces the same ten calls, and the guide's choice of the call-only variant is the safer of the
+two. Whoever builds the Safe transaction follows the signing guide, not the simulator.
+
+**The Safe is v1.4.1, and that changes the hash.** `MAMO_MULTISIG` reports version 1.4.1 with a
+threshold of 2. The Safe web interface builds a 1.4.1 batch against the v1.4.1 call-only contract at
+`0x9641d764fc13c8B624c04430C7356C1C7C8102e2`, which is a different `to` from the one in the signing
+guide. The ten inner calls are identical either way, but the transaction hash signers compare is not,
+so **agree which `to` is being signed before anyone starts comparing hashes** — otherwise a correct
+batch looks like a mismatch.
+
+**The batch cannot be built before the contracts exist.** Eight of the ten actions name contracts the
+deploy step creates, so the calldata and its hash depend on the deployer's nonce at the time. The
+order is: run the deploys, re-run the proposal to print the batch against the addresses that actually
+landed, then build and sign the Safe transaction. Do not pre-sign, and do not let the deployer send
+anything else in between.
+
+**Fund the deployer first.** The four deployments measured 9.34M gas on a fork, and that figure is
+only the execution half: Base also charges for posting roughly 40 KB of creation code to L1. Check the
+balance against both before starting rather than discovering it midway through the sequence.
 
 The fork rehearsal of all of this is `test/StockAccountSystemSetup.integration.t.sol`
 (`make stock-accounts-setup`): it drives 016 hook by hook at a pinned block, checks the ten recorded
