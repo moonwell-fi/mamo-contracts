@@ -1,7 +1,12 @@
 # Stock accounts: deploy and vnet runbook
 
-How to stand up the stock accounts system on a fresh Tenderly virtual testnet, and how the same
-scripts are used for a Base mainnet deployment.
+How to stand up the stock accounts system on a fresh Tenderly virtual testnet, and how the Base
+mainnet deployment is executed.
+
+The two paths are deliberately separate. `script/DeployStockAccounts.s.sol` is the **vnet** path,
+driven by `script/stock-accounts/vnet-up.sh`; it impersonates unlocked admins, which no Safe can do.
+`multisig/mamo-multisig/016_DeployStockAccountSystem.sol` is the **mainnet** path: one deploy and one
+signable Safe batch. See [Mainnet: proposal 016](#mainnet-proposal-016).
 
 ## Prerequisites
 
@@ -45,8 +50,8 @@ account's NAV after that (see below). The whole rerun is a no-op.
    every `PriceSource.Chainlink` token is priced against (see Configuration)
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
 4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
-5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, 0)` — assigns the strategy type id
-   (existing ids are 1, 2 and 3; the stock account implementation takes **4**)
+5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the
+   deploy config (ids 1-4 are all taken on Base; the stock account implementation takes **5**)
 6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
 8. every entry of `config/stock-accounts/8453.json`, in two parts:
@@ -81,19 +86,27 @@ through a forge script — pointing it at the vnet does not help.
 
 So, for a B20 token, step 8b runs:
 
-- **on mainnet**, from the Safe, out of the calldata `ADMIN_MODE=calldata` prints;
+- **on mainnet**, from the Safe, inside proposal 016's batch;
 - **on the vnet**, from `cast send` — `vnet-up.sh` sends the four listings itself after the deploy
   script, the same way `prepare.sh` lists NVDAc.
 
 `impersonate` mode recognises the `0xEF` byte, prints that listing's calldata and moves on rather than
-reverting. Any future fork rehearsal of `listToken` for a B20 token needs a stand-in token; there is no
-way to run the real one under revm. cbBTC is an ordinary contract and lists normally in both modes.
+reverting. A fork rehearsal of `listToken` for a B20 token needs a stand-in token; there is no way to
+run the real one under revm. That is what proposal 016's `preBuildMock` does — it etches a minimal
+8-decimal ERC20 over each token whose code is exactly that byte — and it is why the listings reach the
+batch instead of reverting the build. The calldata the Safe receives still targets the real token
+addresses. cbBTC is an ordinary contract and lists normally in every mode.
 
 The same byte has a second, wider consequence: `getNAV` values an account by scanning
 `registry.allTokens()` and reading each token's balance, so **once a B20 token is listed, no forge
 script can touch an account at all** — not `getNAV`, not `deposit`, which checks the account value.
 That is why `vnet-up.sh` runs the smoke script *before* it sends the four listings, and why a reuse run
 skips the smoke and says so. Everything after that point is the `cast`-driven scenario harness.
+
+The one exception is a process that has already etched the stand-ins, which is why
+`test/StockAccountSystemSetup.integration.t.sol` can run a whole account lifecycle after all five
+listings: the four stand-ins answer `balanceOf` with zero, so they drop out of valuation and the real
+cbBTC leg is what gets priced.
 
 ### Ordering, and what it means for the Safe batch
 
@@ -115,25 +128,76 @@ the `MamoStrategyRegistry` calls, the configured `admin` for the stock registry.
 accounts are unlocked, i.e. a Tenderly vnet or anvil.
 
 `ADMIN_MODE=calldata` prints `from`, `to` and the calldata of each admin call and executes none of
-them. That is the mainnet path: hand the printed calldata to the Safe, see `docs/SAFE_CALLDATA_GUIDE.md`.
-The strategy type id used for the factory constructor is read ahead of time from
-`MamoStrategyRegistry.nextStrategyTypeId()`, so the factory can be deployed before the Safe executes
-the whitelist — but the whitelist must then land before any account is created, and no other
-implementation may be whitelisted in between or the id shifts.
+them. It is a **dry-run aid**, not the mainnet path — the mainnet path is proposal 016, below, which
+assembles the same calls into one batch and then proves the end state. The strategy type id is
+**chosen, in the deploy config, never auto-assigned**. The registry's
+`nextStrategyTypeId()` counter only moves when an implementation is whitelisted with a zero id, and
+every whitelist since the USDC strategy has passed an explicit one, so the counter is a stale lower
+bound rather than the next free slot: it reads 4 while slot 4 already holds the Moonwell Morpho V2
+implementation. Auto-assigning would overwrite that entry, which would stop new accounts of that type
+being created and would repoint its upgrades at the wrong implementation.
 
-Mainnet dry run (no broadcast, writes to a throwaway copy of the address book):
+The script therefore refuses to proceed unless the configured id is free and sits above the counter,
+and the factory can still be deployed before the Safe executes the whitelist, because the id no longer
+depends on when that happens.
+
+Dry run (no broadcast, writes to a throwaway copy of the address book):
 
 ```bash
 make deploy-stock-accounts                     # DEPLOY_ENV defaults to 8453_TESTING
 DEPLOY_ENV=8453_PROD make deploy-stock-accounts
 ```
 
-The real mainnet run adds `ADDRESSES_PATH=./addresses` and `--broadcast` with the deployer account.
+Both environments now run all the way through: `STOCK_ORDER_SIGNER` and `F-MAMO` — the PROD
+`orderSigner` and `feeRecipient` — are both in `addresses/8453.json`.
 
-The PROD dry run still stops at step 1 with `Address: STOCK_ORDER_SIGNER not set on chain: 8453`, and
-would stop again at step 6 on `MAMO_FEE_COLLECTOR`. That is expected: neither name is in
-`addresses/8453.json` yet and the team has to provide both before a PROD run gets anywhere. TESTING
-points both at `DEPLOYER_EOA`, so the TESTING dry run goes all the way through step 8.
+## Mainnet: proposal 016
+
+`multisig/mamo-multisig/016_DeployStockAccountSystem.sol` is the mainnet deployment. It is an FPS
+`MultisigProposal`, so it deploys, assembles the Safe batch, simulates it through a Safe and asserts
+the end state, all from the committed `deploy/stock-accounts/8453_PROD.json` and
+`config/stock-accounts/8453.json`.
+
+**One Safe is what makes one batch possible.** On PROD the stock registry admin, the
+`MamoStrategyRegistry` `DEFAULT_ADMIN_ROLE` holder and `CHAINLINK_SWAP_CHECKER_PROXY`'s `owner()` are
+all `MAMO_MULTISIG`. `preBuildMock` asserts that identity rather than assuming it; if any of the three
+moves, the proposal stops being executable as one batch and has to be split.
+
+The batch, in order — the order is load-bearing for the same two reasons as the script's
+(see [Ordering](#ordering-and-what-it-means-for-the-safe-batch)):
+
+1. `STOCK_ACCOUNT_REGISTRY.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER)`
+2. `MAMO_STRATEGY_REGISTRY.whitelistImplementation(impl, 5)` — the **configured** id, never auto-assigned
+3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY)`
+4. `CHAINLINK_SWAP_CHECKER_PROXY.addTokenConfiguration(cbBTC, USDC, [BTC/USD, USDC/USD reversed])`
+5. `CHAINLINK_SWAP_CHECKER_PROXY.setMaxTimePriceValid(cbBTC, 3600)`
+6-10. `STOCK_ACCOUNT_REGISTRY.listToken(...)` for AAPLc, cbBTC, GOOGLc, METAc, NVDAc
+
+Run it against a Base fork:
+
+```bash
+# DEPLOY_ENV is not read here: the proposal is pinned to deploy/stock-accounts/8453_PROD.json
+forge script multisig/mamo-multisig/016_DeployStockAccountSystem.sol:DeployStockAccountSystem \
+  --fork-url base --ffi -vvv
+```
+
+**The address book is not written unless you ask.** FPS gates that on `DO_UPDATE_ADDRESS_JSON`, which
+defaults to **false**; the run only prints the four new keys (`STOCK_ACCOUNT_REGISTRY`,
+`STOCK_ACCOUNT_PRICE_CHECKER`, `STOCK_ACCOUNT_STRATEGY_IMPL`, `STOCK_ACCOUNT_STRATEGY_FACTORY`). Add
+`DO_UPDATE_ADDRESS_JSON=true` on the run whose deployed addresses you want committed, and only then.
+
+**Known discrepancy: two MultiSend addresses.** The simulator hard-codes
+`0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761` (`Constants.SAFE_MULTISEND_COTNRACT` in the FPS library)
+as the `delegatecall` target of its simulated `execTransaction`, while `docs/SAFE_CALLDATA_GUIDE.md`
+tells the signer to use `0x40A2aCCbd92BCA938b02010E17A5b8929b49130D`. Both are canonical Safe v1.3.0
+deployments — the first is `MultiSendCallOnly`, the second `MultiSend`. The batch has no delegatecalls
+of its own, so either one produces the same ten calls; this is recorded, not reconciled. Whoever
+builds the Safe transaction follows the signing guide, not the simulator.
+
+The fork rehearsal of all of this is `test/StockAccountSystemSetup.integration.t.sol`
+(`make stock-accounts-setup`): it drives 016 hook by hook at a pinned block, checks the ten recorded
+actions, then runs a real cbBTC account through create, deposit, valuation, withdrawal and a fee
+settlement.
 
 ## Configuration
 
@@ -161,10 +225,10 @@ Chainlink through `existingPriceChecker`. One of each kind, abridged from the co
 
 ```json
 {"tokens":[
-  {"chainlinkFeed":"0x0000000000000000000000000000000000000000","heartbeat":0,
+  {"chainlinkFeed":"0x0000000000000000000000000000000000000000","decimals":8,"heartbeat":0,
    "pool":"0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9","source":"PoolTwap","symbol":"NVDAc",
    "token":"0xb20000000000000000000078ee7ce2fE4908108C"},
-  {"chainlinkFeed":"0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F","heartbeat":3600,
+  {"chainlinkFeed":"0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F","decimals":8,"heartbeat":3600,
    "pool":"0x160D7E9d948B16c163332a277b393c288408eb12","source":"Chainlink","symbol":"cbBTC",
    "token":"0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"}
 ]}
@@ -175,13 +239,19 @@ it is both the first hop's heartbeat and the `setMaxTimePriceValid` value — an
 as `Active`. A `PoolTwap` entry still carries a `pool` — the registry refuses a listing without one —
 and writes the zero feed with a zero heartbeat.
 
-The second hop, USDC/USD, is not configured from the file: `DeployStockAccounts.USDC_USD_HEARTBEAT`
-fixes it at **90,000 seconds**, deliberately above the feed's nominal 86,400 heartbeat. Walking the
-live Base aggregator `0x7e860098F58bBFC8648a4311b374B1D669a2bc6B` over 31.8 days, 31 of its 32 round
-gaps ran past 86,400 — median 86,418, longest 86,490 — so the node fires tens of seconds late almost
-every cycle. The checker enforces the bound strictly and valuation has no `try`/`catch`, so at 86,400
-the cbBTC quote would revert for roughly a minute a day and take account value, weights, both deposits,
-every withdrawal, the preview, the fee and order validation down with it for any account holding it.
+`decimals` is carried in the file rather than read off the token, because the four B20 tokens cannot
+be read at all from a fork (see [Listing a B20 token is node-only](#listing-a-b20-token-is-node-only)).
+Proposal 016 needs it for the stand-in it puts over them, and every one-whole-token price probe needs
+it. All five launch tokens are 8-decimal. `loadTokenList` rejects a zero.
+
+The second hop, USDC/USD, is not configured from the file: `USDC_USD_HEARTBEAT` — the same constant in
+both `DeployStockAccounts` and proposal 016 — fixes it at **90,000 seconds**, deliberately above the
+feed's nominal 86,400 heartbeat. Walking the live Base aggregator
+`0x7e860098F58bBFC8648a4311b374B1D669a2bc6B` over 31.8 days, 31 of its 32 round gaps ran past 86,400 —
+median 86,418, longest 86,490 — so the node fires tens of seconds late almost every cycle. The checker
+enforces the bound strictly and valuation has no `try`/`catch`, so at 86,400 the cbBTC quote would
+revert for roughly a minute a day and take account value, weights, both deposits, every withdrawal,
+the preview, the fee and order validation down with it for any account holding it.
 **Do not tighten it back to the nominal heartbeat.** The cbBTC hop's own 3,600 is loose the other way —
 that feed's real interval measures 1,200 with a longest gap of 1,232 — and is left as it is, matching
 how `config/strategies/cbBTCStrategyConfig.json` configures the same feed.
@@ -196,8 +266,8 @@ whole `.tokens` array is decoded as one Solidity type:
   addresses pinned in the unit test are what catch that, not the decode;
 - entries are sorted by symbol, which is only cosmetic.
 
-`loadTokenList` validates every entry it decodes — token and pool non-zero, `source` exactly one of
-the two legal strings, feed and heartbeat non-zero exactly when the source is `Chainlink` — so a bad
+`loadTokenList` validates every entry it decodes — token, pool and decimals non-zero, `source` exactly
+one of the two legal strings, feed and heartbeat non-zero exactly when the source is `Chainlink` — so a bad
 entry fails at load rather than reaching an admin batch that only breaks when the Safe executes it.
 `test/StockAccountsConfig.unit.t.sol` runs that load against the committed file in CI, pinning all five
 entries by exact address and counting the pool-priced ones.

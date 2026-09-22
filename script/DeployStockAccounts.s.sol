@@ -185,11 +185,15 @@ contract DeployStockAccounts is Script {
             return strategyTypeId;
         }
 
-        strategyTypeId = mamoRegistry.nextStrategyTypeId();
+        strategyTypeId = config.strategyTypeId;
+        require(strategyTypeId != 0, "strategyTypeId must be set");
+        require(mamoRegistry.latestImplementationById(strategyTypeId) == address(0), "strategy type id already taken");
+        require(mamoRegistry.nextStrategyTypeId() < strategyTypeId, "strategy type id is within reach of the counter");
 
         console.log("step 5: whitelisting the implementation");
 
-        bytes memory data = abi.encodeCall(MamoStrategyRegistry.whitelistImplementation, (implementation, 0));
+        bytes memory data =
+            abi.encodeCall(MamoStrategyRegistry.whitelistImplementation, (implementation, strategyTypeId));
         if (_adminCall(address(mamoRegistry), data, "whitelistImplementation")) {
             require(mamoRegistry.implementationToId(implementation) == strategyTypeId, "Unexpected strategy type id");
         }

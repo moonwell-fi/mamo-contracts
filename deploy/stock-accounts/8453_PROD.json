@@ -6,7 +6,7 @@
   "chainId": 8453,
   "cowSettlement": "COWSWAP_SETTLEMENT",
   "existingPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
-  "feeRecipient": "MAMO_FEE_COLLECTOR",
+  "feeRecipient": "F-MAMO",
   "guardian": "MAMO_MULTISIG",
   "managementFeeBps": 100,
   "maxBackendSlippageBps": 100,
@@ -18,5 +18,6 @@
   "minTargetBps": 500,
   "orderSigner": "STOCK_ORDER_SIGNER",
   "placeholderPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
+  "strategyTypeId": 5,
   "twapWindow": 180
 }
