@@ -4,7 +4,7 @@ Enable users to deploy personal strategy contracts and let Mamo Agent manage the
 
 ## System Flow
 
-1. Mamo Backend whitelists a strategy implementation.
+1. The `MamoStrategyRegistry` admin (`DEFAULT_ADMIN_ROLE`, a multisig — NOT the backend) whitelists a strategy implementation.
 2. User requests Mamo to deploy a strategy for them.
 3. Mamo deploys a strategy and calls `addStrategy` to register the strategy for the user.
 4. User deposits funds directly into their strategy.

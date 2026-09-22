@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 /**
@@ -41,6 +42,12 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
     ISwapRouter public dexRouter;
     IQuoter public quoter;
 
+    /// @notice Chainlink-based price checker used to compute swap reference prices
+    /// @dev Anchors compound()'s minimum-out calculation to an external oracle, preventing
+    ///      sandwich attacks that would bypass an in-pool quote (which is self-referential
+    ///      when the quoter and the swap router share the same pool in the same transaction)
+    ISlippagePriceChecker public slippagePriceChecker;
+
     /// @notice Global slippage configuration
     uint256 public defaultSlippageInBps;
 
@@ -52,6 +59,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
     event RewardTokenPoolUpdated(address indexed token, address indexed oldPool, address indexed newPool);
     event DEXRouterUpdated(address indexed oldRouter, address indexed newRouter);
     event QuoterUpdated(address indexed oldQuoter, address indexed newQuoter);
+    event SlippagePriceCheckerUpdated(address indexed oldChecker, address indexed newChecker);
     event DefaultSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
@@ -63,6 +71,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
      * @param _mamoToken The MAMO token address
      * @param _dexRouter The initial DEX router address
      * @param _quoter The initial quoter address
+     * @param _slippagePriceChecker The Chainlink-based slippage price checker
      * @param _defaultSlippageInBps The initial default slippage in basis points
      */
     constructor(
@@ -72,6 +81,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         address _mamoToken,
         address _dexRouter,
         address _quoter,
+        address _slippagePriceChecker,
         uint256 _defaultSlippageInBps
     ) {
         require(admin != address(0), "Invalid admin address");
@@ -80,6 +90,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         require(_mamoToken != address(0), "Invalid MAMO token address");
         require(_dexRouter != address(0), "Invalid DEX router address");
         require(_quoter != address(0), "Invalid quoter address");
+        require(_slippagePriceChecker != address(0), "Invalid slippage price checker address");
         require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Default slippage too high");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -89,6 +100,7 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         mamoToken = _mamoToken;
         dexRouter = ISwapRouter(_dexRouter);
         quoter = IQuoter(_quoter);
+        slippagePriceChecker = ISlippagePriceChecker(_slippagePriceChecker);
         defaultSlippageInBps = _defaultSlippageInBps;
     }
 
@@ -183,10 +195,20 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
     // ==================== DEX CONFIGURATION ====================
 
     /**
-     * @notice Update DEX router (backend only)
+     * @notice Update DEX router (admin only)
+     * @dev Restricted to DEFAULT_ADMIN_ROLE rather than BACKEND_ROLE: every compound() hands this
+     *      router an allowance over the strategy's reward tokens, so a backend able to swap it in
+     *      could route every accrual through a contract it controls. The minimum-out floor bounds
+     *      that loss but does not eliminate it, and the bound itself (setDefaultSlippage, capped at
+     *      MAX_SLIPPAGE_IN_BPS) is a BACKEND_ROLE knob.
+     * @dev Deliberately NOT whenNotPaused. Repointing the router is the remediation for the very
+     *      incident the guardian pauses for; gating it on the unpaused state would force
+     *      unpause -> fix -> pause and reopen compound() in between. Consistent with the registry
+     *      convention that DEFAULT_ADMIN_ROLE functions (recoverERC20, recoverETH) are not
+     *      pause-gated while BACKEND_ROLE configuration setters are.
      * @param newRouter The new DEX router address
      */
-    function setDEXRouter(ISwapRouter newRouter) external onlyRole(BACKEND_ROLE) whenNotPaused {
+    function setDEXRouter(ISwapRouter newRouter) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(address(newRouter) != address(0), "Invalid router");
         require(address(newRouter) != address(dexRouter), "Router already set");
 
@@ -208,6 +230,29 @@ contract MamoStakingRegistry is AccessControlEnumerable, Pausable {
         quoter = _quoter;
 
         emit QuoterUpdated(oldQuoter, address(_quoter));
+    }
+
+    /**
+     * @notice Set the slippage price checker contract (admin only)
+     * @dev Restricted to DEFAULT_ADMIN_ROLE because the price checker is the on-chain
+     *      reference price source for compound()'s minimum-out calculation. A malicious
+     *      or misconfigured checker could let swaps execute at arbitrary prices.
+     * @dev Deliberately NOT whenNotPaused, for the same reason as setDEXRouter: replacing a
+     *      misconfigured checker is incident remediation, and requiring an unpause first would
+     *      reopen compound() while the fix lands.
+     * @param _slippagePriceChecker The slippage price checker contract address
+     */
+    function setSlippagePriceChecker(ISlippagePriceChecker _slippagePriceChecker)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(address(_slippagePriceChecker) != address(0), "Invalid slippage price checker");
+        require(address(_slippagePriceChecker) != address(slippagePriceChecker), "Slippage price checker already set");
+
+        address oldChecker = address(slippagePriceChecker);
+        slippagePriceChecker = _slippagePriceChecker;
+
+        emit SlippagePriceCheckerUpdated(oldChecker, address(_slippagePriceChecker));
     }
 
     // ==================== SLIPPAGE CONFIGURATION ====================

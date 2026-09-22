@@ -8,6 +8,7 @@ import {MockPool} from "./mocks/MockPool.sol";
 import {MamoStakingRegistry} from "@contracts/MamoStakingRegistry.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
+import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -333,43 +334,111 @@ contract MamoStakingRegistryIntegrationTest is BaseTest {
 
     // ========== DEX CONFIGURATION TESTS ==========
 
-    function testSetDEXRouter() public {
-        address newRouter = makeAddr("newRouter");
-        address oldRouter = address(stakingRegistry.dexRouter());
+    /// @dev Deploys the registry from THIS branch's source instead of reusing the instance at
+    ///      MAMO_STAKING_REGISTRY. MamoStakingRegistry is not upgradeable — it has a plain
+    ///      constructor and no proxy — so the deployed instance runs whatever bytecode was shipped,
+    ///      and every test bound to that address silently asserts against the OLD access control.
+    ///      The setDEXRouter role change below is invisible to such a test: it keeps passing with
+    ///      `backend` and would keep passing if the fix were reverted. Roles are wired to the same
+    ///      admin/backend/guardian the deployment uses, so the only difference is the code.
+    /// @dev The price checker comes from the address book, not from stakingRegistry: the deployed
+    ///      instance predates slippagePriceChecker() and reverts on that selector.
+    function _freshRegistry() internal returns (MamoStakingRegistry fresh) {
+        fresh = new MamoStakingRegistry(
+            admin,
+            backend,
+            guardian,
+            mamoToken,
+            address(stakingRegistry.dexRouter()),
+            address(stakingRegistry.quoter()),
+            addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
+            DEFAULT_SLIPPAGE
+        );
+    }
 
-        vm.startPrank(backend);
+    function testSetDEXRouter() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address newRouter = makeAddr("newRouter");
+        address oldRouter = address(registry.dexRouter());
+
+        vm.startPrank(admin);
         vm.expectEmit(true, true, false, true);
         emit DEXRouterUpdated(oldRouter, newRouter);
-        stakingRegistry.setDEXRouter(ISwapRouter(newRouter));
+        registry.setDEXRouter(ISwapRouter(newRouter));
         vm.stopPrank();
 
-        assertEq(address(stakingRegistry.dexRouter()), newRouter, "DEX router should be updated");
+        assertEq(address(registry.dexRouter()), newRouter, "DEX router should be updated");
     }
 
     function testSetDEXRouterRevertsWhenInvalidRouter() public {
-        vm.startPrank(backend);
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.startPrank(admin);
         vm.expectRevert("Invalid router");
-        stakingRegistry.setDEXRouter(ISwapRouter(address(0)));
+        registry.setDEXRouter(ISwapRouter(address(0)));
         vm.stopPrank();
     }
 
-    function testSetDEXRouterRevertsWhenNotBackend() public {
+    /// @dev MOO-733: the router is admin-gated, not backend-gated, because it receives an allowance
+    ///      over every strategy's reward tokens on each compound(). Pinning the backend as REJECTED
+    ///      is the point of this test — a plain random-address check would still pass if the role
+    ///      were widened back to BACKEND_ROLE.
+    function testSetDEXRouterRevertsWhenBackend() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address newRouter = makeAddr("newRouter");
+
+        assertTrue(
+            registry.hasRole(registry.BACKEND_ROLE(), backend),
+            "backend must actually hold BACKEND_ROLE for this test to mean anything"
+        );
+
+        // Hoisted: a call in argument position is evaluated BEFORE the outer call, so
+        // registry.DEFAULT_ADMIN_ROLE() inline here would consume the vm.prank below.
+        bytes32 adminRole = registry.DEFAULT_ADMIN_ROLE();
+        bytes memory expectedRevert =
+            abi.encodeWithSignature("AccessControlUnauthorizedAccount(address,bytes32)", backend, adminRole);
+
+        vm.prank(backend);
+        vm.expectRevert(expectedRevert);
+        registry.setDEXRouter(ISwapRouter(newRouter));
+    }
+
+    function testSetDEXRouterRevertsWhenNotAdmin() public {
+        MamoStakingRegistry registry = _freshRegistry();
         address newRouter = makeAddr("newRouter");
         address randomUser = makeAddr("randomUser");
 
         vm.startPrank(randomUser);
         vm.expectRevert();
-        stakingRegistry.setDEXRouter(ISwapRouter(newRouter));
+        registry.setDEXRouter(ISwapRouter(newRouter));
         vm.stopPrank();
     }
 
     function testSetDEXRouterRevertsWhenSameRouter() public {
-        address currentRouter = address(stakingRegistry.dexRouter());
+        MamoStakingRegistry registry = _freshRegistry();
+        address currentRouter = address(registry.dexRouter());
 
-        vm.startPrank(backend);
+        vm.startPrank(admin);
         vm.expectRevert("Router already set");
-        stakingRegistry.setDEXRouter(ISwapRouter(currentRouter));
+        registry.setDEXRouter(ISwapRouter(currentRouter));
         vm.stopPrank();
+    }
+
+    /// @dev MOO-735: repointing the router IS the remediation for a router incident, so it must work
+    ///      while the guardian has the registry paused. Requiring an unpause first would reopen
+    ///      compound() for the window between unpause and fix.
+    function testSetDEXRouterSucceedsWhilePaused() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address newRouter = makeAddr("newRouterWhilePaused");
+
+        vm.prank(guardian);
+        registry.pause();
+        assertTrue(registry.paused(), "registry should be paused");
+
+        vm.prank(admin);
+        registry.setDEXRouter(ISwapRouter(newRouter));
+
+        assertEq(address(registry.dexRouter()), newRouter, "router should be repointable while paused");
     }
 
     function testSetQuoter() public {
@@ -528,12 +597,31 @@ contract MamoStakingRegistryIntegrationTest is BaseTest {
         stakingRegistry.setDefaultSlippage(200);
 
         vm.expectRevert();
-        stakingRegistry.setDEXRouter(ISwapRouter(makeAddr("newRouter")));
-
-        vm.expectRevert();
         stakingRegistry.setQuoter(IQuoter(makeAddr("newQuoter")));
 
         vm.stopPrank();
+
+        // setDEXRouter and setSlippagePriceChecker are deliberately NOT pause-gated: they are the
+        // remediation knobs for the incidents the guardian pauses for. Covered positively by
+        // testSetDEXRouterSucceedsWhilePaused / testSetSlippagePriceCheckerSucceedsWhilePaused.
+    }
+
+    /// @dev Companion to testSetDEXRouterSucceedsWhilePaused: replacing a misconfigured price
+    ///      checker is incident remediation too, so it must not require an unpause first.
+    function testSetSlippagePriceCheckerSucceedsWhilePaused() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address newChecker = makeAddr("newSlippagePriceChecker");
+
+        vm.prank(guardian);
+        registry.pause();
+        assertTrue(registry.paused(), "registry should be paused");
+
+        vm.prank(admin);
+        registry.setSlippagePriceChecker(ISlippagePriceChecker(newChecker));
+
+        assertEq(
+            address(registry.slippagePriceChecker()), newChecker, "price checker should be replaceable while paused"
+        );
     }
 
     // ========== RECOVERY FUNCTION TESTS ==========
