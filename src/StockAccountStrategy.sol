@@ -80,7 +80,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     modifier onlyBackend() {
-        if (msg.sender != mamoStrategyRegistry.getBackendAddress()) revert NotBackend();
+        if (!_isBackend(msg.sender)) revert NotBackend();
         _;
     }
 
@@ -146,11 +146,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
      */
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
-        if (_isFeeToken(token)) {
-            try this.payFees(token) {} catch {}
-        } else {
-            try this.payFeesFromAny() {} catch {}
-        }
+        _tryPayFeesBefore(token);
 
         if (amount == 0) revert ZeroAmount();
         if (amount > IERC20(token).balanceOf(address(this))) revert ExceedsBalance(token);
@@ -158,6 +154,18 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         IERC20(token).safeTransfer(owner(), amount);
 
         emit WithdrawToken(token, amount);
+    }
+
+    /**
+     * @notice Recovers a token held by the account, settling the fee first like the other exits
+     * @param tokenAddress The token to recover
+     * @param to The address to send the tokens to
+     * @param amount The amount to send
+     */
+    function recoverERC20(address tokenAddress, address to, uint256 amount) public override onlyOwner {
+        _tryPayFeesBefore(tokenAddress);
+
+        super.recoverERC20(tokenAddress, to, amount);
     }
 
     /// @notice Sends every balance held by the account to the owner without selling anything
@@ -599,6 +607,15 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         IERC20(token).safeTransfer(feeRecipient, amount);
 
         emit FeesPaid(credited, token, amount);
+    }
+
+    /// @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
+    function _tryPayFeesBefore(address token) internal {
+        if (_isFeeToken(token)) {
+            try this.payFees(token) {} catch {}
+        } else {
+            try this.payFeesFromAny() {} catch {}
+        }
     }
 
     function _isFeeToken(address token) internal view returns (bool) {

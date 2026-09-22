@@ -461,6 +461,64 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         strategy.setFeeRecipient(address(0));
     }
 
+    function testAnyBackendRoleMemberCanSetFeeRecipient() public {
+        address secondBackend = makeAddr("secondBackend");
+        bytes32 backendRole = registry.BACKEND_ROLE();
+
+        vm.prank(admin);
+        registry.grantRole(backendRole, secondBackend);
+
+        vm.prank(secondBackend);
+        strategy.setFeeRecipient(makeAddr("newFeeRecipient"));
+        assertEq(strategy.feeRecipient(), makeAddr("newFeeRecipient"), "a member past index 0 is a backend");
+
+        vm.prank(admin);
+        registry.revokeRole(backendRole, secondBackend);
+
+        vm.prank(secondBackend);
+        vm.expectRevert(IStockAccountStrategy.NotBackend.selector);
+        strategy.setFeeRecipient(feeRecipient);
+    }
+
+    function testRecoverERC20SettlesTheFeeBeforeRecovering() public {
+        vm.warp(startTime + 365 days);
+        uint256 owed = strategy.feeDue();
+
+        vm.prank(user);
+        strategy.recoverERC20(address(usdc), user, 100e18);
+
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the whole fee is paid");
+        assertEq(strategy.lastFeePaid(), startTime + 365 days, "the period is settled");
+        assertEq(usdc.balanceOf(user), 100e18, "the owner gets the amount asked for");
+    }
+
+    function testRecoverERC20OfAnUnlistedTokenPaysTheFeeFromTheBalances() public {
+        MockERC20 stray = new MockERC20("Stray", "STRAY");
+        stray.mint(address(strategy), 5e18);
+
+        vm.warp(startTime + 365 days);
+        uint256 owed = strategy.feeDue();
+
+        vm.prank(user);
+        strategy.recoverERC20(address(stray), user, 5e18);
+
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the fee comes out of the asset");
+        assertEq(stray.balanceOf(feeRecipient), 0, "the stray token is not taken");
+        assertEq(stray.balanceOf(user), 5e18, "the stray token is recovered");
+    }
+
+    function testRecoverERC20StillRecoversWhenTheFeeCannotBePriced() public {
+        priceChecker.setRate(address(nvda), address(usdc), 0);
+        vm.warp(startTime + 365 days);
+
+        vm.prank(user);
+        strategy.recoverERC20(address(nvda), user, 10e18);
+
+        assertEq(nvda.balanceOf(user), 10e18, "the owner is not trapped");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing is paid");
+        assertEq(strategy.lastFeePaid(), startTime, "the fee stays owed");
+    }
+
     function testInitializeRevertsOnZeroFeeRecipient() public {
         StockAccountStrategy.InitParams memory params = _defaultParams();
         params.feeRecipient = address(0);
