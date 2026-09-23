@@ -11,6 +11,7 @@ interface IStockAccountStrategy {
     event DepositToken(address indexed token, uint256 amount);
     event Withdraw(uint256 usdcOut, uint256 sold);
     event WithdrawToken(address indexed token, uint256 amount);
+    event WithdrawSkipped(address indexed token, uint256 amount);
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
     event FeesPaid(uint256 credited, address indexed token, uint256 amount);
@@ -23,8 +24,7 @@ interface IStockAccountStrategy {
     error TokenNotActive(address token);
     error TokenNotListed(address token);
     error AccountBelowMinimum(uint256 nav);
-    error DepositCapExceeded(uint256 nav);
-    error ExceedsBalance(address token);
+    error DepositCapExceeded(uint256 principal);
     error TooManyPositions();
     error WeightBelowMinimum(address token);
     error DuplicateToken(address token);
@@ -106,4 +106,6 @@ interface IStockAccountStrategy {
     function appDataHash(address feeToken) external view returns (bytes32);
 
     function lastFeePaid() external view returns (uint64);
+
+    function principal() external view returns (uint256);
 }

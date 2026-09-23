@@ -17,6 +17,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title StockAccountStrategy
@@ -66,6 +67,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice Timestamp the fee was last paid at
     uint64 public override lastFeePaid;
+
+    /// @notice Capital deposited less capital withdrawn, which the deposit cap applies to
+    uint256 public override principal;
 
     struct InitParams {
         address asset;
@@ -123,6 +127,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         _settleFeesBeforeDeposit();
         asset.safeTransferFrom(msg.sender, address(this), amount);
+        principal += amount;
         _checkAccountValue();
 
         emit Deposit(amount);
@@ -141,6 +146,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         _settleFeesBeforeDeposit();
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        principal += stockRegistry.priceChecker().getExpectedOut(amount, token, address(asset));
         _checkAccountValue();
 
         emit DepositToken(token, amount);
@@ -155,9 +161,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
         _tryPayFeesBefore(token);
 
+        amount = Math.min(amount, IERC20(token).balanceOf(address(this)));
         if (amount == 0) revert ZeroAmount();
-        if (amount > IERC20(token).balanceOf(address(this))) revert ExceedsBalance(token);
 
+        _reducePrincipal(token, amount);
         IERC20(token).safeTransfer(owner(), amount);
 
         emit WithdrawToken(token, amount);
@@ -172,6 +179,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function recoverERC20(address tokenAddress, address to, uint256 amount) public override onlyOwner {
         _tryPayFeesBefore(tokenAddress);
 
+        amount = Math.min(amount, IERC20(tokenAddress).balanceOf(address(this)));
+        _reducePrincipal(tokenAddress, amount);
+
         super.recoverERC20(tokenAddress, to, amount);
     }
 
@@ -180,21 +190,14 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawAllInKind() external override onlyOwner {
         try this.payFeesFromAny() {} catch {}
 
-        address to = owner();
+        principal = 0;
 
-        uint256 assetBalance = asset.balanceOf(address(this));
-        if (assetBalance > 0) {
-            asset.safeTransfer(to, assetBalance);
-            emit WithdrawToken(address(asset), assetBalance);
-        }
+        address to = owner();
+        _sendAllInKind(address(asset), to);
 
         address[] memory tokens = stockRegistry.allTokens();
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
-            if (balance > 0) {
-                IERC20(tokens[i]).safeTransfer(to, balance);
-                emit WithdrawToken(tokens[i], balance);
-            }
+            _sendAllInKind(tokens[i], to);
         }
     }
 
@@ -305,7 +308,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (expectedOut == 0) revert PriceCheckFailed();
 
         uint256 slip = getAccountSlippage();
-        if (slip >= TOTAL_BPS) revert SlippageExceedsMaximum();
         if (order.buyAmount < (expectedOut * (TOTAL_BPS - slip)) / TOTAL_BPS) revert PriceCheckFailed();
 
         _checkRange(sellToken, buyToken, order.sellAmount, order.buyAmount, expectedOut);
@@ -325,7 +327,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 sellHeld = _heldValue(tokens, values, sellToken);
         uint256 available = IERC20(sellToken).balanceOf(address(this));
         uint256 sellValue = sellToken == address(asset) ? sellAmount : (sellHeld * sellAmount) / available;
-        uint256 buyValue = (sellValue * buyAmount) / expectedOut;
+        uint256 buyValue = (sellValue * Math.max(buyAmount, expectedOut)) / expectedOut;
 
         uint256 navAfter = nav - sellValue + buyValue;
         uint256 dev = stockRegistry.maxDeviationBps();
@@ -355,8 +357,23 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
                 continue;
             }
 
-            values[i] = checker.getExpectedOut(balance, tokens[i], address(asset));
-            nav += values[i];
+            (bool priced, uint256 value) = _tryValue(checker, tokens[i], balance);
+            if (!priced) continue;
+
+            values[i] = value;
+            nav += value;
+        }
+    }
+
+    function _tryValue(ISlippagePriceChecker checker, address token, uint256 amount)
+        internal
+        view
+        returns (bool priced, uint256 value)
+    {
+        try checker.getExpectedOut(amount, token, address(asset)) returns (uint256 quoted) {
+            return (true, quoted);
+        } catch {
+            return (false, 0);
         }
     }
 
@@ -400,14 +417,16 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 sold;
 
         if (shortfall > 0) {
-            (address[] memory tokens, uint256[] memory amounts,,) = _planSells(shortfall, maxSlippageBps);
-            sold = _executeSells(tokens, amounts, maxSlippageBps);
+            (address[] memory tokens, uint256[] memory amounts, uint256[] memory legValues,,) =
+                _planSells(shortfall, maxSlippageBps);
+            sold = _executeSells(tokens, amounts, legValues, maxSlippageBps);
         }
 
         _payFees(address(asset));
 
         if (asset.balanceOf(address(this)) < usdcAmount) revert InsufficientProceeds();
 
+        _reducePrincipal(address(asset), usdcAmount);
         asset.safeTransfer(owner(), usdcAmount);
 
         emit Withdraw(usdcAmount, sold);
@@ -420,13 +439,15 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
         _checkWithdrawSlippage(maxSlippageBps);
 
-        (address[] memory tokens, uint256[] memory balances) = _sellable();
-        uint256 sold = _executeSells(tokens, balances, maxSlippageBps);
+        (address[] memory tokens, uint256[] memory balances, uint256[] memory values) = _sellable();
+        uint256 sold = _executeSells(tokens, balances, values, maxSlippageBps);
 
         _payFees(address(asset));
 
         uint256 usdcOut = asset.balanceOf(address(this));
         if (usdcOut == 0) revert EmptyBalance();
+
+        principal = 0;
 
         asset.safeTransfer(owner(), usdcOut);
 
@@ -451,7 +472,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             return (new address[](0), new uint256[](0), 0, 0);
         }
 
-        return _planSells(shortfall, maxSlippageBps);
+        (tokensToSell, amounts,, referenceValue, minProceeds) = _planSells(shortfall, maxSlippageBps);
     }
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
@@ -585,7 +606,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 nav = getNAV();
 
         if (nav < stockRegistry.minStrategyDeposit()) revert AccountBelowMinimum(nav);
-        if (nav > stockRegistry.maxStrategyDeposit()) revert DepositCapExceeded(nav);
+        if (principal > stockRegistry.maxStrategyDeposit()) revert DepositCapExceeded(principal);
     }
 
     function _payFees(address token) internal {
@@ -632,6 +653,23 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
     }
 
+    function _reducePrincipal(address token, uint256 amount) internal {
+        uint256 value = amount;
+        if (token != address(asset)) (, value) = _tryValue(stockRegistry.priceChecker(), token, amount);
+        principal -= Math.min(value, principal);
+    }
+
+    function _sendAllInKind(address token, address to) internal {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        if (balance == 0) return;
+
+        (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, balance)));
+        bool sent = ok && (ret.length == 0 ? token.code.length > 0 : ret.length >= 32 && abi.decode(ret, (bool)));
+
+        if (sent) emit WithdrawToken(token, balance);
+        else emit WithdrawSkipped(token, balance);
+    }
+
     function _isFeeToken(address token) internal view returns (bool) {
         if (token == address(asset)) return true;
 
@@ -653,10 +691,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         if (_feeSettled()) return;
 
-        address[] memory tokens = stockRegistry.allTokens();
+        (address[] memory tokens, uint256[] memory values,) = _valuation();
 
         for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
-            if (_isSellable(tokens[i])) {
+            if (values[i] > 0) {
                 _payFees(tokens[i]);
             }
         }
@@ -714,38 +752,41 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return 0;
     }
 
-    function _sellable() internal view returns (address[] memory tokens, uint256[] memory balances) {
+    function _sellable()
+        internal
+        view
+        returns (address[] memory tokens, uint256[] memory balances, uint256[] memory values)
+    {
         address[] memory listed = stockRegistry.allTokens();
+        ISlippagePriceChecker checker = stockRegistry.priceChecker();
+
+        tokens = new address[](listed.length);
+        balances = new uint256[](listed.length);
+        values = new uint256[](listed.length);
         uint256 count;
 
         for (uint256 i = 0; i < listed.length; i++) {
-            if (_isSellable(listed[i])) {
-                count++;
-            }
+            uint256 balance = IERC20(listed[i]).balanceOf(address(this));
+            if (balance == 0) continue;
+            if (stockRegistry.tokenConfig(listed[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
+
+            (bool priced, uint256 value) = _tryValue(checker, listed[i], balance);
+            if (!priced) continue;
+
+            tokens[count] = listed[i];
+            balances[count] = balance;
+            values[count++] = value;
         }
 
-        tokens = new address[](count);
-        balances = new uint256[](count);
-        uint256 next;
-
-        for (uint256 i = 0; i < listed.length; i++) {
-            if (_isSellable(listed[i])) {
-                tokens[next] = listed[i];
-                balances[next++] = IERC20(listed[i]).balanceOf(address(this));
-            }
+        assembly ("memory-safe") {
+            mstore(tokens, count)
+            mstore(balances, count)
+            mstore(values, count)
         }
     }
 
-    function _isSellable(address token) internal view returns (bool) {
-        return IERC20(token).balanceOf(address(this)) > 0
-            && stockRegistry.tokenConfig(token).status != IStockAccountRegistry.TokenStatus.Halted;
-    }
-
-    /// @dev A full cap would zero every sell floor, and zero the divisor the gross up below divides by
     function _checkWithdrawSlippage(uint16 maxSlippageBps) internal view {
-        if (maxSlippageBps >= TOTAL_BPS || maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) {
-            revert SlippageExceedsMaximum();
-        }
+        if (maxSlippageBps > stockRegistry.maxWithdrawSlippageBps()) revert SlippageExceedsMaximum();
     }
 
     /// @dev The fee is charged on the account value, which selling does not move, so the sells are sized for it
@@ -760,9 +801,15 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)
         internal
         view
-        returns (address[] memory tokens, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds)
+        returns (
+            address[] memory tokens,
+            uint256[] memory amounts,
+            uint256[] memory legValues,
+            uint256 referenceValue,
+            uint256 minProceeds
+        )
     {
-        (address[] memory sellable, uint256[] memory balances) = _sellable();
+        (address[] memory sellable, uint256[] memory balances, uint256[] memory values) = _sellable();
         ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
 
         uint256 total;
@@ -770,11 +817,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 largestValue;
 
         for (uint256 i = 0; i < sellable.length; i++) {
-            uint256 value = priceChecker.getExpectedOut(balances[i], sellable[i], address(asset));
-            total += value;
+            total += values[i];
 
-            if (value > largestValue) {
-                largestValue = value;
+            if (values[i] > largestValue) {
+                largestValue = values[i];
                 largest = i;
             }
         }
@@ -782,7 +828,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (shortfall > total) revert InsufficientBalance();
 
         if (total == 0) {
-            return (new address[](0), new uint256[](0), 0, 0);
+            return (new address[](0), new uint256[](0), new uint256[](0), 0, 0);
         }
 
         uint256 target = (shortfall * TOTAL_BPS) / (TOTAL_BPS - maxSlippageBps);
@@ -804,6 +850,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         tokens = new address[](count);
         amounts = new uint256[](count);
+        legValues = new uint256[](count);
         uint256 next;
 
         for (uint256 i = 0; i < sellable.length; i++) {
@@ -816,19 +863,19 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             minProceeds += (legValue * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS;
 
             tokens[next] = sellable[i];
-            amounts[next++] = planned[i];
+            amounts[next] = planned[i];
+            legValues[next++] = legValue;
         }
     }
 
-    function _executeSells(address[] memory tokens, uint256[] memory amounts, uint16 maxSlippageBps)
-        internal
-        returns (uint256 sold)
-    {
-        ISlippagePriceChecker priceChecker = stockRegistry.priceChecker();
-
+    function _executeSells(
+        address[] memory tokens,
+        uint256[] memory amounts,
+        uint256[] memory values,
+        uint16 maxSlippageBps
+    ) internal returns (uint256 sold) {
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 legValue = priceChecker.getExpectedOut(amounts[i], tokens[i], address(asset));
-            sold += _sell(tokens[i], amounts[i], (legValue * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS);
+            sold += _sell(tokens[i], amounts[i], (values[i] * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS);
         }
     }
 

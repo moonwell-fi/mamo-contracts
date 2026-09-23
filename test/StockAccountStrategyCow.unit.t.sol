@@ -275,6 +275,17 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         }
     }
 
+    function testBuyRangeIsCheckedAtTheReferenceNotTheLimit() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 3000, address(aapl), 6000), 1000);
+
+        // aapl lands at 70.02% at the reference, 69.96% at the 1% floor, against a 70% ceiling
+        GPv2Order.Data memory order = _order(address(nvda), address(aapl), 4.005e18, (8.01e18 * 9_900) / 10_000);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(aapl)));
+        _check(order);
+    }
+
     function testTokenWithZeroTargetCanBeSoldDown() public {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 5000), 5000);
@@ -348,26 +359,17 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
     }
 
     /// @dev A cap of 10_000 would put the fair price floor at zero, so the strategy refuses it outright
-    function testRevertsWhenTheSlippageCapIsTheFullRange() public {
-        stockRegistry.setMaxBackendSlippageBps(10_000);
-
-        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 3e18, 1);
-
-        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
-        _check(order);
-    }
-
     function testOneWeiBuyAmountIsRefusedAtTheHighestAcceptedCap() public {
         stockRegistry.setMaxBackendSlippageBps(9_999);
         assertEq(strategy.getAccountSlippage(), 9_999, "account slippage");
 
-        GPv2Order.Data memory dust = _order(address(nvda), address(usdc), 3e18, 1);
+        GPv2Order.Data memory dust = _order(address(nvda), address(usdc), 1e18, 1);
 
         vm.expectRevert(IStockAccountStrategy.PriceCheckFailed.selector);
         _check(dust);
 
         assertTrue(
-            _check(_order(address(nvda), address(usdc), 3e18, (600e18 * 1) / 10_000)) == MAGIC_VALUE, "magic value"
+            _check(_order(address(nvda), address(usdc), 1e18, (200e18 * 1) / 10_000)) == MAGIC_VALUE, "magic value"
         );
     }
 

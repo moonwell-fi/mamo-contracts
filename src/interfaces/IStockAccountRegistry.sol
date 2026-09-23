@@ -43,6 +43,9 @@ interface IStockAccountRegistry {
     error NotAdminOrGuardian();
     error GuardianCanOnlyLower();
     error TokenNotPriceable(address token);
+    error AssetNotListable();
+    error PoolNotAgainstAsset(address pool);
+    error InvalidDepositBounds();
 
     function asset() external view returns (address);
 

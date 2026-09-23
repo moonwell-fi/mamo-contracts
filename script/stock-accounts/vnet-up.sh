@@ -50,6 +50,8 @@ if [ "$VNET_REUSE" != "1" ] || [ ! -d "$ADDRESSES_DIR" ]; then
   rm -rf "$ADDRESSES_DIR"
   mkdir -p "$ADDRESSES_DIR"
   cp addresses/*.json "$ADDRESSES_DIR/"
+  # The live deployment is in the book; drop it so the harness always deploys this tree
+  jq '[.[] | select(.name | startswith("STOCK_ACCOUNT_") | not)]' addresses/8453.json >"$ADDRESSES_DIR/8453.json"
 fi
 
 export ADDRESSES_PATH="./$ADDRESSES_DIR"

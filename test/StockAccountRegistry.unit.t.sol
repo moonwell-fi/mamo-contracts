@@ -38,7 +38,7 @@ contract StockAccountRegistryUnitTest is Test {
         router = ISwapRouter(_stub());
         checker = new MockPriceChecker();
         token = address(new MockERC20Decimals("TOKEN", 8));
-        pool = _stub();
+        pool = _pairPool(token);
         feed = _stub();
 
         checker.setRate(token, asset, 1e18);
@@ -48,6 +48,11 @@ contract StockAccountRegistryUnitTest is Test {
 
     function _stub() internal returns (address) {
         return address(new Stub());
+    }
+
+    /// @dev A pool that pairs `forToken` with the asset, which listing and repointing now require
+    function _pairPool(address forToken) internal returns (address) {
+        return address(new MockCLPoolObserve(forToken, asset));
     }
 
     function defaultConfig() internal view returns (StockAccountRegistry.Config memory config) {
@@ -77,6 +82,48 @@ contract StockAccountRegistryUnitTest is Test {
             pool: pool,
             chainlinkFeed: address(0)
         });
+    }
+
+    function testListTokenRefusesTheAsset() public {
+        vm.expectRevert(IStockAccountRegistry.AssetNotListable.selector);
+        vm.prank(admin);
+        registry.listToken(asset, activeConfig());
+    }
+
+    function testListTokenRefusesAPoolThatDoesNotPairTheTokenWithTheAsset() public {
+        IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
+        cfg.pool = _pairPool(_stub());
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotAgainstAsset.selector, cfg.pool));
+        vm.prank(admin);
+        registry.listToken(token, cfg);
+
+        cfg.source = IStockAccountRegistry.PriceSource.Chainlink;
+        cfg.chainlinkFeed = feed;
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotAgainstAsset.selector, cfg.pool));
+        vm.prank(admin);
+        registry.listToken(token, cfg);
+    }
+
+    function testDepositBoundsCannotCross() public {
+        uint256 min = registry.minStrategyDeposit();
+        uint256 max = registry.maxStrategyDeposit();
+        vm.startPrank(admin);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidDepositBounds.selector);
+        registry.setMinStrategyDeposit(max + 1);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidDepositBounds.selector);
+        registry.setMaxStrategyDeposit(min - 1);
+
+        vm.stopPrank();
+
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.minStrategyDeposit = config.maxStrategyDeposit + 1;
+
+        vm.expectRevert(IStockAccountRegistry.InvalidDepositBounds.selector);
+        new StockAccountRegistry(config);
     }
 
     function listDefaultToken() internal {
@@ -784,7 +831,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testSetTokenPoolRepointsHaltedTokenAndEmits() public {
         listAndHaltDefaultToken();
-        address newPool = _stub();
+        address newPool = _pairPool(token);
 
         vm.expectEmit(true, true, true, false, address(registry));
         emit StockAccountRegistry.TokenPoolUpdated(token, pool, newPool);
@@ -801,7 +848,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testSetTokenPoolRevertsWhenTokenActive() public {
         listDefaultToken();
-        address newPool = _stub();
+        address newPool = _pairPool(token);
 
         vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
         vm.prank(admin);
@@ -812,7 +859,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testSetTokenPoolRevertsWhenTokenSellOnly() public {
         listDefaultToken();
-        address newPool = _stub();
+        address newPool = _pairPool(token);
 
         vm.prank(guardian);
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
@@ -823,7 +870,7 @@ contract StockAccountRegistryUnitTest is Test {
     }
 
     function testSetTokenPoolRevertsWhenTokenNotListed() public {
-        address newPool = _stub();
+        address newPool = _pairPool(token);
 
         vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotListed.selector, token));
         vm.prank(admin);
@@ -832,7 +879,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testSetTokenPoolRevertsForNonAdmin() public {
         listAndHaltDefaultToken();
-        address newPool = _stub();
+        address newPool = _pairPool(token);
 
         expectNotAdmin(guardian);
         vm.prank(guardian);
@@ -847,7 +894,7 @@ contract StockAccountRegistryUnitTest is Test {
 
     function testSetTokenPoolIsFrozenWhilePaused() public {
         listAndHaltDefaultToken();
-        address newPool = _stub();
+        address newPool = _pairPool(token);
 
         vm.prank(guardian);
         registry.pause();
@@ -1208,8 +1255,15 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
         vm.prank(guardian);
         registry.setTokenStatus(address(stock), IStockAccountRegistry.TokenStatus.Halted);
 
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotAgainstAsset.selector, address(altPool)));
         vm.prank(admin);
         registry.setTokenPool(address(stock), address(altPool));
+
+        MockCLPoolObserve freshPool = new MockCLPoolObserve(address(usdc), address(stock));
+        freshPool.setRevertOld(true);
+
+        vm.prank(admin);
+        registry.setTokenPool(address(stock), address(freshPool));
 
         vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, address(stock)));
         vm.prank(admin);

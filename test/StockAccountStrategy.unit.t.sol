@@ -340,6 +340,50 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.getAccountSlippage(), 25, "lowered cap wins");
     }
 
+    function testATopUpIsAcceptedOnceGainsLiftTheAccountAboveTheCap() public {
+        _fundToken(nvda, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 100e18);
+        assertEq(strategy.principal(), 20_000e18, "a token deposit counts at the reference");
+
+        priceChecker.setRate(address(nvda), address(usdc), 300e18);
+        assertGt(strategy.getNAV(), CAP, "gains put the account above the cap");
+
+        _fundUsdc(funder, 100e18);
+        vm.prank(funder);
+        strategy.deposit(100e18);
+
+        assertEq(strategy.principal(), 20_100e18, "the top up is accepted and counted");
+    }
+
+    function testTheCapStillBoundsTheCapitalPutIn() public {
+        _fundUsdc(funder, CAP + 1);
+        vm.startPrank(funder);
+        strategy.deposit(CAP);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.DepositCapExceeded.selector, CAP + 1));
+        strategy.deposit(1);
+        vm.stopPrank();
+    }
+
+    function testWithdrawalsFreeRoomUnderTheCap() public {
+        _fundUsdc(funder, CAP + 5_000e18);
+        vm.prank(funder);
+        strategy.deposit(CAP);
+
+        vm.prank(user);
+        strategy.withdrawToken(address(usdc), 5_000e18);
+        assertEq(strategy.principal(), CAP - 5_000e18, "taking capital out reduces principal");
+
+        vm.prank(funder);
+        strategy.deposit(5_000e18);
+        assertEq(strategy.principal(), CAP, "and the room can be used again");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+        assertEq(strategy.principal(), 0, "a full exit clears it");
+    }
+
     function testWithdrawTokenMovesBalanceAndEmits() public {
         _fundToken(nvda, funder, 10e18);
         vm.prank(funder);
@@ -407,6 +451,31 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(user), 1_000e18, "user usdc");
         assertEq(nvda.balanceOf(user), 10e18, "user nvda");
         assertEq(strategy.getNAV(), 0, "nav emptied");
+    }
+
+    function testWithdrawAllInKindSkipsAFrozenTokenAndSendsTheRest() public {
+        MockFailingERC20 frozen = new MockFailingERC20();
+        _listActive(address(frozen));
+        priceChecker.setRate(address(frozen), address(usdc), 1e18);
+        frozen.setBalance(address(strategy), 5e18);
+
+        _fundUsdc(funder, 1_000e18);
+        vm.prank(funder);
+        strategy.deposit(1_000e18);
+
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.WithdrawSkipped(address(frozen), 5e18);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(usdc.balanceOf(user), 1_000e18, "the asset still goes out");
+        assertEq(nvda.balanceOf(user), 10e18, "the other stock still goes out");
+        assertEq(frozen.balanceOf(address(strategy)), 5e18, "the frozen token stays behind");
     }
 
     function testWithdrawAllInKindOnlyOwner() public {

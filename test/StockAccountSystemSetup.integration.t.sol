@@ -101,7 +101,7 @@ contract StockAccountSystemSetupTest is Test {
 
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
-        addresses = new Addresses("./addresses", chainIds);
+        addresses = new Addresses(_bookWithoutTheLiveDeployment(), chainIds);
         vm.makePersistent(address(addresses));
 
         // A throwaway deployer: the real DEPLOYER_EOA's next CREATE slots at any given block are
@@ -115,6 +115,46 @@ contract StockAccountSystemSetupTest is Test {
         proposal = new DeployStockAccountSystem();
         proposal.setPrimaryForkId(vm.activeFork());
         proposal.setAddresses(addresses);
+    }
+
+    struct BookEntry {
+        address addr;
+        bool isContract;
+        string name;
+    }
+
+    /// @dev The live 016 contracts have no code at the pinned block, so the rehearsal drops them from the book
+    function _bookWithoutTheLiveDeployment() internal returns (string memory dir) {
+        dir = "./script/stock-accounts/addresses-rehearsal";
+        vm.createDir(dir, true);
+
+        BookEntry[] memory entries = abi.decode(vm.parseJson(vm.readFile("./addresses/8453.json")), (BookEntry[]));
+        string memory json = "[";
+        bool first = true;
+
+        for (uint256 i = 0; i < entries.length; i++) {
+            bytes32 name = keccak256(bytes(entries[i].name));
+            if (
+                name == keccak256("STOCK_ACCOUNT_REGISTRY") || name == keccak256("STOCK_ACCOUNT_PRICE_CHECKER")
+                    || name == keccak256("STOCK_ACCOUNT_STRATEGY_IMPL")
+                    || name == keccak256("STOCK_ACCOUNT_STRATEGY_FACTORY")
+            ) continue;
+
+            json = string.concat(
+                json,
+                first ? "" : ",",
+                '{"addr":"',
+                vm.toString(entries[i].addr),
+                '","name":"',
+                entries[i].name,
+                '","isContract":',
+                entries[i].isContract ? "true" : "false",
+                "}"
+            );
+            first = false;
+        }
+
+        vm.writeFile(string.concat(dir, "/8453.json"), string.concat(json, "]"));
     }
 
     /// @dev One test, not several: the deployment, the batch and the user lifecycle are strictly

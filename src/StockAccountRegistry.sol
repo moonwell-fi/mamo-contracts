@@ -5,6 +5,7 @@ import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
+import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
@@ -99,6 +100,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setTwapWindow(config.twapWindow);
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
+        if (config.minStrategyDeposit > config.maxStrategyDeposit) revert InvalidDepositBounds();
         _setOrderSigner(config.orderSigner);
         _setManagementFeeBps(config.managementFeeBps);
     }
@@ -168,12 +170,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Sets the minimum total value a single stock account must hold after a deposit
     function setMinStrategyDeposit(uint256 newMinDeposit) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newMinDeposit == minStrategyDeposit) revert AlreadySet();
+        if (newMinDeposit > maxStrategyDeposit) revert InvalidDepositBounds();
         _setMinStrategyDeposit(newMinDeposit);
     }
 
     /// @notice Sets the maximum total deposit a single stock account may hold
     function setMaxStrategyDeposit(uint256 newMaxDeposit) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newMaxDeposit == maxStrategyDeposit) revert AlreadySet();
+        if (newMaxDeposit < minStrategyDeposit) revert InvalidDepositBounds();
         _setMaxStrategyDeposit(newMaxDeposit);
     }
 
@@ -196,11 +200,13 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     ///        bookkeeping only. A Chainlink token is priced through the audited SlippagePriceChecker,
     ///        whose feeds its own owner configures; this field is not read.
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (token == asset) revert AssetNotListable();
         if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
         if (cfg.status != TokenStatus.Active) revert MustListAsActive();
         if (token.code.length == 0) revert NotAContract(token);
         if (cfg.pool.code.length == 0) revert NotAContract(cfg.pool);
         if (cfg.pool == token) revert PoolIsToken();
+        _requireAssetPool(token, cfg.pool);
 
         if (cfg.source == PriceSource.Chainlink) {
             if (cfg.chainlinkFeed.code.length == 0) revert NotAContract(cfg.chainlinkFeed);
@@ -224,6 +230,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         if (newPool == cfg.pool) revert AlreadySet();
         if (newPool.code.length == 0) revert NotAContract(newPool);
         if (newPool == token) revert PoolIsToken();
+        _requireAssetPool(token, newPool);
 
         address oldPool = cfg.pool;
         cfg.pool = newPool;
@@ -282,6 +289,11 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Returns whether stock accounts are barred from validating orders
     function paused() public view override(IStockAccountRegistry, Pausable) returns (bool) {
         return super.paused();
+    }
+
+    function _requireAssetPool(address token, address pool) internal view {
+        (address a, address b) = (ICLPool(pool).token0(), ICLPool(pool).token1());
+        if (!(a == token && b == asset) && !(a == asset && b == token)) revert PoolNotAgainstAsset(pool);
     }
 
     function _requirePriceable(address token) internal view {
