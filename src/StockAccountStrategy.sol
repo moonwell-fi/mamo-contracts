@@ -121,6 +121,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function deposit(uint256 amount) external override {
         if (amount == 0) revert ZeroAmount();
 
+        _settleFeesBeforeDeposit();
         asset.safeTransferFrom(msg.sender, address(this), amount);
         _checkAccountValue();
 
@@ -138,6 +139,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             revert TokenNotActive(token);
         }
 
+        _settleFeesBeforeDeposit();
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         _checkAccountValue();
 
@@ -641,6 +643,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /// @notice Pays the fee accrued since the last payment out of the balances the account holds, callable by anyone
     /// @dev Walks the balances until the fee is settled, so an exit cannot leave a remainder nothing can collect
     function payFeesFromAny() external override {
+        _payFeesFromAny();
+    }
+
+    function _payFeesFromAny() internal {
         if (asset.balanceOf(address(this)) > 0) {
             _payFees(address(asset));
         }
@@ -659,6 +665,14 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (!_feeSettled() && getNAV() == 0) {
             lastFeePaid = uint64(block.timestamp);
         }
+    }
+
+    /// @dev New funds must not pay for time before they arrived, so the fee on the balance already held is settled first
+    function _settleFeesBeforeDeposit() internal {
+        _payFeesFromAny();
+
+        // A remainder worth nothing on the balance held would otherwise be charged on the new funds
+        if (!_feeSettled() && feeDue() == 0) lastFeePaid = uint64(block.timestamp);
     }
 
     function _feeSettled() internal view returns (bool) {

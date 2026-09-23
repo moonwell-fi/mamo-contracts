@@ -221,9 +221,8 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         for (uint256 i = 1; i <= 10; i++) {
             vm.warp(startTime + i * 365 days);
 
-            _fundToken(msft, funder, 1);
-            vm.prank(funder);
-            strategy.depositToken(address(msft), 1);
+            // A plain transfer, since a deposit would settle the whole fee first
+            msft.mint(address(strategy), 1);
 
             strategy.payFees(address(msft));
         }
@@ -448,15 +447,68 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.lastFeePaid(), startTime + 30 days, "last fee paid");
     }
 
-    function testDepositDoesNotPayFees() public {
+    function testDepositSettlesTheFeeOnTheBalanceAlreadyHeld() public {
         vm.warp(startTime + 30 days);
+        uint256 owed = strategy.feeDue();
 
         _fundUsdc(funder, 100e18);
         vm.prank(funder);
         strategy.deposit(100e18);
 
-        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing paid");
-        assertEq(strategy.lastFeePaid(), startTime, "last fee paid");
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the period is paid on the balance before the deposit");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the clock restarts at the deposit");
+        assertEq(strategy.feeDue(), 0, "the new funds owe nothing yet");
+    }
+
+    function testDepositTokenSettlesTheFeeOnTheBalanceAlreadyHeld() public {
+        vm.warp(startTime + 30 days);
+        uint256 owed = strategy.feeDue();
+
+        _fundToken(nvda, funder, 1e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 1e18);
+
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the period is paid on the balance before the deposit");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the clock restarts at the deposit");
+    }
+
+    /// @dev The review case: an account created empty and funded months later pays nothing for the empty months
+    function testFirstDepositIntoAnIdleEmptyAccountIsNotChargedForTheIdleTime() public {
+        StockAccountStrategy fresh = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+        assertEq(fresh.lastFeePaid(), startTime, "created at the start");
+
+        vm.warp(startTime + 180 days);
+
+        usdc.mint(funder, 25_000e18);
+        vm.startPrank(funder);
+        usdc.approve(address(fresh), 25_000e18);
+        fresh.deposit(25_000e18);
+        vm.stopPrank();
+
+        assertEq(fresh.lastFeePaid(), startTime + 180 days, "the clock starts at the deposit");
+        assertEq(fresh.feeDue(), 0, "nothing is owed for the empty months");
+
+        vm.warp(startTime + 210 days);
+        assertEq(fresh.feeDue(), _feeValue(25_000e18, 30 days), "only the funded time is charged");
+    }
+
+    function testADustBalanceDoesNotCarryItsStuckClockOntoANewDeposit() public {
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18 - 1);
+        strategy.withdrawToken(address(nvda), 10e18);
+        strategy.withdrawToken(address(aapl), 20e18);
+        vm.stopPrank();
+
+        uint256 lastPaid = strategy.lastFeePaid();
+        vm.warp(lastPaid + 365 days);
+        assertEq(strategy.feeDue(), 0, "a year on 1 wei is worth nothing");
+
+        _fundUsdc(funder, 1_000e18);
+        vm.prank(funder);
+        strategy.deposit(1_000e18);
+
+        assertEq(strategy.lastFeePaid(), lastPaid + 365 days, "the clock restarts at the deposit");
+        assertEq(strategy.feeDue(), 0, "the new funds are not charged for the year");
     }
 
     function testSetFeeRecipientStoresAndEmits() public {
