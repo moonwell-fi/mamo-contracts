@@ -1,0 +1,23 @@
+{
+  "admin": "DEPLOYER_EOA",
+  "aerodromeRouter": "AERODROME_STOCKS_SWAP_ROUTER",
+  "asset": "USDC",
+  "backend": "STRATEGY_MULTICALL",
+  "chainId": 8453,
+  "cowSettlement": "COWSWAP_SETTLEMENT",
+  "existingPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
+  "feeRecipient": "DEPLOYER_EOA",
+  "guardian": "DEPLOYER_EOA",
+  "managementFeeBps": 100,
+  "maxBackendSlippageBps": 100,
+  "maxDeviationBps": 1000,
+  "maxPositions": 10,
+  "maxStrategyDeposit": 25000000000,
+  "maxWithdrawSlippageBps": 500,
+  "minStrategyDeposit": 100000000,
+  "minTargetBps": 500,
+  "orderSigner": "DEPLOYER_EOA",
+  "placeholderPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
+  "strategyTypeId": 5,
+  "twapWindow": 180
+}

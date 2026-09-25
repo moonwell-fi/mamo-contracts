@@ -5,6 +5,7 @@ import {MamoStakingV2Deployment} from "../multisig/mamo-multisig/008_MamoStaking
 import {DeployMultiRewards} from "../script/DeployMultiRewards.s.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 abstract contract BaseTest is Test {
     Addresses public addresses;
@@ -14,12 +15,7 @@ abstract contract BaseTest is Test {
     function setUp() public virtual {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
-        // Create a new addresses instance for testing
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        addresses = PinnedAddresses.load("./addresses");
         vm.makePersistent(address(addresses));
     }
 }

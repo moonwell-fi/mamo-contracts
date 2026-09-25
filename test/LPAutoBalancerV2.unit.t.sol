@@ -379,6 +379,8 @@ contract MockCLPoolV2 is ICLPool {
         tickCumulative1 = cum1;
     }
 
+    function increaseObservationCardinalityNext(uint16) external {}
+
     function setTokens(address t0, address t1) external {
         _token0 = t0;
         _token1 = t1;
