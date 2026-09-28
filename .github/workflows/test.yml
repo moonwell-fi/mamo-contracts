@@ -497,5 +497,5 @@ jobs:
         with:
           version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
 
-      - name: Run staking V2 tests (pinned Base fork)
+      - name: Run staking V2 tests
         run: make mamo-staking-v2

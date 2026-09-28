@@ -54,10 +54,9 @@ strategy-multicall:
 mamo-staking:
 	forge test --fork-url base --ffi --mc MamoStaking -vvv
 
-# Staking V2 suites: the V2 copies of the three staking suites. Pinned to the block before DEPLOYER_EOA's
-# EIP-7702 delegation (Sep 25, block 51_790_538): from then on it has code and the address book refuses it.
+# Staking V2 suites: the V2 copies of the three staking suites.
 mamo-staking-v2:
-	forge test --fork-url base --fork-block-number 51790537 --ffi --mc "MamoStaking(Registry|Strategy|StrategyFactory)V2IntegrationTest" -vvv
+	forge test --fork-url base --ffi --mc "MamoStaking(Registry|Strategy|StrategyFactory)V2IntegrationTest" -vvv
 
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
