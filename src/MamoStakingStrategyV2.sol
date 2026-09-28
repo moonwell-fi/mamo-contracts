@@ -10,7 +10,7 @@ import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
-import {IPool} from "@interfaces/IPool.sol";
+import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
@@ -67,6 +67,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     event CompoundRewardTokenProcessed(address indexed rewardToken, uint256 amountIn, uint256 amountOut);
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
     event ReinvestRewardTokenHeld(address indexed rewardToken, uint256 amount);
+    event CompoundRewardTokenHeld(address indexed rewardToken, uint256 amount);
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
@@ -221,10 +222,6 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         (bool okRewards, bytes memory retRewards) =
             newStakingRegistry.staticcall(abi.encodeWithSignature("getRewardTokens()"));
         require(okRewards && retRewards.length >= 64, "Staking registry has no reward tokens");
-
-        (bool okRoute, bytes memory retRoute) =
-            newStakingRegistry.staticcall(abi.encodeWithSignature("getRoute(address)", address(0)));
-        require(okRoute && retRoute.length >= 64, "Staking registry has no routes");
 
         // The MAMO token is what this strategy stakes; a registry disagreeing about it would price
         // and route swaps for a different asset than the one held.
@@ -415,9 +412,6 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         multiRewards.getReward();
 
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
-        ISwapRouter dexRouter = stakingRegistry.dexRouter();
-        ISlippagePriceChecker priceChecker = stakingRegistry.slippagePriceChecker();
-        uint256 accountSlippage = getAccountSlippage();
         address mamoTokenAddr = address(mamoToken);
 
         // Process each reward token by swapping to MAMO
@@ -433,28 +427,15 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             // lists MAMO is a loud, diagnosable revert instead of a partially-processed compound.
             require(rewardTokens[i].token != mamoTokenAddr, "Reward token is MAMO");
 
-            IERC20 rewardToken = IERC20(rewardTokens[i].token);
-            uint256 rewardBalance = rewardToken.balanceOf(address(this));
+            uint256 rewardBalance = IERC20(rewardTokens[i].token).balanceOf(address(this));
 
             if (rewardBalance == 0) continue;
 
-            MamoStakingRegistry.Hop[] memory route = stakingRegistry.getRoute(address(rewardToken));
-            if (route.length == 0) {
-                route = new MamoStakingRegistry.Hop[](1);
-                route[0] = MamoStakingRegistry.Hop(rewardTokens[i].pool, dexRouter, priceChecker);
+            // A token whose route fails (stale feed, dust, missing route) is held rather than blocking the rest
+            try this.compoundRewardToken(rewardTokens[i].token, rewardTokens[i].pool, rewardBalance, deadline) {}
+            catch {
+                emit CompoundRewardTokenHeld(rewardTokens[i].token, rewardBalance);
             }
-
-            address tokenIn = address(rewardToken);
-            uint256 amount = rewardBalance;
-            for (uint256 j = 0; j < route.length; j++) {
-                (tokenIn, amount) = _swapHop(route[j], tokenIn, amount, accountSlippage, deadline);
-            }
-            require(tokenIn == mamoTokenAddr, "Route must end in MAMO");
-
-            // Unguarded on purpose: a router sending reward tokens in rather than taking them should revert here
-            uint256 pulled = rewardBalance - rewardToken.balanceOf(address(this));
-
-            emit CompoundRewardTokenProcessed(address(rewardToken), pulled, amount);
         }
 
         // Stake all MAMO
@@ -530,20 +511,73 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Swaps along one hop of a reward token's route, floored by the hop's price checker
+     * @notice Swaps one reward token along its route to MAMO
+     * @dev Only callable by this contract, so a failing route reverts on its own inside compound()
+     * @param rewardToken The reward token
+     * @param pool The token's single pool, used when the registry has no route for it
+     * @param rewardBalance The amount to swap
+     * @param deadline The swap deadline
+     */
+    function compoundRewardToken(address rewardToken, address pool, uint256 rewardBalance, uint256 deadline) external {
+        require(msg.sender == address(this), "Only self");
+
+        MamoStakingRegistry.Hop[] memory route = _route(rewardToken, pool);
+        uint256 slippageInBps = getAccountSlippage();
+
+        address tokenIn = rewardToken;
+        uint256 amount = rewardBalance;
+        uint256 expected = rewardBalance;
+        for (uint256 j = 0; j < route.length; j++) {
+            (tokenIn, amount, expected) = _swapHop(route[j], tokenIn, amount, expected, slippageInBps, deadline);
+        }
+        require(tokenIn == address(mamoToken), "Route must end in MAMO");
+
+        // Unguarded on purpose: a router sending reward tokens in rather than taking them should revert here
+        uint256 pulled = rewardBalance - IERC20(rewardToken).balanceOf(address(this));
+
+        emit CompoundRewardTokenProcessed(rewardToken, pulled, amount);
+    }
+
+    /// @notice The token's route, falling back to its single pool, with unset hop routers and checkers taken from the registry
+    function _route(address rewardToken, address pool) internal view returns (MamoStakingRegistry.Hop[] memory route) {
+        try stakingRegistry.getRoute(rewardToken) returns (MamoStakingRegistry.Hop[] memory registered) {
+            route = registered;
+        } catch {}
+
+        if (route.length == 0) {
+            route = new MamoStakingRegistry.Hop[](1);
+            route[0].pool = pool;
+        }
+
+        for (uint256 j = 0; j < route.length; j++) {
+            if (address(route[j].router) == address(0)) route[j].router = stakingRegistry.dexRouter();
+            if (address(route[j].checker) == address(0)) route[j].checker = stakingRegistry.slippagePriceChecker();
+        }
+    }
+
+    /**
+     * @notice Swaps along one hop of a route
+     * @dev Floored against the oracle value chained from the original reward amount, so the slippage applies once
+     *      to the whole route rather than to every hop
      * @return tokenOut The token received
      * @return received The amount received, measured from balances rather than the router's return value
+     * @return expectedOut The oracle value of the original reward amount in `tokenOut`
      */
     function _swapHop(
         MamoStakingRegistry.Hop memory hop,
         address tokenIn,
         uint256 amountIn,
+        uint256 expectedIn,
         uint256 slippageInBps,
         uint256 deadline
-    ) internal returns (address tokenOut, uint256 received) {
-        tokenOut = stakingRegistry.hopTokenOut(hop.pool, tokenIn);
-        uint256 amountOutMinimum =
-            (hop.checker.getExpectedOut(amountIn, tokenIn, tokenOut) * (10000 - slippageInBps)) / 10000;
+    ) internal returns (address tokenOut, uint256 received, uint256 expectedOut) {
+        address token0 = ICLPool(hop.pool).token0();
+        address token1 = ICLPool(hop.pool).token1();
+        require(tokenIn == token0 || tokenIn == token1, "Token not in pool");
+        tokenOut = tokenIn == token0 ? token1 : token0;
+
+        expectedOut = hop.checker.getExpectedOut(expectedIn, tokenIn, tokenOut);
+        uint256 amountOutMinimum = (expectedOut * (10000 - slippageInBps)) / 10000;
 
         IERC20(tokenIn).forceApprove(address(hop.router), amountIn);
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
@@ -552,7 +586,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             ISwapRouter.ExactInputSingleParams({
                 tokenIn: tokenIn,
                 tokenOut: tokenOut,
-                tickSpacing: IPool(hop.pool).tickSpacing(),
+                tickSpacing: ICLPool(hop.pool).tickSpacing(),
                 recipient: address(this),
                 deadline: deadline,
                 amountIn: amountIn,

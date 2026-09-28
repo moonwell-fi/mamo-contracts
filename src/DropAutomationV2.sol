@@ -97,7 +97,6 @@ contract DropAutomationV2 is Ownable {
     error RewardTokenNotSwappable(address token);
     error InvalidBuyToken(address token);
     error InsufficientOutput();
-    error InvalidQuote();
     error NothingToDistribute();
 
     modifier onlyDedicatedMsgSender() {
@@ -188,13 +187,14 @@ contract DropAutomationV2 is Ownable {
     }
 
     /**
-     * @notice Lets the CoW vault relayer pull a token this contract sells for MAMO
+     * @notice Lets the CoW vault relayer pull the current balance of a token this contract sells for MAMO
+     * @dev Bounded to the balance, as in MamoMultiMarketStrategy, so a later balance is not sellable until approved
      * @param token The token to approve, never a reward token
      */
     function approveCowRelayer(address token) external onlyDedicatedMsgSender {
         if (isRewardToken[token]) revert RewardTokenNotSwappable(token);
 
-        IERC20(token).forceApprove(VAULT_RELAYER, type(uint256).max);
+        IERC20(token).forceApprove(VAULT_RELAYER, IERC20(token).balanceOf(address(this)));
     }
 
     /**
@@ -305,7 +305,6 @@ contract DropAutomationV2 is Ownable {
      * @param recipient The address receiving the LP tokens
      */
     function withdrawGauge(address gauge, uint256 amount, address recipient) external onlyOwner {
-        if (!isGauge[gauge]) revert NotFound(gauge);
         if (recipient == address(0)) revert ZeroAddress();
 
         IAerodromeGauge(gauge).withdraw(amount);
@@ -371,6 +370,9 @@ contract DropAutomationV2 is Ownable {
         // Below one unit per second the stream's rate rounds to zero, so the balance waits for the next drop
         if (amount == 0 || amount < duration) return false;
 
+        // The remainder of the division by the duration would never stream, so it is kept for the next drop
+        if (duration != 0) amount -= amount % duration;
+
         try this.notifyReward(token, amount) {
             emit RewardNotified(token, amount);
             return true;
@@ -397,10 +399,13 @@ contract DropAutomationV2 is Ownable {
         if (amountOut < minAmountOut) revert InsufficientOutput();
     }
 
+    /// @dev Returns zero without swapping when the quoted minimum rounds to zero, so dust cannot revert a drop
     function _swap(address tokenIn, address tokenOut, uint256 amountIn, int24 tickSpacing)
         internal
         returns (uint256 amountOut)
     {
+        if (amountIn == 0) return 0;
+
         (uint256 quoted,,,) = AERODROME_QUOTER.quoteExactInputSingle(
             IQuoter.QuoteExactInputSingleParams({
                 tokenIn: tokenIn,
@@ -412,7 +417,7 @@ contract DropAutomationV2 is Ownable {
         );
 
         uint256 minOut = (quoted * (BPS_DENOMINATOR - maxSlippageBps)) / BPS_DENOMINATOR;
-        if (minOut == 0) revert InvalidQuote();
+        if (minOut == 0) return 0;
 
         IERC20(tokenIn).forceApprove(address(AERODROME_CL_ROUTER), amountIn);
 

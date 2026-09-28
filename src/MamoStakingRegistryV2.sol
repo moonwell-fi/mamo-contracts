@@ -34,7 +34,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         address pool; // Pool address for swapping this token to MAMO
     }
 
-    /// @notice One swap along a reward token's route to MAMO
+    /// @notice One swap along a reward token's route to MAMO, where a zero router or checker means the global one
     struct Hop {
         address pool;
         ISwapRouter router;
@@ -172,7 +172,6 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         // Remove the last element
         rewardTokens.pop();
         delete rewardTokenToIndex[token];
-        delete routes[token];
         isRewardToken[token] = false;
 
         emit RewardTokenRemoved(token);
@@ -207,7 +206,8 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
 
     /**
      * @notice Set the multi-hop route a reward token is swapped along to MAMO (admin only)
-     * @dev Admin only, like setDEXRouter and setSlippagePriceChecker, since every hop names a router and a checker
+     * @dev Admin only, like setDEXRouter and setSlippagePriceChecker, since a hop can name a router and a checker.
+     *      Routes survive removeRewardToken, so only the admin changes them
      * @param token The reward token
      * @param route The hops, starting from the token and ending in MAMO, or empty to use the token's single pool
      */
@@ -217,8 +217,6 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         delete routes[token];
         address tokenIn = token;
         for (uint256 i = 0; i < route.length; i++) {
-            require(address(route[i].router) != address(0) && address(route[i].checker) != address(0), "Invalid hop");
-
             tokenIn = hopTokenOut(route[i].pool, tokenIn);
             routes[token].push(route[i]);
         }

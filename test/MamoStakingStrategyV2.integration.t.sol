@@ -80,17 +80,6 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
             abi.encodeWithSignature("slippagePriceChecker()"),
             abi.encode(address(slippagePriceChecker))
         );
-        // The live registry predates V2: no routes, so every reward token takes its single pool to MAMO
-        vm.mockCall(
-            address(stakingRegistry),
-            abi.encodeWithSignature("getRoute(address)"),
-            abi.encode(new MamoStakingRegistry.Hop[](0))
-        );
-        vm.mockCall(
-            address(stakingRegistry),
-            abi.encodeWithSignature("hopTokenOut(address,address)"),
-            abi.encode(address(mamoToken))
-        );
     }
 
     /// @dev Mirrors multisig/mamo-multisig/008_MamoStakingV2Deployment._configureCbBtcToMamoOracle:
@@ -1711,7 +1700,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
     ///      strategy accepted that return value as the swap result, so amountOutMinimum was enforced
     ///      only by the router's own implementation and an honest-but-buggy router (or a router
     ///      upgrade with different return semantics) silently defeated the slippage guard.
-    function testCompoundRevertsWhenRouterUnderDeliversDespiteReturnValue() public {
+    function testCompoundHoldsTheTokenWhenRouterUnderDeliversDespiteReturnValue() public {
         address cbBTC = _stakeAndAccrueCbBtcRewards();
         address dexRouter = address(stakingRegistry.dexRouter());
 
@@ -1722,14 +1711,17 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         address backend = addresses.getAddress("STRATEGY_MULTICALL");
         uint256 deadline = _deadline();
+        // V2 isolates each reward token: the balance check fails that token's route, which is held
+        vm.expectEmit(true, false, false, false, userStrategy);
+        emit MamoStakingStrategy.CompoundRewardTokenHeld(cbBTC, 0);
         vm.prank(backend);
-        vm.expectRevert("Insufficient MAMO received");
         MamoStakingStrategy(userStrategy).compound(deadline);
+        assertGt(IERC20(cbBTC).balanceOf(userStrategy), 0, "Reward token should be held, not swapped");
 
         vm.clearMockedCalls();
         _mockRegistryPriceChecker();
 
-        // Sanity: with the real router the same compound succeeds, so the revert above is the
+        // Sanity: with the real router the same compound succeeds, so the hold above is the
         // balance check firing and not a broken fixture.
         uint256 stakedBefore = multiRewards.balanceOf(userStrategy);
         deadline = _deadline();
@@ -2025,10 +2017,6 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 ///      exactly the point: `setStakingRegistry` accepts any address, so its guards must hold against
 ///      contracts that were never built by MamoStakingRegistry at all.
 contract ProbeableStakingRegistryV2 {
-    function getRoute(address) external pure returns (MamoStakingRegistry.Hop[] memory) {
-        return new MamoStakingRegistry.Hop[](0);
-    }
-
     address public slippagePriceChecker;
     address public dexRouter;
     address public mamoToken;

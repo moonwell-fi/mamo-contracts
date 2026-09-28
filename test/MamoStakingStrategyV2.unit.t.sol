@@ -6,6 +6,7 @@ import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {MamoStakingStrategyV2} from "@contracts/MamoStakingStrategyV2.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Test} from "forge-std/Test.sol";
@@ -113,7 +114,9 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         MamoStakingRegistryV2.Hop[] memory route = new MamoStakingRegistryV2.Hop[](2);
         route[0] = MamoStakingRegistryV2.Hop(address(stockUsdc), stockRouter, stockChecker);
-        route[1] = MamoStakingRegistryV2.Hop(address(usdcMamo), router, checker);
+        // Unset router and checker: the registry's global ones
+        route[1] =
+            MamoStakingRegistryV2.Hop(address(usdcMamo), ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
         vm.prank(admin);
         registry.setRoute(address(stock), route);
 
@@ -141,6 +144,22 @@ contract MamoStakingStrategyV2UnitTest is Test {
         assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 2_000e18 + 10_000e18);
         assertEq(stock.balanceOf(address(strategy)), 0);
         assertEq(usdc.balanceOf(address(strategy)), 0, "no intermediate token left behind");
+    }
+
+    function test_compound_floorsTheWholeRouteAndHoldsATokenThatFails() public {
+        // Each hop pays 0.6% under the oracle: within 1% per hop, but 1.2% over the whole route
+        stockRouter.setRate(address(stock), address(usdc), 1.988e18);
+        router.setRate(address(usdc), address(mamo), 0.994e31);
+        stock.mint(address(strategy), 1e8);
+        cbBtc.mint(address(strategy), 1e6);
+
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.CompoundRewardTokenHeld(address(stock), 1e8);
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+
+        assertEq(stock.balanceOf(address(strategy)), 1e8, "held");
+        assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 10_000e18, "cbBTC still compounds");
     }
 
     function test_reinvest_depositsStockRewardsIntoTheStockAccount() public {
@@ -180,10 +199,6 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         vm.expectRevert("Token not in pool");
         registry.setRoute(address(cbBtc), route);
-
-        route[0].checker = ISlippagePriceChecker(address(0));
-        vm.expectRevert("Invalid hop");
-        registry.setRoute(address(stock), route);
         vm.stopPrank();
 
         vm.expectRevert(
@@ -195,7 +210,7 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         vm.prank(backend);
         registry.removeRewardToken(address(stock));
-        assertEq(registry.getRoute(address(stock)).length, 0, "removing the token clears its route");
+        assertEq(registry.getRoute(address(stock)).length, 2, "only the admin changes a route");
     }
 
     function _setRate(MockSwapRouter r, MockPriceChecker c, address tokenIn, address tokenOut, uint256 rate) internal {

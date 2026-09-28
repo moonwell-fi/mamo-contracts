@@ -96,8 +96,9 @@ contract DropAutomationV2UnitTest is Test {
 
         _createDrop();
 
-        assertEq(mamo.balanceOf(address(multiRewards)), 1_000e18 + 1e18, "funded on top of the stake");
-        assertEq(stock.balanceOf(address(multiRewards)), 5e8);
+        assertEq(mamo.balanceOf(address(multiRewards)), 1e18 + 1_000e18 - 1_000e18 % DURATION, "on top of the stake");
+        assertEq(stock.balanceOf(address(multiRewards)), 5e8 - 5e8 % DURATION);
+        assertEq(stock.balanceOf(address(drop)), 5e8 % DURATION, "the remainder waits for the next drop");
         assertEq(multiRewards.getRewardForDuration(address(stock)), 5e8 - 5e8 % DURATION);
         (,, uint256 cbBtcPeriodFinish,,,) = multiRewards.rewardData(address(cbBtc));
         assertEq(cbBtcPeriodFinish, 0, "a zero balance is skipped");
@@ -106,14 +107,16 @@ contract DropAutomationV2UnitTest is Test {
     function test_createDrop_topsUpARunningPeriod() public {
         stock.mint(address(drop), 7e8);
         _createDrop();
+        (,,, uint256 firstRate,,) = multiRewards.rewardData(address(stock));
 
         skip(3 days);
         stock.mint(address(drop), 7e8);
+        uint256 topUp = stock.balanceOf(address(drop)) - stock.balanceOf(address(drop)) % DURATION;
         _createDrop();
 
         (,, uint256 periodFinish, uint256 rate,,) = multiRewards.rewardData(address(stock));
         assertEq(periodFinish, block.timestamp + DURATION);
-        assertEq(rate, (7e8 + 4 days * (7e8 / DURATION)) / DURATION, "the leftover rolls into the new period");
+        assertEq(rate, (topUp + 4 days * firstRate) / DURATION, "the leftover rolls into the new period");
     }
 
     function test_createDrop_failingTokenDoesNotBlockTheRest() public {
@@ -127,7 +130,7 @@ contract DropAutomationV2UnitTest is Test {
         _createDrop();
 
         assertEq(weth.balanceOf(address(drop)), 1e18, "held for the next drop");
-        assertEq(stock.balanceOf(address(drop)), 0);
+        assertEq(stock.balanceOf(address(drop)), 5e8 % DURATION);
     }
 
     function test_createDrop_dustWaitsForTheNextDrop() public {
@@ -156,13 +159,29 @@ contract DropAutomationV2UnitTest is Test {
         vm.prank(sender);
         drop.createDrop(tokens, ticks, direct, mins);
 
-        assertEq(cbBtc.balanceOf(address(multiRewards)), 3e6);
+        assertEq(cbBtc.balanceOf(address(multiRewards)), 3e6 - 3e6 % DURATION);
 
         weth.mint(address(drop), 1e18);
         (ticks, direct, mins) = _swapArgs(true, 3e6 + 1);
         vm.prank(sender);
         vm.expectRevert(DropAutomationV2.InsufficientOutput.selector);
         drop.createDrop(tokens, ticks, direct, mins);
+    }
+
+    function test_createDrop_skipsASwapThatDustWouldZero() public {
+        weth.mint(address(drop), 1);
+        mamo.mint(address(drop), 1e18);
+        router.setRate(address(weth), address(cbBtc), 3e6);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(weth);
+        (int24[] memory ticks, bool[] memory direct, uint256[] memory mins) = _swapArgs(true, 0);
+
+        vm.prank(sender);
+        drop.createDrop(tokens, ticks, direct, mins);
+
+        assertEq(weth.balanceOf(address(drop)), 1, "left unswapped");
+        assertEq(mamo.balanceOf(address(drop)), 1e18 % DURATION, "the drop still ran");
     }
 
     function test_createDrop_neverSwapsARewardToken() public {
@@ -190,6 +209,14 @@ contract DropAutomationV2UnitTest is Test {
         digest = order.hash(drop.DOMAIN_SEPARATOR());
         vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.RewardTokenNotSwappable.selector, address(stock)));
         drop.isValidSignature(digest, abi.encode(order));
+    }
+
+    function test_approveCowRelayer_approvesTheBalanceOfANonRewardToken() public {
+        usdc.mint(address(drop), 500e6);
+
+        vm.prank(sender);
+        drop.approveCowRelayer(address(usdc));
+        assertEq(usdc.allowance(address(drop), drop.VAULT_RELAYER()), 500e6);
 
         vm.prank(sender);
         vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.RewardTokenNotSwappable.selector, address(stock)));
