@@ -97,6 +97,7 @@ contract DropAutomationV2 is Ownable {
     error RewardTokenNotSwappable(address token);
     error InvalidBuyToken(address token);
     error InsufficientOutput();
+    error InvalidQuote();
     error NothingToDistribute();
 
     modifier onlyDedicatedMsgSender() {
@@ -410,6 +411,9 @@ contract DropAutomationV2 is Ownable {
             })
         );
 
+        uint256 minOut = (quoted * (BPS_DENOMINATOR - maxSlippageBps)) / BPS_DENOMINATOR;
+        if (minOut == 0) revert InvalidQuote();
+
         IERC20(tokenIn).forceApprove(address(AERODROME_CL_ROUTER), amountIn);
 
         amountOut = AERODROME_CL_ROUTER.exactInputSingle(
@@ -420,7 +424,7 @@ contract DropAutomationV2 is Ownable {
                 recipient: address(this),
                 deadline: block.timestamp + SWAP_DEADLINE_BUFFER,
                 amountIn: amountIn,
-                amountOutMinimum: (quoted * (BPS_DENOMINATOR - maxSlippageBps)) / BPS_DENOMINATOR,
+                amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
         );
