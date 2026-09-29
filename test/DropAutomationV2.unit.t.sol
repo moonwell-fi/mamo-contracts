@@ -4,14 +4,11 @@ pragma solidity 0.8.28;
 import {DropAutomationV2} from "@contracts/DropAutomationV2.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
-import {GPv2Order} from "@libraries/GPv2Order.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {MockERC20Decimals} from "./mocks/MockERC20Decimals.sol";
-import {MockSlippagePriceChecker} from "./mocks/MockSlippagePriceChecker.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 
 contract MockQuoter {
@@ -40,8 +37,6 @@ contract MockGauge {
 }
 
 contract DropAutomationV2UnitTest is Test {
-    using GPv2Order for GPv2Order.Data;
-
     uint256 internal constant DURATION = 7 days;
 
     address internal owner = makeAddr("owner");
@@ -51,11 +46,9 @@ contract DropAutomationV2UnitTest is Test {
     MockERC20Decimals internal cbBtc = new MockERC20Decimals("cbBTC", 8);
     MockERC20Decimals internal stock = new MockERC20Decimals("NVDAc", 8);
     MockERC20Decimals internal weth = new MockERC20Decimals("WETH", 18);
-    MockERC20Decimals internal usdc = new MockERC20Decimals("USDC", 6);
 
     IMultiRewards internal multiRewards;
     MockSwapRouter internal router = new MockSwapRouter();
-    MockSlippagePriceChecker internal checker = new MockSlippagePriceChecker();
     DropAutomationV2 internal drop;
 
     function setUp() public {
@@ -74,7 +67,6 @@ contract DropAutomationV2UnitTest is Test {
             address(multiRewards),
             address(router),
             address(new MockQuoter(router)),
-            address(checker),
             rewardTokens
         );
 
@@ -196,33 +188,6 @@ contract DropAutomationV2UnitTest is Test {
         drop.createDrop(tokens, ticks, direct, mins);
     }
 
-    function test_isValidSignature_sellsNonRewardTokensForMamo() public {
-        GPv2Order.Data memory order = _order(address(usdc), address(mamo));
-        assertEq(drop.isValidSignature(order.hash(drop.DOMAIN_SEPARATOR()), abi.encode(order)), bytes4(0x1626ba7e));
-
-        order = _order(address(usdc), address(cbBtc));
-        bytes32 digest = order.hash(drop.DOMAIN_SEPARATOR());
-        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.InvalidBuyToken.selector, address(cbBtc)));
-        drop.isValidSignature(digest, abi.encode(order));
-
-        order = _order(address(stock), address(mamo));
-        digest = order.hash(drop.DOMAIN_SEPARATOR());
-        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.RewardTokenNotSwappable.selector, address(stock)));
-        drop.isValidSignature(digest, abi.encode(order));
-    }
-
-    function test_approveCowRelayer_approvesTheBalanceOfANonRewardToken() public {
-        usdc.mint(address(drop), 500e6);
-
-        vm.prank(sender);
-        drop.approveCowRelayer(address(usdc));
-        assertEq(usdc.allowance(address(drop), drop.VAULT_RELAYER()), 500e6);
-
-        vm.prank(sender);
-        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.RewardTokenNotSwappable.selector, address(stock)));
-        drop.approveCowRelayer(address(stock));
-    }
-
     function test_gauges() public {
         MockGauge gauge = new MockGauge();
 
@@ -264,22 +229,5 @@ contract DropAutomationV2UnitTest is Test {
         ticks[0] = 100;
         directs[0] = direct;
         mins[0] = minOut;
-    }
-
-    function _order(address sell, address buy) internal view returns (GPv2Order.Data memory) {
-        return GPv2Order.Data({
-            sellToken: IERC20(sell),
-            buyToken: IERC20(buy),
-            receiver: address(drop),
-            sellAmount: 1e6,
-            buyAmount: 1e18,
-            validTo: uint32(block.timestamp + 10 minutes),
-            appData: keccak256(bytes(drop.APP_DATA())),
-            feeAmount: 0,
-            kind: GPv2Order.KIND_SELL,
-            partiallyFillable: false,
-            sellTokenBalance: GPv2Order.BALANCE_ERC20,
-            buyTokenBalance: GPv2Order.BALANCE_ERC20
-        });
     }
 }

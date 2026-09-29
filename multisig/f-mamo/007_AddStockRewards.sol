@@ -14,10 +14,11 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 
 /**
  * @title AddStockRewards
- * @notice F-MAMO batch starting the stock reward streams: each B20 stock becomes a MultiRewards reward token with
- *         DropAutomationV2 as its distributor, and a token DropAutomationV2 pays out as it is.
+ * @notice F-MAMO batch starting the in-kind reward streams: WETH, USDC and each B20 stock become MultiRewards reward
+ *         tokens with DropAutomationV2 as their distributor, and tokens DropAutomationV2 pays out as they are.
  * @dev Runs once most staking accounts have upgraded to MamoStakingStrategyV2: an account still on V1 receives
- *      stocks it cannot compound or reinvest (its owner can only recoverERC20 them).
+ *      tokens it cannot compound or reinvest (its owner can only recoverERC20 them). Until this runs, DropAutomationV2
+ *      keeps swapping WETH to cbBTC and holds USDC and stocks.
  *      A token removed from MultiRewards must never be re-added: its stale per-user checkpoints make `earned`
  *      underflow and lock every earlier staker's withdrawals. {preBuildMock} can only check the token is not listed
  *      now, so this rule is operational.
@@ -47,7 +48,7 @@ contract AddStockRewards is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Add the B20 stocks as MultiRewards reward tokens distributed by DropAutomationV2";
+        return "Add WETH, USDC and the B20 stocks as MultiRewards reward tokens distributed by DropAutomationV2";
     }
 
     function deploy() public override {}
@@ -59,13 +60,13 @@ contract AddStockRewards is MultisigProposal {
         (address mamoDistributor,,,,,) = multiRewards.rewardData(addresses.getAddress("MAMO"));
         assertEq(mamoDistributor, drop, "f-mamo/006 should have run");
 
-        StockAccountsConfig.TokenListEntry[] memory stocks = _stocks();
-        for (uint256 i = 0; i < stocks.length; i++) {
-            (, uint256 duration,,,,) = multiRewards.rewardData(stocks[i].token);
-            assertEq(duration, 0, string.concat(stocks[i].symbol, " is already a reward token"));
+        address[] memory tokens = _rewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            (, uint256 duration,,,,) = multiRewards.rewardData(tokens[i]);
+            assertEq(duration, 0, "Token is already a reward token");
         }
 
-        _standInForNodeNativeTokens(stocks);
+        _standInForNodeNativeTokens(_stocks());
     }
 
     /// @dev `addReward` reads `decimals()`, which revm cannot execute on a B20 stock (code 0xEF). The stand-in only
@@ -84,10 +85,10 @@ contract AddStockRewards is MultisigProposal {
         IMultiRewards multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
         DropAutomationV2 drop = DropAutomationV2(addresses.getAddress("DROP_AUTOMATION_V2"));
 
-        StockAccountsConfig.TokenListEntry[] memory stocks = _stocks();
-        for (uint256 i = 0; i < stocks.length; i++) {
-            multiRewards.addReward(stocks[i].token, address(drop), REWARDS_DURATION);
-            drop.addRewardToken(stocks[i].token);
+        address[] memory tokens = _rewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            multiRewards.addReward(tokens[i], address(drop), REWARDS_DURATION);
+            drop.addRewardToken(tokens[i]);
         }
     }
 
@@ -99,12 +100,23 @@ contract AddStockRewards is MultisigProposal {
         IMultiRewards multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
         DropAutomationV2 drop = DropAutomationV2(addresses.getAddress("DROP_AUTOMATION_V2"));
 
+        address[] memory tokens = _rewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            (address distributor, uint256 duration,,,,) = multiRewards.rewardData(tokens[i]);
+            assertEq(distributor, address(drop), "Distributor should be DropAutomationV2");
+            assertEq(duration, REWARDS_DURATION, "Rewards duration");
+            assertTrue(drop.isRewardToken(tokens[i]), "Paid out as it is");
+        }
+    }
+
+    /// @dev WETH, USDC, then the stocks
+    function _rewardTokens() internal view returns (address[] memory tokens) {
         StockAccountsConfig.TokenListEntry[] memory stocks = _stocks();
+        tokens = new address[](2 + stocks.length);
+        tokens[0] = addresses.getAddress("WETH");
+        tokens[1] = addresses.getAddress("USDC");
         for (uint256 i = 0; i < stocks.length; i++) {
-            (address distributor, uint256 duration,,,,) = multiRewards.rewardData(stocks[i].token);
-            assertEq(distributor, address(drop), string.concat(stocks[i].symbol, " distributor"));
-            assertEq(duration, REWARDS_DURATION, string.concat(stocks[i].symbol, " duration"));
-            assertTrue(drop.isRewardToken(stocks[i].token), string.concat(stocks[i].symbol, " paid out as it is"));
+            tokens[2 + i] = stocks[i].token;
         }
     }
 

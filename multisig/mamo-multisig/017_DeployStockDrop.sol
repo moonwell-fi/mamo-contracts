@@ -22,14 +22,14 @@ import {StockAccountsConfig} from "@script/StockAccountsConfig.sol";
 /**
  * @title DeployStockDrop
  * @notice First of the stock drop proposals, the MAMO_MULTISIG batch:
- *           - deploys {DropAutomationV2}, {MamoStakingRegistryV2} (with the cbBTC pool and the stock
- *             routes to MAMO), the {MamoStakingStrategyV2} implementation, a staking factory for it, and a
+ *           - deploys {DropAutomationV2}, {MamoStakingRegistryV2} (the cbBTC, WETH and USDC pools and
+ *             the stock routes to MAMO), the {MamoStakingStrategyV2} implementation, a staking factory for it, and a
  *             stock account factory whose fee recipient is DropAutomationV2;
  *           - as the multisig: whitelists the staking implementation under the existing staking type id so
  *             live accounts can upgrade, moves BACKEND_ROLE from the old staking and stock factories to the
- *             new ones, and configures the USDC -> MAMO and cbBTC -> MAMO pairs on the Chainlink checker.
+ *             new ones, and configures the USDC, cbBTC and WETH -> MAMO pairs on the Chainlink checker.
  * @dev F-MAMO owns MultiRewards, DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO
- *      proposal (f-mamo/006), and stock rewards a later one (f-mamo/007) once staking accounts have upgraded.
+ *      proposal (f-mamo/006), and the in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
  */
 contract DeployStockDrop is MultisigProposal {
     string internal constant DROP_KEY = "DROP_AUTOMATION_V2";
@@ -47,9 +47,7 @@ contract DeployStockDrop is MultisigProposal {
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
     uint256 internal constant MAMO_USD_HEARTBEAT = 86_400;
     uint256 internal constant BTC_USD_HEARTBEAT = 3_600;
-
-    /// @notice The longest a CoW order selling USDC may stay valid
-    uint256 internal constant USDC_ORDER_LIFETIME = 1 hours;
+    uint256 internal constant ETH_USD_HEARTBEAT = 3_600;
 
     StockAccountsConfig public immutable deployConfig;
 
@@ -80,7 +78,7 @@ contract DeployStockDrop is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with stock routes, staking strategy V2 and its factory, stock account factory paying fees to DropAutomationV2), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new factories, and configure the USDC and cbBTC to MAMO pairs on the Chainlink checker";
+        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory, stock account factory paying fees to DropAutomationV2), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new factories, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
     }
 
     // ─── deploy ──────────────────────────────────────────────────────────────────────────────────
@@ -108,7 +106,6 @@ contract DeployStockDrop is MultisigProposal {
             addresses.getAddress("MAMO_MULTI_REWARDS"),
             addresses.getAddress("AERODROME_ROUTER"),
             addresses.getAddress("AERODROME_QUOTER"),
-            addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"),
             rewardTokens
         );
         vm.stopBroadcast();
@@ -135,6 +132,8 @@ contract DeployStockDrop is MultisigProposal {
         );
 
         registry.addRewardToken(addresses.getAddress("cbBTC"), addresses.getAddress("cbBTC_MAMO_POOL"));
+        registry.addRewardToken(addresses.getAddress("WETH"), addresses.getAddress("WETH_MAMO_CL_POOL"));
+        registry.addRewardToken(addresses.getAddress("USDC"), addresses.getAddress("USDC_MAMO_CL_POOL"));
 
         StockAccountsConfig.TokenListEntry[] memory stocks = _stocks();
         for (uint256 i = 0; i < stocks.length; i++) {
@@ -251,23 +250,23 @@ contract DeployStockDrop is MultisigProposal {
         mamoRegistry.grantRole(backendRole, addresses.getAddress(STOCK_FACTORY_KEY));
         mamoRegistry.revokeRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
 
-        // 3. The pairs the CoW sale and the compound routes price against
+        // 3. The pairs compounding prices against
         _configurePriceChecker();
     }
 
     function _configurePriceChecker() internal {
+        _configureToMamo("USDC", "CHAINLINK_USDC_USD", USDC_USD_HEARTBEAT);
+        _configureToMamo("cbBTC", "CHAINLINK_BTC_USD", BTC_USD_HEARTBEAT);
+        _configureToMamo("WETH", "CHAINLINK_ETH_USD", ETH_USD_HEARTBEAT);
+    }
+
+    function _configureToMamo(string memory token, string memory feed, uint256 heartbeat) internal {
         ISlippagePriceChecker checker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
+        address from = addresses.getAddress(token);
         address mamo = addresses.getAddress("MAMO");
-        address usdc = addresses.getAddress("USDC");
-        address cbBtc = addresses.getAddress("cbBTC");
 
-        if (checker.tokenPairOracleInformation(usdc, mamo).length == 0) {
-            checker.addTokenConfiguration(usdc, mamo, _toMamo("CHAINLINK_USDC_USD", USDC_USD_HEARTBEAT));
-        }
-        if (checker.maxTimePriceValid(usdc) == 0) checker.setMaxTimePriceValid(usdc, USDC_ORDER_LIFETIME);
-
-        if (checker.tokenPairOracleInformation(cbBtc, mamo).length == 0) {
-            checker.addTokenConfiguration(cbBtc, mamo, _toMamo("CHAINLINK_BTC_USD", BTC_USD_HEARTBEAT));
+        if (checker.tokenPairOracleInformation(from, mamo).length == 0) {
+            checker.addTokenConfiguration(from, mamo, _toMamo(feed, heartbeat));
         }
     }
 
@@ -336,7 +335,6 @@ contract DeployStockDrop is MultisigProposal {
         assertEq(address(drop.MULTI_REWARDS()), addresses.getAddress("MAMO_MULTI_REWARDS"), "Drop MultiRewards");
         assertEq(address(drop.AERODROME_CL_ROUTER()), addresses.getAddress("AERODROME_ROUTER"), "Drop router");
         assertEq(address(drop.AERODROME_QUOTER()), addresses.getAddress("AERODROME_QUOTER"), "Drop quoter");
-        assertEq(address(drop.PRICE_CHECKER()), addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"), "Drop checker");
         assertEq(drop.getRewardTokens().length, 2, "Drop starts with MAMO and cbBTC");
         assertTrue(drop.isRewardToken(addresses.getAddress("MAMO")), "MAMO reward token");
         assertTrue(drop.isRewardToken(addresses.getAddress("cbBTC")), "cbBTC reward token");
@@ -356,7 +354,17 @@ contract DeployStockDrop is MultisigProposal {
         assertFalse(registry.hasRole(registry.BACKEND_ROLE(), deployer), "Deployer should not be backend");
         assertEq(registry.defaultSlippageInBps(), DEFAULT_SLIPPAGE_IN_BPS, "Registry default slippage");
 
-        assertEq(registry.getRewardTokenCount(), 1 + stocks.length, "cbBTC and every stock");
+        assertEq(registry.getRewardTokenCount(), 3 + stocks.length, "cbBTC, WETH, USDC and every stock");
+        assertEq(
+            registry.getRewardTokenPool(addresses.getAddress("WETH")),
+            addresses.getAddress("WETH_MAMO_CL_POOL"),
+            "WETH pool"
+        );
+        assertEq(
+            registry.getRewardTokenPool(addresses.getAddress("USDC")),
+            addresses.getAddress("USDC_MAMO_CL_POOL"),
+            "USDC pool"
+        );
         assertEq(
             registry.getRewardTokenPool(addresses.getAddress("cbBTC")),
             addresses.getAddress("cbBTC_MAMO_POOL"),
@@ -408,7 +416,7 @@ contract DeployStockDrop is MultisigProposal {
 
         assertGt(checker.getExpectedOut(1e6, addresses.getAddress("USDC"), mamo), 0, "USDC should price in MAMO");
         assertGt(checker.getExpectedOut(1e8, addresses.getAddress("cbBTC"), mamo), 0, "cbBTC should price in MAMO");
-        assertEq(checker.maxTimePriceValid(addresses.getAddress("USDC")), USDC_ORDER_LIFETIME, "USDC order lifetime");
+        assertGt(checker.getExpectedOut(1e18, addresses.getAddress("WETH"), mamo), 0, "WETH should price in MAMO");
     }
 
     // ─── helpers ─────────────────────────────────────────────────────────────────────────────────

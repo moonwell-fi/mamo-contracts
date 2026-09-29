@@ -17,9 +17,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
-import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
-import {GPv2Order} from "@libraries/GPv2Order.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -27,13 +25,12 @@ import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 /// @notice Base-fork rehearsal of the stock drop proposals in mainnet order (mamo-multisig/017, then f-mamo/006 and
 ///         f-mamo/007) through the real Safes, followed by the lifecycle on the result: a live-style staking account
-///         upgrades and migrates, a CoW order is signed, a drop tops up the running streams, the account compounds,
+///         upgrades and migrates, a drop tops up the running streams and starts WETH and USDC ones, the account
+///         compounds all three through the live pools,
 ///         and a new stock account pays its fee to DropAutomationV2.
 /// @dev The B20 stocks cannot execute in revm (code 0xEF), so their drop, compound and reinvest legs are covered by
 ///      the unit suites. Self-forks at a pinned block, so it runs without --fork-url.
 contract StockDropSetupTest is Test {
-    using GPv2Order for GPv2Order.Data;
-
     /// @dev The old module has paid out its last drop, the MAMO and cbBTC streams are running, and the BTC/USD
     ///      answer is 20s old, leaving the rehearsal most of its 1h heartbeat
     uint256 internal constant PINNED_BLOCK = 51_951_451;
@@ -41,6 +38,8 @@ contract StockDropSetupTest is Test {
     uint256 internal constant STAKE = 10_000_000e18;
     uint256 internal constant DROP_MAMO = 100_000e18;
     uint256 internal constant DROP_CBBTC = 0.05e8;
+    uint256 internal constant DROP_WETH = 1e18;
+    uint256 internal constant DROP_USDC = 5_000e6;
     uint256 internal constant USDC_DEPOSIT = 5_000e6;
 
     Addresses internal addresses;
@@ -72,15 +71,14 @@ contract StockDropSetupTest is Test {
     function test_stockDropSetup_andLifecycle() public {
         address account = _createLiveStakingAccount();
 
-        // 017: whitelist, 2 grants, 2 revokes, 2 pairs, the USDC order lifetime
+        // 017: whitelist, 2 grants, 2 revokes, 3 pairs
         _run(deployProposal, 8);
         // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module
         _run(cutoverProposal, 10);
-        // 007: addReward and addRewardToken per stock
-        _run(stockRewardsProposal, 8);
+        // 007: addReward and addRewardToken for WETH, USDC and each stock
+        _run(stockRewardsProposal, 12);
 
         _upgradeAndMigrate(account);
-        _proveCowOrderIsSigned();
         _proveDropTopsUpRunningStreams();
         _proveCompound(account);
         _proveStockAccountPaysDropAutomation();
@@ -133,35 +131,6 @@ contract StockDropSetupTest is Test {
         assertEq(address(MamoStakingStrategyV2(payable(account)).stakingRegistry()), registry, "Migrated");
     }
 
-    /// @dev An order 0.5% under the Chainlink price, against the USDC -> MAMO pair 017 configured
-    function _proveCowOrderIsSigned() internal {
-        DropAutomationV2 drop = DropAutomationV2(addresses.getAddress("DROP_AUTOMATION_V2"));
-        address usdc = addresses.getAddress("USDC");
-        address mamo = addresses.getAddress("MAMO");
-
-        deal(usdc, address(drop), 1_000e6);
-        vm.prank(drop.dedicatedMsgSender());
-        drop.approveCowRelayer(usdc);
-
-        uint256 expected = drop.PRICE_CHECKER().getExpectedOut(1_000e6, usdc, mamo);
-        GPv2Order.Data memory order = GPv2Order.Data({
-            sellToken: IERC20(usdc),
-            buyToken: IERC20(mamo),
-            receiver: address(drop),
-            sellAmount: 1_000e6,
-            buyAmount: (expected * 9_950) / 10_000,
-            validTo: uint32(block.timestamp + 10 minutes),
-            appData: keccak256(bytes(drop.APP_DATA())),
-            feeAmount: 0,
-            kind: GPv2Order.KIND_SELL,
-            partiallyFillable: false,
-            sellTokenBalance: GPv2Order.BALANCE_ERC20,
-            buyTokenBalance: GPv2Order.BALANCE_ERC20
-        });
-
-        assertEq(drop.isValidSignature(order.hash(drop.DOMAIN_SEPARATOR()), abi.encode(order)), bytes4(0x1626ba7e));
-    }
-
     /// @dev The streams are mid-period at the pin, so this is the top-up the old module's 7-day lock prevented
     function _proveDropTopsUpRunningStreams() internal {
         DropAutomationV2 drop = DropAutomationV2(addresses.getAddress("DROP_AUTOMATION_V2"));
@@ -174,6 +143,8 @@ contract StockDropSetupTest is Test {
         IERC20 mamo = IERC20(addresses.getAddress("MAMO"));
 
         deal(cbBtc, address(drop), DROP_CBBTC);
+        deal(addresses.getAddress("WETH"), address(drop), DROP_WETH);
+        deal(addresses.getAddress("USDC"), address(drop), DROP_USDC);
         vm.prank(addresses.getAddress("F-MAMO"));
         mamo.transfer(address(drop), DROP_MAMO);
 
@@ -183,6 +154,10 @@ contract StockDropSetupTest is Test {
         (,, uint256 periodFinish,,,) = multiRewards.rewardData(cbBtc);
         assertEq(periodFinish, block.timestamp + 7 days, "cbBTC stream restarted from now");
         assertLt(IERC20(cbBtc).balanceOf(address(drop)), 7 days, "only the rounding remainder is held");
+        (,, uint256 wethFinish,,,) = multiRewards.rewardData(addresses.getAddress("WETH"));
+        (,, uint256 usdcFinish,,,) = multiRewards.rewardData(addresses.getAddress("USDC"));
+        assertEq(wethFinish, block.timestamp + 7 days, "WETH stream started");
+        assertEq(usdcFinish, block.timestamp + 7 days, "USDC stream started");
     }
 
     function _proveCompound(address account) internal {
@@ -195,6 +170,8 @@ contract StockDropSetupTest is Test {
 
         assertGt(multiRewards.balanceOf(account), stakedBefore, "MAMO and swapped cbBTC restaked");
         assertEq(IERC20(addresses.getAddress("cbBTC")).balanceOf(account), 0, "cbBTC swapped, not held");
+        assertEq(IERC20(addresses.getAddress("WETH")).balanceOf(account), 0, "WETH swapped, not held");
+        assertEq(IERC20(addresses.getAddress("USDC")).balanceOf(account), 0, "USDC swapped, not held");
     }
 
     function _proveStockAccountPaysDropAutomation() internal {

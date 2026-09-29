@@ -4,11 +4,7 @@ pragma solidity 0.8.28;
 import {IAerodromeGauge} from "@interfaces/IAerodromeGauge.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
-import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
-
-import {GPv2Order} from "@libraries/GPv2Order.sol";
-import {GPv2OrderChecks} from "@libraries/GPv2OrderChecks.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -16,24 +12,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /**
  * @title DropAutomationV2
- * @notice Collects Mamo fees, converts the ones that are not paid out as they are, and funds the MultiRewards
- *         streams directly as the rewards distributor of every reward token
- * @dev Reward tokens are never swapped. Other tokens are swapped on Aerodrome into cbBTC (as in v1) or sold for
- *      MAMO through CoW orders this contract signs via EIP-1271
+ * @notice Collects Mamo fees, swaps the ones that are not paid out as they are into cbBTC, and funds the
+ *         MultiRewards streams directly as the rewards distributor of every reward token
+ * @dev Reward tokens are never swapped
  */
 contract DropAutomationV2 is Ownable {
     using SafeERC20 for IERC20;
 
-    /// @notice The CoW settlement EIP-712 domain separator on Base
-    bytes32 public constant DOMAIN_SEPARATOR = 0xd72ffa789b6fae41254d0b5a13e6e1e92ed947ec6a251edf1cf0b6c02c257b4b;
-
-    /// @notice The CoW vault relayer that pulls the tokens an order sells
-    address public constant VAULT_RELAYER = 0xC92E8bdf79f0507f65a392b0ab4667716BFE0110;
-
-    /// @notice The CoW app data document every order must carry
-    string public constant APP_DATA = '{"appCode":"Mamo","metadata":{},"version":"1.3.0"}';
-
-    bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
     uint256 internal constant BPS_DENOMINATOR = 10_000;
     uint256 internal constant MAX_SLIPPAGE_BPS = 500;
     uint256 internal constant SWAP_DEADLINE_BUFFER = 300;
@@ -54,9 +39,6 @@ contract DropAutomationV2 is Ownable {
     /// @notice The Aerodrome quoter used for the onchain swap minimum
     IQuoter public immutable AERODROME_QUOTER;
 
-    /// @notice The Chainlink price checker bounding CoW orders
-    ISlippagePriceChecker public immutable PRICE_CHECKER;
-
     /// @notice The tokens paid out as they are
     address[] public rewardTokens;
 
@@ -72,7 +54,7 @@ contract DropAutomationV2 is Ownable {
     /// @notice The address allowed to run drops
     address public dedicatedMsgSender;
 
-    /// @notice The slippage tolerance applied to Aerodrome swaps and CoW orders, in basis points
+    /// @notice The slippage tolerance applied to Aerodrome swaps, in basis points
     uint256 public maxSlippageBps;
 
     event RewardTokenAdded(address indexed token);
@@ -95,7 +77,6 @@ contract DropAutomationV2 is Ownable {
     error AlreadyAdded(address item);
     error NotFound(address item);
     error RewardTokenNotSwappable(address token);
-    error InvalidBuyToken(address token);
     error InsufficientOutput();
     error NothingToDistribute();
 
@@ -112,7 +93,6 @@ contract DropAutomationV2 is Ownable {
      * @param multiRewards_ The MultiRewards contract
      * @param aerodromeRouter_ The Aerodrome CL router
      * @param aerodromeQuoter_ The Aerodrome quoter
-     * @param priceChecker_ The Chainlink price checker bounding CoW orders
      * @param rewardTokens_ The tokens paid out as they are
      */
     constructor(
@@ -123,13 +103,11 @@ contract DropAutomationV2 is Ownable {
         address multiRewards_,
         address aerodromeRouter_,
         address aerodromeQuoter_,
-        address priceChecker_,
         address[] memory rewardTokens_
     ) Ownable(owner_) {
         if (
             dedicatedMsgSender_ == address(0) || mamoToken_ == address(0) || cbBtcToken_ == address(0)
                 || multiRewards_ == address(0) || aerodromeRouter_ == address(0) || aerodromeQuoter_ == address(0)
-                || priceChecker_ == address(0)
         ) revert ZeroAddress();
 
         dedicatedMsgSender = dedicatedMsgSender_;
@@ -138,7 +116,6 @@ contract DropAutomationV2 is Ownable {
         MULTI_REWARDS = IMultiRewards(multiRewards_);
         AERODROME_CL_ROUTER = ISwapRouter(aerodromeRouter_);
         AERODROME_QUOTER = IQuoter(aerodromeQuoter_);
-        PRICE_CHECKER = ISlippagePriceChecker(priceChecker_);
         maxSlippageBps = 100;
 
         for (uint256 i = 0; i < rewardTokens_.length; i++) {
@@ -187,17 +164,6 @@ contract DropAutomationV2 is Ownable {
     }
 
     /**
-     * @notice Lets the CoW vault relayer pull the current balance of a token this contract sells for MAMO
-     * @dev Bounded to the balance, as in MamoMultiMarketStrategy, so a later balance is not sellable until approved
-     * @param token The token to approve, never a reward token
-     */
-    function approveCowRelayer(address token) external onlyDedicatedMsgSender {
-        if (isRewardToken[token]) revert RewardTokenNotSwappable(token);
-
-        IERC20(token).forceApprove(VAULT_RELAYER, IERC20(token).balanceOf(address(this)));
-    }
-
-    /**
      * @notice Funds one reward stream
      * @dev Only callable by this contract, so a failing token reverts on its own without blocking the drop
      * @param token The reward token
@@ -208,35 +174,6 @@ contract DropAutomationV2 is Ownable {
 
         IERC20(token).forceApprove(address(MULTI_REWARDS), amount);
         MULTI_REWARDS.notifyRewardAmount(token, amount);
-    }
-
-    /////////////////////////// COW ///////////////////////////
-
-    /**
-     * @notice Validates a CoW order selling a non-reward token for MAMO
-     * @param orderDigest The EIP-712 digest of the order
-     * @param encodedOrder The ABI-encoded GPv2 order
-     * @return The EIP-1271 magic value when the order is valid
-     */
-    function isValidSignature(bytes32 orderDigest, bytes calldata encodedOrder) external view returns (bytes4) {
-        GPv2Order.Data memory order = abi.decode(encodedOrder, (GPv2Order.Data));
-
-        if (address(order.buyToken) != address(MAMO_TOKEN)) revert InvalidBuyToken(address(order.buyToken));
-        if (isRewardToken[address(order.sellToken)]) revert RewardTokenNotSwappable(address(order.sellToken));
-
-        GPv2OrderChecks.validate(
-            order,
-            GPv2OrderChecks.Binding({
-                orderDigest: orderDigest,
-                domainSeparator: DOMAIN_SEPARATOR,
-                expectedAppData: keccak256(bytes(APP_DATA))
-            }),
-            address(this),
-            PRICE_CHECKER,
-            maxSlippageBps
-        );
-
-        return MAGIC_VALUE;
     }
 
     /////////////////////////// OWNER ///////////////////////////
@@ -325,7 +262,7 @@ contract DropAutomationV2 is Ownable {
     }
 
     /**
-     * @notice Sets the slippage tolerance for swaps and CoW orders
+     * @notice Sets the slippage tolerance for swaps
      * @param newSlippageBps The new tolerance, between 1 and 500 basis points
      */
     function setMaxSlippageBps(uint256 newSlippageBps) external onlyOwner {
