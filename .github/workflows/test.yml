@@ -372,6 +372,9 @@ jobs:
         with:
           version: v1.7.1
 
+      - name: Run LPAutoBalancerV2 integration tests
+        run: make lp-auto-balancer-v2
+
       - name: Run LPAutoBalancerV2 deploy-script test
         run: make lp-v2-deploy
 
