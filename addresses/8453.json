@@ -553,5 +553,20 @@
     "addr": "0xad0fFd91D25e132116a2fBe3d16BFBfc7B840528",
     "name": "STOCK_ACCOUNT_STRATEGY_FACTORY",
     "isContract": true
+  },
+  {
+    "addr": "0x678F431DA2aBb9B5726bbf5CCDbaEEBB60dA9813",
+    "name": "USDC_MAMO_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x83213dD427cA76Bd9f22Aaec773F19b6821c4928",
+    "name": "FEE_SPLITTER_VIRTUAL_MAMO",
+    "isContract": true
+  },
+  {
+    "addr": "0xAa067F08FeF60420d050A92E7800E588748B7d67",
+    "name": "WETH_MAMO_CL_POOL",
+    "isContract": true
   }
 ]
