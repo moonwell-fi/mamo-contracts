@@ -239,9 +239,10 @@ vnet run needs no impersonation for the stock registry itself — step 3 and ste
 `MamoStrategyRegistry` steps still run as `MAMO_MULTISIG`, and so does step 8a, which goes to
 `existingPriceChecker`'s own owner in both environments. On PROD every admin step goes to the Safe.
 
-`config/stock-accounts/8453.json` is the token list. It holds five entries: the four launch stocks —
-AAPLc, GOOGLc, METAc, NVDAc — priced from their Aerodrome CL pool against USDC, and cbBTC priced from
-Chainlink through `existingPriceChecker`. One of each kind, abridged from the committed file:
+`config/stock-accounts/8453.json` is the token list. It holds the four launch stocks — AAPLc, GOOGLc,
+METAc, NVDAc — priced from their Aerodrome CL pool against USDC. cbBTC was withdrawn from it until
+crypto baskets launch; `8453-016.json` keeps the five-entry list proposal 016 executed with, which is
+the shape a Chainlink-priced entry takes. One of each kind:
 
 ```json
 {"tokens":[

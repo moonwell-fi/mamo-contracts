@@ -10,15 +10,6 @@
       "token": "0xb200000000000000000000c2e324d24d7eecd1fb"
     },
     {
-      "chainlinkFeed": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
-      "decimals": 8,
-      "heartbeat": 3600,
-      "pool": "0x160D7E9d948B16c163332a277b393c288408eb12",
-      "source": "Chainlink",
-      "symbol": "cbBTC",
-      "token": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
-    },
-    {
       "chainlinkFeed": "0x0000000000000000000000000000000000000000",
       "decimals": 8,
       "heartbeat": 0,
