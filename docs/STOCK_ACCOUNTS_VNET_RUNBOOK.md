@@ -239,10 +239,11 @@ vnet run needs no impersonation for the stock registry itself — step 3 and ste
 `MamoStrategyRegistry` steps still run as `MAMO_MULTISIG`, and so does step 8a, which goes to
 `existingPriceChecker`'s own owner in both environments. On PROD every admin step goes to the Safe.
 
-`config/stock-accounts/8453.json` is the token list. It holds the four launch stocks — AAPLc, GOOGLc,
-METAc, NVDAc — priced from their Aerodrome CL pool against USDC. cbBTC was withdrawn from it until
-crypto baskets launch; `8453-016.json` keeps the five-entry list proposal 016 executed with, which is
-the shape a Chainlink-priced entry takes. One of each kind:
+`config/stock-accounts/8453.json` is the token list. It holds twelve stocks — the four launch stocks
+AAPLc, GOOGLc, METAc, NVDAc, and the eight proposal 018 lists, AMZNc, MSFTc, MSTRc, MUc, PLTRc, SNDKc,
+SPCXc, TSLAc — each priced from its Aerodrome CL pool against USDC. cbBTC was withdrawn from it until
+crypto baskets launch, and 018 halts it on the registry; `8453-016.json` keeps the five-entry list
+proposal 016 executed with, which is the shape a Chainlink-priced entry takes. One of each kind:
 
 ```json
 {"tokens":[
@@ -263,7 +264,7 @@ and writes the zero feed with a zero heartbeat.
 `decimals` is carried in the file rather than read off the token, because the four B20 tokens cannot
 be read at all from a fork (see [Listing a B20 token is node-only](#listing-a-b20-token-is-node-only)).
 Proposal 016 needs it for the stand-in it puts over them, and every one-whole-token price probe needs
-it. All five launch tokens are 8-decimal. `loadTokenList` rejects a zero.
+it. Every listed token is 8-decimal. `loadTokenList` rejects a zero.
 
 The second hop, USDC/USD, is not configured from the file: `USDC_USD_HEARTBEAT` — the same constant in
 both `DeployStockAccounts` and proposal 016 — fixes it at **90,000 seconds**, deliberately above the
