@@ -67,6 +67,9 @@ contract DeployStockAccountSystem is MultisigProposal {
     string internal constant IMPL_KEY = "STOCK_ACCOUNT_STRATEGY_IMPL";
     string internal constant FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
+    /// @notice The launch list this proposal executed with, frozen so later list edits do not rewrite it
+    string internal constant TOKEN_LIST = "./config/stock-accounts/8453-016.json";
+
     /// @notice Staleness bound of the USDC/USD hop every Chainlink entry is quoted through
     /// @dev Deliberately above the feed's nominal 86,400 heartbeat, and identical to the value
     ///      `script/DeployStockAccounts.s.sol` uses. Walking the live Base aggregator over 31.8 days,
@@ -289,7 +292,7 @@ contract DeployStockAccountSystem is MultisigProposal {
      *      token: cbBTC, an ordinary contract, is never stood in for.
      */
     function _standInForNodeNativeTokens() internal {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         for (uint256 i = 0; i < entries.length; i++) {
             bytes memory code = entries[i].token.code;
@@ -331,7 +334,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     ///      Chainlink entry on the launch list; the loop is over the config so adding one needs no edit
     function _configureExistingChecker() internal {
         StockAccountsConfig.DeploymentConfig memory cfg = deployConfig.getConfig();
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         ISlippagePriceChecker existing = ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker));
         address asset = addresses.getAddress(cfg.asset);
@@ -364,7 +367,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     }
 
     function _listTokens(StockAccountRegistry stockRegistry) internal {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         for (uint256 i = 0; i < entries.length; i++) {
             if (stockRegistry.tokenConfig(entries[i].token).status != IStockAccountRegistry.TokenStatus.None) continue;
@@ -527,7 +530,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     /// @dev Every launch token Active, with the configured source and pool, and quoting a real price.
     function _validateTokenList() internal view {
         StockAccountsConfig.DeploymentConfig memory cfg = deployConfig.getConfig();
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(REGISTRY_KEY));
         StockAccountPriceChecker checker = StockAccountPriceChecker(addresses.getAddress(PRICE_CHECKER_KEY));
         address asset = addresses.getAddress(cfg.asset);
