@@ -28,8 +28,9 @@ It creates a fresh Base fork vnet (chain id 8453, state sync off, slug `stock-ac
 funds the deployer, the Mamo multisig and the test user with ETH and the test user with 10,000 USDC,
 copies `addresses/` to the gitignored `script/stock-accounts/addresses-vnet/` so the repo address book
 is never touched by a vnet run, then runs, against the vnet admin RPC with `--broadcast --unlocked`:
-the pool readiness script, the deploy, the smoke script, and finally the four B20 listings the deploy
-can only print (see step 8). The listings go last on purpose — see below.
+the pool readiness script, the deploy, the smoke script, and finally the B20 listings the deploy can
+only print (see step 8): every `PoolTwap` entry in `config/stock-accounts/8453.json`, twelve today.
+The listings go last on purpose — see below.
 
 Reuse an existing vnet instead of creating one:
 
@@ -87,8 +88,8 @@ through a forge script — pointing it at the vnet does not help.
 So, for a B20 token, step 8b runs:
 
 - **on mainnet**, from the Safe, inside proposal 016's batch;
-- **on the vnet**, from `cast send` — `vnet-up.sh` sends the four listings itself after the deploy
-  script, the same way `prepare.sh` lists NVDAc.
+- **on the vnet**, from `cast send` — `vnet-up.sh` sends every `PoolTwap` listing in the config itself
+  after the deploy script, the same way `prepare.sh` lists NVDAc.
 
 `impersonate` mode recognises the `0xEF` byte, prints that listing's calldata and moves on rather than
 reverting. A fork rehearsal of `listToken` for a B20 token needs a stand-in token; there is no way to
@@ -100,13 +101,13 @@ addresses. cbBTC is an ordinary contract and lists normally in every mode.
 The same byte has a second, wider consequence: `getNAV` values an account by scanning
 `registry.allTokens()` and reading each token's balance, so **once a B20 token is listed, no forge
 script can touch an account at all** — not `getNAV`, not `deposit`, which checks the account value.
-That is why `vnet-up.sh` runs the smoke script *before* it sends the four listings, and why a reuse run
+That is why `vnet-up.sh` runs the smoke script *before* it sends the B20 listings, and why a reuse run
 skips the smoke and says so. Everything after that point is the `cast`-driven scenario harness.
 
 The one exception is a process that has already etched the stand-ins, which is why
-`test/StockAccountSystemSetup.integration.t.sol` can run a whole account lifecycle after all five
-listings: the four stand-ins answer `balanceOf` with zero, so they drop out of valuation and the real
-cbBTC leg is what gets priced.
+`test/StockAccountSystemSetup.integration.t.sol` can run a whole account lifecycle after the five
+listings of proposal 016: the four stand-ins answer `balanceOf` with zero, so they drop out of valuation
+and the real cbBTC leg is what gets priced.
 
 ### Ordering, and what it means for the Safe batch
 
@@ -261,7 +262,7 @@ it is both the first hop's heartbeat and the `setMaxTimePriceValid` value — an
 as `Active`. A `PoolTwap` entry still carries a `pool` — the registry refuses a listing without one —
 and writes the zero feed with a zero heartbeat.
 
-`decimals` is carried in the file rather than read off the token, because the four B20 tokens cannot
+`decimals` is carried in the file rather than read off the token, because the B20 tokens cannot
 be read at all from a fork (see [Listing a B20 token is node-only](#listing-a-b20-token-is-node-only)).
 Proposal 016 needs it for the stand-in it puts over them, and every one-whole-token price probe needs
 it. Every listed token is 8-decimal. `loadTokenList` rejects a zero.
@@ -291,7 +292,7 @@ whole `.tokens` array is decoded as one Solidity type:
 `loadTokenList` validates every entry it decodes — token, pool and decimals non-zero, `source` exactly
 one of the two legal strings, feed and heartbeat non-zero exactly when the source is `Chainlink` — so a bad
 entry fails at load rather than reaching an admin batch that only breaks when the Safe executes it.
-`test/StockAccountsConfig.unit.t.sol` runs that load against the committed file in CI, pinning all five
+`test/StockAccountsConfig.unit.t.sol` runs that load against the committed file in CI, pinning all twelve
 entries by exact address and counting the pool-priced ones.
 
 `asset` (USDC) is the quote asset: it goes to the registry constructor, the price checker and the
@@ -317,8 +318,8 @@ headroom — **180 for the configured 180-second window**. `twapWindow` is read 
 registry when `STOCK_ACCOUNT_REGISTRY` is in the address book, and from the deploy config before that.
 
 The script only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
-is below the target, so a second run sends nothing. All four launch pools already sit at 2048 and are
-untouched:
+is below the target, so a second run sends nothing. All twelve pools already sit above it (2048 on
+most, 1000 on the MUc and PLTRc pools, 8000 on NVDAc) and are untouched:
 
 ```
 twap window: 180 seconds, required cardinality: 180
@@ -366,7 +367,7 @@ deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is invol
 the registry points at `STOCK_ACCOUNT_PRICE_CHECKER`.
 
 `getNAV` still reads a balance for **every** listed token before it prices anything, so the smoke has
-to run before the four B20 listings — which is exactly where `vnet-up.sh` puts it. After them, that
+to run before the B20 listings — which is exactly where `vnet-up.sh` puts it. After them, that
 account can only be read with `cast`.
 
 ## The management fee
@@ -503,11 +504,11 @@ has no code before use: the anvil accounts cannot serve here because each carrie
 delegation on Base, which would make it an ERC-1271 signer rather than the plain EOA the harness signs
 with.
 
-`prepare.sh` still calls `ensure_listed NVDAc`, which is now a no-op: the deploy lists all four stocks
-before the harness ever runs, so the registry already holds four B20 tokens plus cbBTC when the first
-scenario starts. `05-gas.sh` likewise skips the four and lists whatever else it discovers,
-up to its target of ten. cbBTC is not a B20 token, so it never appears in that discovery — it is listed
-by the deploy and nothing else in the harness touches it.
+`prepare.sh` still calls `ensure_listed NVDAc`, which is now a no-op: the deploy lists every stock in
+the config before the harness ever runs, so the registry already holds twelve B20 tokens and no cbBTC
+when the first scenario starts. `05-gas.sh` picks up to ten of the pools it discovers, NVDAc first, and
+its `ensure_listed` is a no-op for every token the deploy already listed. cbBTC is no longer in the
+config, so a fresh vnet never lists it; proposal 016's frozen list is the only place it remains.
 
 One consequence of a registry with more than one token: `getWeights` returns **every listed token**, in
 registry order, not just the account's own basket. A scenario reading a token's weight therefore looks
@@ -521,7 +522,7 @@ its row up by address (`weights_index`) instead of taking the first one.
 | `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
 | `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays in NVDAc and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
-| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — the four the deploy already listed are skipped and more are added — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 1,000,000 gas the appData post-hook is given. |
+| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — those the deploy already listed are left as they are — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 1,000,000 gas the appData post-hook is given. |
 
 Two things the range rule makes concrete and the scenarios assert. An account sitting on its targets
 can move at most `maxDeviationBps` of its NAV in a single order, so a rebalance larger than that has
