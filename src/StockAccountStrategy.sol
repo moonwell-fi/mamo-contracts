@@ -826,7 +826,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return needed > idle ? needed - idle : 0;
     }
 
-    /// @dev The largest leg carries the rounding the other legs drop and every leg too small to sell on its own
+    /// @dev Every leg rounds up so the plan cannot undershoot, and the largest also carries the legs too small to sell
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)
         internal
         view
@@ -860,21 +860,21 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             return (new address[](0), new uint256[](0), new uint256[](0), 0, 0);
         }
 
-        uint256 target = (shortfall * TOTAL_BPS) / (TOTAL_BPS - maxSlippageBps);
+        uint256 target = Math.ceilDiv(shortfall * TOTAL_BPS, TOTAL_BPS - maxSlippageBps);
         if (target > total) {
             target = total;
         }
 
         uint256[] memory planned = new uint256[](sellable.length);
         uint256 folded;
-        uint256 spare = values[largest] - (values[largest] * target) / total;
+        uint256 spare = values[largest] - Math.ceilDiv(values[largest] * target, total);
 
         for (uint256 i = 0; i < sellable.length; i++) {
             if (i == largest) continue;
 
-            uint256 share = (values[i] * target) / total;
+            uint256 share = Math.ceilDiv(values[i] * target, total);
             if (share < MIN_SELL_VALUE && folded + share <= spare) folded += share;
-            else planned[i] = (balances[i] * target) / total;
+            else planned[i] = Math.min(Math.ceilDiv(balances[i] * target, total), balances[i]);
         }
 
         uint256 largestAmount =

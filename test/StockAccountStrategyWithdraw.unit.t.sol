@@ -338,6 +338,20 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(user), 2_500e18, "user asset");
     }
 
+    /// @dev One raw unit of a cbBTC-like token is worth 1e15 here, so flooring that leg used to drop
+    ///      nearly a unit and, filled exactly at the floor, came in under the request
+    function testAFloorFilledHighUnitValueLegStillCoversTheRequest() public {
+        MockERC20 wbtc = new MockERC20("WBTC Coin", "WBTCc");
+        priceChecker.setRate(address(wbtc), address(usdc), 1e33);
+        router.setRate(address(wbtc), address(usdc), 1e33);
+        _listWithPool(address(wbtc));
+        wbtc.mint(address(strategy), 1e6);
+
+        _withdraw(1_500e18 + 4.9e15, 0);
+
+        assertEq(usdc.balanceOf(user), 1_500e18 + 4.9e15, "user asset");
+    }
+
     function testWithdrawOnlyOwner() public {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
