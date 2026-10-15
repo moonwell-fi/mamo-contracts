@@ -65,7 +65,7 @@ assert_eq "new NVDAc target read back" \
 assert_eq "new cash target read back" "$(call "$ACCT" 'cashTargetBps()(uint16)')" 3000
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
-send "$USER_C" "$ACCT" 'withdraw(uint256,uint16)' "$CASH_WITHDRAW" 100 >/dev/null
+send "$USER_C" "$ACCT" "$WITHDRAW_SIG" "$CASH_WITHDRAW" 100 '[]' '[]' "$(deadline)" >/dev/null
 assert_eq "cash withdrawal sold no NVDAc" "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
 
 # A month of fee on an account that never traded: `withdraw` sells nothing and pays it in USDC.
@@ -76,7 +76,7 @@ COLLECTOR_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
 OWNER_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_C")
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 
-RECEIPT=$(send "$USER_C" "$ACCT" 'withdraw(uint256,uint16)' "$FEE_WITHDRAW" 100)
+RECEIPT=$(send "$USER_C" "$ACCT" "$WITHDRAW_SIG" "$FEE_WITHDRAW" 100 '[]' '[]' "$(deadline)")
 PAID=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
 CREDITED=$(fees_paid_credited "$RECEIPT" "$ACCT")
 

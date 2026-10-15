@@ -175,6 +175,10 @@ set_usdc() { rpc tenderly_setErc20Balance "[\"$USDC\",\"$1\",\"$(cast to-hex "$2
 # shellcheck disable=SC2312 # same: malformed params come back as an rpc error, not as a silent no-op
 increase_time() { rpc evm_increaseTime "[\"$(cast to-hex "$1")\"]" >/dev/null; }
 now_ts() { cast block latest --field timestamp --rpc-url "$VNET" 2>>"$LOG"; }
+# The exit calls take a deadline; fifteen minutes out, like the order validity the scenarios use.
+# shellcheck disable=SC2312 # a failed read leaves `bn` an incomplete expression, which python refuses
+deadline() { bn "$(now_ts) + 900"; }
+WITHDRAW_SIG='withdraw(uint256,uint16,address[],uint256[],uint256)'
 
 # ---------------------------------------------------------------- results
 

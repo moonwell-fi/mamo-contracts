@@ -342,8 +342,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         uint256 due = strategy.feeDue();
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 100);
+        _withdraw(1_500e18, 100);
 
         assertEq(usdc.balanceOf(feeRecipient), due, "asset fee");
         assertEq(nvda.balanceOf(feeRecipient), 0, "nvda untouched");
@@ -357,8 +356,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         uint256 due = strategy.feeDue();
 
-        vm.prank(user);
-        strategy.withdraw(100e18, 100);
+        _withdraw(100e18, 100);
 
         assertEq(usdc.balanceOf(feeRecipient), due, "asset fee");
         assertEq(usdc.balanceOf(user), 100e18, "user asset");
@@ -369,7 +367,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         vm.warp(startTime + 365 days);
 
         vm.prank(user);
-        strategy.withdrawAll(100);
+        strategy.withdrawAll(100, 0, block.timestamp);
 
         assertEq(usdc.balanceOf(feeRecipient), 50e18, "asset fee");
         assertEq(nvda.balanceOf(feeRecipient), 0, "nvda untouched");
@@ -600,12 +598,11 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         vm.prank(funder);
         strategy.deposit(100e18);
 
-        vm.prank(user);
-        strategy.withdraw(500e18, 500);
+        _withdraw(500e18, 500);
         assertEq(usdc.balanceOf(user), 500e18, "a cash withdrawal still works");
 
         vm.prank(user);
-        strategy.withdrawAll(500);
+        strategy.withdrawAll(500, 0, block.timestamp);
         assertEq(nvda.balanceOf(address(strategy)) + aapl.balanceOf(address(strategy)), 0, "the priced stocks are sold");
         assertEq(msft.balanceOf(address(strategy)), 100e18, "the unpriceable one stays, for an in-kind exit");
     }
@@ -731,8 +728,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         uint256 due = strategy.feeDue();
 
-        vm.prank(user);
-        strategy.withdraw(1_000e18, 100);
+        _withdraw(1_000e18, 100);
 
         assertEq(usdc.balanceOf(user), 1_000e18, "user asset");
         assertEq(usdc.balanceOf(feeRecipient), due, "asset fee");
@@ -745,8 +741,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         uint256 due = strategy.feeDue();
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 0);
+        _withdraw(1_500e18, 0);
 
         assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
         assertEq(usdc.balanceOf(feeRecipient), due, "asset fee");
@@ -760,8 +755,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         assertEq(tokens.length, 2, "the preview plans the sells the fee needs");
 
-        vm.prank(user);
-        strategy.withdraw(1_000e18, 100);
+        _withdraw(1_000e18, 100);
 
         assertEq(nvda.balanceOf(address(strategy)), 10e18 - amounts[0], "nvda sold");
         assertEq(aapl.balanceOf(address(strategy)), 20e18 - amounts[1], "aapl sold");

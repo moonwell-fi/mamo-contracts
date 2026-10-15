@@ -386,18 +386,30 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @notice Sends the asset to the owner, selling positions pro rata when the idle balance falls short
      * @param usdcAmount The amount of the asset the owner receives
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
+     * @param tokens The tokens the owner allows to be sold, in any order
+     * @param maxAmounts The most of each of `tokens` that may be sold
+     * @param deadline The last timestamp the withdrawal may execute at
      */
-    function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
+    function withdraw(
+        uint256 usdcAmount,
+        uint16 maxSlippageBps,
+        address[] calldata tokens,
+        uint256[] calldata maxAmounts,
+        uint256 deadline
+    ) external override onlyOwner {
         if (usdcAmount == 0) revert ZeroAmount();
+        if (block.timestamp > deadline) revert DeadlineExpired();
+        if (tokens.length != maxAmounts.length) revert LengthMismatch();
         _checkWithdrawSlippage(maxSlippageBps);
 
         uint256 shortfall = _shortfall(usdcAmount);
         uint256 sold;
 
         if (shortfall > 0) {
-            (address[] memory tokens, uint256[] memory amounts, uint256[] memory legValues,,) =
+            (address[] memory sells, uint256[] memory amounts, uint256[] memory legValues,,) =
                 _planSells(shortfall, maxSlippageBps);
-            sold = _executeSells(tokens, amounts, legValues, maxSlippageBps);
+            _checkSellCaps(sells, amounts, tokens, maxAmounts);
+            sold = _executeSells(sells, amounts, legValues, maxSlippageBps, deadline);
         }
 
         _payFees(address(asset));
@@ -413,17 +425,21 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /**
      * @notice Sells every position that is not halted and sends all the asset to the owner
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
+     * @param minUsdcOut The least the owner accepts to receive, after the fee
+     * @param deadline The last timestamp the withdrawal may execute at
      */
-    function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
+    function withdrawAll(uint16 maxSlippageBps, uint256 minUsdcOut, uint256 deadline) external override onlyOwner {
+        if (block.timestamp > deadline) revert DeadlineExpired();
         _checkWithdrawSlippage(maxSlippageBps);
 
         (address[] memory tokens, uint256[] memory balances, uint256[] memory values) = _sellable();
-        uint256 sold = _executeSells(tokens, balances, values, maxSlippageBps);
+        uint256 sold = _executeSells(tokens, balances, values, maxSlippageBps, deadline);
 
         _payFees(address(asset));
 
         uint256 usdcOut = asset.balanceOf(address(this));
         if (usdcOut == 0) revert EmptyBalance();
+        if (usdcOut < minUsdcOut) revert InsufficientProceeds();
 
         principal = 0;
 
@@ -846,18 +862,36 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
     }
 
+    /// @dev Matched by address, so the caps can come in any order and a cap the plan does not use is ignored
+    function _checkSellCaps(
+        address[] memory sells,
+        uint256[] memory amounts,
+        address[] calldata tokens,
+        uint256[] calldata maxAmounts
+    ) internal pure {
+        for (uint256 i = 0; i < sells.length; i++) {
+            uint256 j;
+            while (j < tokens.length && tokens[j] != sells[i]) j++;
+            if (j == tokens.length || amounts[i] > maxAmounts[j]) revert SellExceedsCap(sells[i]);
+        }
+    }
+
     function _executeSells(
         address[] memory tokens,
         uint256[] memory amounts,
         uint256[] memory values,
-        uint16 maxSlippageBps
+        uint16 maxSlippageBps,
+        uint256 deadline
     ) internal returns (uint256 sold) {
         for (uint256 i = 0; i < tokens.length; i++) {
-            sold += _sell(tokens[i], amounts[i], (values[i] * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS);
+            sold += _sell(tokens[i], amounts[i], (values[i] * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS, deadline);
         }
     }
 
-    function _sell(address token, uint256 amountIn, uint256 minOut) internal returns (uint256 amountOut) {
+    function _sell(address token, uint256 amountIn, uint256 minOut, uint256 deadline)
+        internal
+        returns (uint256 amountOut)
+    {
         ISwapRouter router = stockRegistry.aerodromeRouter();
 
         IERC20(token).forceApprove(address(router), amountIn);
@@ -868,7 +902,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
                 tokenOut: address(asset),
                 tickSpacing: IPool(stockRegistry.tokenConfig(token).pool).tickSpacing(),
                 recipient: address(this),
-                deadline: block.timestamp,
+                deadline: deadline,
                 amountIn: amountIn,
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0

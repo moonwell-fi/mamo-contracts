@@ -144,6 +144,13 @@ abstract contract StockAccountStrategyTestBase is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// @dev The owner's withdrawal capped at what the preview plans, as the app sends it
+    function _withdraw(uint256 usdcAmount, uint16 maxSlippageBps) internal {
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(usdcAmount, maxSlippageBps);
+        vm.prank(user);
+        strategy.withdraw(usdcAmount, maxSlippageBps, tokens, amounts, block.timestamp);
+    }
+
     function _fundUsdc(address to, uint256 amount) internal {
         usdc.mint(to, amount);
         vm.prank(to);

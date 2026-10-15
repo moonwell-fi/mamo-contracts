@@ -30,6 +30,9 @@ interface IStockAccountStrategy {
     error SlippageExceedsMaximum();
     error InsufficientBalance();
     error InsufficientProceeds();
+    error DeadlineExpired();
+    error LengthMismatch();
+    error SellExceedsCap(address token);
     error EmptyBalance();
     error OrderHashMismatch();
     error InvalidBackendSignature();
@@ -58,9 +61,15 @@ interface IStockAccountStrategy {
 
     function depositToken(address token, uint256 amount) external;
 
-    function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external;
+    function withdraw(
+        uint256 usdcAmount,
+        uint16 maxSlippageBps,
+        address[] calldata tokens,
+        uint256[] calldata maxAmounts,
+        uint256 deadline
+    ) external;
 
-    function withdrawAll(uint16 maxSlippageBps) external;
+    function withdrawAll(uint16 maxSlippageBps, uint256 minUsdcOut, uint256 deadline) external;
 
     function withdrawToken(address token, uint256 amount) external;
 

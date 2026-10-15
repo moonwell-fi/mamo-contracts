@@ -46,8 +46,7 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         vm.expectEmit(address(strategy));
         emit IStockAccountStrategy.Withdraw(300e18, 0);
 
-        vm.prank(user);
-        strategy.withdraw(300e18, 100);
+        _withdraw(300e18, 100);
 
         assertEq(usdc.balanceOf(user), 300e18, "user asset");
         assertEq(usdc.balanceOf(address(strategy)), 200e18, "remaining idle");
@@ -63,8 +62,7 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         vm.expectEmit(address(strategy));
         emit IStockAccountStrategy.Withdraw(1_500e18, referenceValue);
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 100);
+        _withdraw(1_500e18, 100);
 
         uint256 nvdaSold = 10e18 - nvda.balanceOf(address(strategy));
         uint256 aaplSold = 20e18 - aapl.balanceOf(address(strategy));
@@ -77,21 +75,20 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
     function testWithdrawRevertsOnZeroAmount() public {
         vm.prank(user);
         vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
-        strategy.withdraw(0, 100);
+        strategy.withdraw(0, 100, new address[](0), new uint256[](0), block.timestamp);
     }
 
     function testWithdrawRevertsWhenSlippageAboveCap() public {
         vm.prank(user);
         vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
-        strategy.withdraw(1_500e18, 501);
+        strategy.withdraw(1_500e18, 501, new address[](0), new uint256[](0), block.timestamp);
     }
 
     /// @dev A cap of 10_000 used to divide by zero in the gross up, taking every withdrawal down with it
     function testWithdrawSucceedsAtTheHighestAcceptedSlippageCap() public {
         stockRegistry.setMaxWithdrawSlippageBps(9_999);
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 9_999);
+        _withdraw(1_500e18, 9_999);
 
         assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
     }
@@ -99,24 +96,24 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
     function testWithdrawRevertsWhenValueIsInsufficient() public {
         vm.prank(user);
         vm.expectRevert(IStockAccountStrategy.InsufficientBalance.selector);
-        strategy.withdraw(5_000e18, 100);
+        strategy.withdraw(5_000e18, 100, new address[](0), new uint256[](0), block.timestamp);
     }
 
     function testWithdrawRevertsWhenRouterPaysBelowFloor() public {
         router.setRate(address(nvda), address(usdc), 180e18);
         router.setRate(address(aapl), address(usdc), 90e18);
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
 
         vm.prank(user);
         vm.expectRevert("Too little received");
-        strategy.withdraw(1_500e18, 100);
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
     }
 
     function testWithdrawSucceedsWhenRouterPaysInsideFloor() public {
         router.setRate(address(nvda), address(usdc), 199e18);
         router.setRate(address(aapl), address(usdc), 99.5e18);
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 100);
+        _withdraw(1_500e18, 100);
 
         assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
     }
@@ -124,8 +121,7 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
     function testWithdrawSkipsHaltedToken() public {
         _halt(address(aapl));
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 100);
+        _withdraw(1_500e18, 100);
 
         assertEq(aapl.balanceOf(address(strategy)), 20e18, "halted token untouched");
         assertLt(nvda.balanceOf(address(strategy)), 10e18, "nvda sold");
@@ -139,7 +135,7 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         emit IStockAccountStrategy.Withdraw(2_500e18, 2_000e18);
 
         vm.prank(user);
-        strategy.withdrawAll(100);
+        strategy.withdrawAll(100, 0, block.timestamp);
 
         assertEq(usdc.balanceOf(user), 2_500e18, "user asset");
         assertEq(usdc.balanceOf(address(strategy)), 0, "idle drained");
@@ -153,13 +149,13 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
 
         vm.prank(user);
         vm.expectRevert(IStockAccountStrategy.EmptyBalance.selector);
-        strategy.withdrawAll(100);
+        strategy.withdrawAll(100, 0, block.timestamp);
     }
 
     function testWithdrawAllRevertsWhenSlippageAboveCap() public {
         vm.prank(user);
         vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
-        strategy.withdrawAll(501);
+        strategy.withdrawAll(501, 0, block.timestamp);
     }
 
     function testPreviewWithdrawReturnsEmptyWhenIdleCovers() public view {
@@ -181,23 +177,106 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         assertEq(tokens[1], address(aapl), "token 1");
         assertApproxEqAbs(minProceeds, (referenceValue * 99) / 100, 2, "min proceeds");
 
-        vm.prank(user);
-        strategy.withdraw(1_500e18, 100);
+        _withdraw(1_500e18, 100);
 
         assertEq(nvda.balanceOf(address(strategy)), 10e18 - amounts[0], "nvda sold");
         assertEq(aapl.balanceOf(address(strategy)), 20e18 - amounts[1], "aapl sold");
     }
 
+    function testWithdrawRevertsAfterTheDeadline() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.DeadlineExpired.selector);
+        strategy.withdraw(300e18, 100, new address[](0), new uint256[](0), block.timestamp - 1);
+    }
+
+    function testWithdrawAllRevertsAfterTheDeadline() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.DeadlineExpired.selector);
+        strategy.withdrawAll(100, 0, block.timestamp - 1);
+    }
+
+    function testWithdrawAllRevertsBelowTheCallerMinimumAndPaysAtIt() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.InsufficientProceeds.selector);
+        strategy.withdrawAll(100, 4_500e18 + 1, block.timestamp);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 4_500e18, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 4_500e18, "user asset");
+    }
+
+    function testWithdrawRevertsWhenACapIsBelowThePlannedAmount() public {
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        amounts[1] -= 1;
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellExceedsCap.selector, address(aapl)));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testWithdrawRevertsWhenAPlannedTokenIsNotCapped() public {
+        (address[] memory planned, uint256[] memory plannedAmounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        address[] memory tokens = new address[](1);
+        uint256[] memory amounts = new uint256[](1);
+        tokens[0] = planned[0];
+        amounts[0] = plannedAmounts[0];
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellExceedsCap.selector, address(aapl)));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testWithdrawMatchesCapsByTokenInAnyOrderAndIgnoresUnplannedOnes() public {
+        (address[] memory planned, uint256[] memory plannedAmounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        address[] memory tokens = new address[](3);
+        uint256[] memory amounts = new uint256[](3);
+        (tokens[0], amounts[0]) = (makeAddr("unplanned"), 0);
+        (tokens[1], amounts[1]) = (planned[1], plannedAmounts[1]);
+        (tokens[2], amounts[2]) = (planned[0], plannedAmounts[0]);
+
+        vm.prank(user);
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    /// @dev The fee accrues every second, so the legs a block-old preview planned no longer cover the
+    ///      shortfall; caps copied unchanged revert, caps with headroom go through
+    function testCapsCopiedFromAStalePreviewRevertAndCapsWithHeadroomPass() public {
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        vm.warp(block.timestamp + 1);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellExceedsCap.selector, tokens[0]));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+
+        for (uint256 i = 0; i < amounts.length; i++) {
+            amounts[i] = (amounts[i] * 101) / 100;
+        }
+
+        vm.prank(user);
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    function testWithdrawRevertsWhenTheCapListsDifferInLength() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.LengthMismatch.selector);
+        strategy.withdraw(1_500e18, 100, new address[](1), new uint256[](0), block.timestamp);
+    }
+
     function testWithdrawOnlyOwner() public {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
-        strategy.withdraw(1_500e18, 100);
+        strategy.withdraw(1_500e18, 100, new address[](0), new uint256[](0), block.timestamp);
     }
 
     function testWithdrawAllOnlyOwner() public {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
-        strategy.withdrawAll(100);
+        strategy.withdrawAll(100, 0, block.timestamp);
     }
 
     function _listWithPool(address token) internal {
