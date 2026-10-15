@@ -614,7 +614,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         IERC20(tokenIn).forceApprove(address(hop.router), 0);
     }
 
-    /// @notice Refuses a hop priced by the stock checker unless it sells a listed stock that is not halted
+    /// @notice Refuses a hop priced by the stock checker unless it sells a listed stock that is not halted, on the pool
+    ///         the stock registry prices it on
     /// @dev Only the stock checker answers registry(); the Chainlink checker has no such getter
     function _checkStockHop(MamoStakingRegistry.Hop memory hop, address tokenIn) internal view {
         (bool ok, bytes memory ret) = address(hop.checker).staticcall(abi.encodeWithSignature("registry()"));
@@ -627,6 +628,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
                 || cfg.status == IStockAccountRegistry.TokenStatus.SellOnly,
             "Stock not sellable"
         );
+        require(hop.pool == cfg.pool, "Stock pool mismatch");
     }
 
     /**

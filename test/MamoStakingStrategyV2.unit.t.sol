@@ -317,6 +317,21 @@ contract MamoStakingStrategyV2UnitTest is Test {
         assertEq(stock.balanceOf(address(strategy)), 0);
     }
 
+    function test_compound_holdsAStockWhosePoolWasRepointed() public {
+        stock.mint(address(strategy), 1e8);
+        _listStock(IStockAccountRegistry.TokenStatus.Active, address(new MockHopPool(address(usdc), address(stock))));
+
+        vm.prank(address(strategy));
+        vm.expectRevert("Stock pool mismatch");
+        strategy.compoundRewardToken(address(stock), address(stockUsdc), 1e8, block.timestamp);
+
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.CompoundRewardTokenHeld(address(stock), 1e8);
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+        assertEq(stock.balanceOf(address(strategy)), 1e8, "held");
+    }
+
     function test_setRoute_validatesTheRoute() public {
         MamoStakingRegistryV2.Hop[] memory route = new MamoStakingRegistryV2.Hop[](1);
         route[0] = MamoStakingRegistryV2.Hop(address(stockUsdc), stockRouter, stockChecker);
