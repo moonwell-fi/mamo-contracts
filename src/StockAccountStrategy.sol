@@ -186,8 +186,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawAllInKind() external override onlyOwner {
         try this.payFeesFromAny() {} catch {}
 
-        principal = 0;
-
         address to = owner();
         _sendAllInKind(address(asset), to);
 
@@ -195,6 +193,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         for (uint256 i = 0; i < tokens.length; i++) {
             _sendAllInKind(tokens[i], to);
         }
+
+        // A balance the sweep had to skip keeps its value in principal
+        principal = Math.min(principal, getNAV());
     }
 
     /**

@@ -492,6 +492,7 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(user), 1_000e18, "the asset still goes out");
         assertEq(nvda.balanceOf(user), 10e18, "the other stock still goes out");
         assertEq(frozen.balanceOf(address(strategy)), 5e18, "the frozen token stays behind");
+        assertEq(strategy.principal(), 5e18, "principal keeps the value left behind");
     }
 
     function testWithdrawAllInKindOnlyOwner() public {
