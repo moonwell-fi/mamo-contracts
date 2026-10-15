@@ -232,6 +232,7 @@ contract DropAutomationV2 is Ownable {
     function removeGauge(address gauge) external onlyOwner {
         if (!isGauge[gauge]) revert NotFound(gauge);
 
+        try IAerodromeGauge(gauge).getReward(address(this)) {} catch {}
         _remove(gauges, gauge);
         isGauge[gauge] = false;
 

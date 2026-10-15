@@ -30,12 +30,18 @@ contract MockQuoter {
 contract MockGauge {
     MockERC20Decimals public immutable stakingToken;
     uint256 public claims;
+    bool public revertOnGetReward;
 
     constructor(MockERC20Decimals stakingToken_) {
         stakingToken = stakingToken_;
     }
 
+    function setRevertOnGetReward(bool value) external {
+        revertOnGetReward = value;
+    }
+
     function getReward(address) external {
+        require(!revertOnGetReward, "getReward");
         claims++;
     }
 
@@ -225,6 +231,22 @@ contract DropAutomationV2UnitTest is Test {
         vm.prank(owner);
         drop.removeGauge(address(gauge));
         assertEq(drop.getGauges().length, 0);
+    }
+
+    function test_removeGauge_claimsFirst() public {
+        MockGauge gauge = new MockGauge(new MockERC20Decimals("LP", 18));
+        MockGauge broken = new MockGauge(new MockERC20Decimals("LP", 18));
+        broken.setRevertOnGetReward(true);
+
+        vm.startPrank(owner);
+        drop.addGauge(address(gauge));
+        drop.addGauge(address(broken));
+        drop.removeGauge(address(gauge));
+        drop.removeGauge(address(broken));
+        vm.stopPrank();
+
+        assertEq(gauge.claims(), 1, "accrued rewards claimed on removal");
+        assertEq(drop.getGauges().length, 0, "a reverting gauge is still removed");
     }
 
     function test_withdrawGauge_sendsWhatTheGaugeReturned() public {
