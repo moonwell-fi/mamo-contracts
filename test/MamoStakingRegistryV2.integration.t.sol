@@ -356,6 +356,40 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         );
     }
 
+    // ========== H38: A REWARD TOKEN'S POOL MUST HOLD THE TOKEN ==========
+
+    function testAddRewardTokenRevertsWhenPoolLacksToken() public {
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.prank(backend);
+        vm.expectRevert("Token not in pool");
+        registry.addRewardToken(rewardToken2, pool1);
+    }
+
+    function testUpdateRewardTokenPoolRevertsWhenPoolLacksToken() public {
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.startPrank(backend);
+        registry.addRewardToken(rewardToken2, pool2);
+        vm.expectRevert("Token not in pool");
+        registry.updateRewardTokenPool(rewardToken2, pool1);
+        vm.stopPrank();
+    }
+
+    /// @dev A stock lists against its stock/USDC pool and reaches MAMO through setRoute, so the pool's
+    ///      other side need not be MAMO
+    function testRewardTokenPoolNeedNotPairWithMamo() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken1, rewardToken2));
+
+        vm.startPrank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+        registry.updateRewardTokenPool(rewardToken2, address(new MockPool(rewardToken2, rewardToken1)));
+        vm.stopPrank();
+
+        assertEq(registry.hopTokenOut(registry.getRewardTokenPool(rewardToken2), rewardToken2), rewardToken1);
+    }
+
     function testSetDEXRouter() public {
         MamoStakingRegistry registry = _freshRegistry();
         address newRouter = makeAddr("newRouter");

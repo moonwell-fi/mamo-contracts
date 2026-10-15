@@ -144,6 +144,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
             poolCodeSize := extcodesize(pool)
         }
         require(poolCodeSize > 0, "Pool must be a contract");
+        hopTokenOut(pool, token);
 
         rewardTokenToIndex[token] = rewardTokens.length;
         rewardTokens.push(RewardToken({token: token, pool: pool}));
@@ -198,6 +199,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
             codeSize := extcodesize(newPool)
         }
         require(codeSize > 0, "Pool must be a contract");
+        hopTokenOut(newPool, token);
 
         rewardTokens[index].pool = newPool;
 
