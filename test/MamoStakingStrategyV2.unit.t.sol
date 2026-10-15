@@ -53,6 +53,20 @@ contract MockStockAccount {
     }
 }
 
+contract MockMultiMarketStrategy {
+    address public owner;
+    address public token;
+
+    constructor(address owner_, address token_) {
+        owner = owner_;
+        token = token_;
+    }
+
+    function deposit(uint256) external pure {
+        revert("Deposit failed");
+    }
+}
+
 contract MamoStakingStrategyV2UnitTest is Test {
     address internal admin = makeAddr("admin");
     address internal backend = makeAddr("backend");
@@ -186,6 +200,22 @@ contract MamoStakingStrategyV2UnitTest is Test {
         assertEq(stock.allowance(address(strategy), address(stockAccount)), 0);
         assertEq(cbBtc.balanceOf(address(strategy)), 1e6);
         assertEq(multiRewards.balanceOf(address(strategy)), 6e18, "MAMO is still restaked");
+    }
+
+    function test_reinvest_holdsTheRewardWhenAMultiMarketDepositFails() public {
+        MockMultiMarketStrategy cbBtcStrategy = new MockMultiMarketStrategy(user, address(cbBtc));
+        strategyRegistry.register(user, address(cbBtcStrategy));
+        stock.mint(address(strategy), 1e8);
+        cbBtc.mint(address(strategy), 1e6);
+
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.ReinvestRewardTokenHeld(address(cbBtc), 1e6);
+        vm.prank(backend);
+        strategy.reinvest(_destinations(address(cbBtcStrategy), address(stockAccount)));
+
+        assertEq(cbBtc.balanceOf(address(strategy)), 1e6);
+        assertEq(cbBtc.allowance(address(strategy), address(cbBtcStrategy)), 0);
+        assertEq(stock.balanceOf(address(stockAccount)), 1e8, "the next destination still gets its deposit");
     }
 
     function test_setRoute_validatesTheRoute() public {

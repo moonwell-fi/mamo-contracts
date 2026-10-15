@@ -484,8 +484,12 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             rewardToken.forceApprove(strategyAddress, rewardBalance);
 
             if (_strategyToken(strategyAddress) == address(rewardToken)) {
-                IMamoMultiMarketStrategy(strategyAddress).deposit(rewardBalance);
-                emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
+                try IMamoMultiMarketStrategy(strategyAddress).deposit(rewardBalance) {
+                    emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
+                } catch {
+                    rewardToken.forceApprove(strategyAddress, 0);
+                    emit ReinvestRewardTokenHeld(address(rewardToken), rewardBalance);
+                }
                 continue;
             }
 
