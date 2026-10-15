@@ -87,6 +87,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenPoolUpdated(address indexed token, address indexed oldPool, address indexed newPool);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
+    event TokenDelisted(address indexed token);
 
     /// @param config The initial roles and global configuration
     constructor(Config memory config) {
@@ -262,6 +263,25 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit TokenPoolUpdated(token, oldPool, newPool);
     }
 
+    /// @notice Removes a halted token from the list; holders still exit it with `withdrawToken`
+    function delistToken(address token) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        TokenStatus status = _tokenConfig[token].status;
+        if (status == TokenStatus.None) revert TokenNotListed(token);
+        if (status != TokenStatus.Halted) revert TokenNotHalted(token);
+
+        uint256 last = _tokens.length - 1;
+        for (uint256 i = 0; i < last; i++) {
+            if (_tokens[i] == token) {
+                _tokens[i] = _tokens[last];
+                break;
+            }
+        }
+        _tokens.pop();
+        delete _tokenConfig[token];
+
+        emit TokenDelisted(token);
+    }
+
     /// @notice Changes the trading status of a listed token
     /// @param token The listed token to update
     /// @param status The new status; the guardian may only tighten it, and any loosening re-probes the price
@@ -305,7 +325,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         return _tokenConfig[token];
     }
 
-    /// @notice Returns every token that has ever been configured
+    /// @notice Returns every listed token, halted ones included
     function allTokens() external view override returns (address[] memory) {
         return _tokens;
     }

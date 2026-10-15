@@ -908,6 +908,79 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
     }
 
+    function _listFreshToken() internal returns (address listed) {
+        listed = address(new MockERC20Decimals("TOKEN", 8));
+        checker.setRate(listed, asset, 1e18);
+        IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
+        cfg.pool = _pairPool(listed);
+        vm.prank(admin);
+        registry.listToken(listed, cfg);
+    }
+
+    function testDelistTokenRemovesAHaltedTokenAndKeepsTheOthers() public {
+        address first = _listFreshToken();
+        listAndHaltDefaultToken();
+        address last = _listFreshToken();
+
+        vm.expectEmit(true, false, false, true, address(registry));
+        emit StockAccountRegistry.TokenDelisted(token);
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        address[] memory tokens = registry.allTokens();
+        assertEq(tokens.length, 2, "token list length mismatch");
+        assertEq(tokens[0], first, "first entry moved");
+        assertEq(tokens[1], last, "last entry not swapped into the gap");
+
+        IStockAccountRegistry.TokenConfig memory cleared = registry.tokenConfig(token);
+        assertEq(uint256(cleared.status), uint256(IStockAccountRegistry.TokenStatus.None), "status not cleared");
+        assertEq(cleared.pool, address(0), "pool not cleared");
+
+        listDefaultToken();
+        assertEq(registry.allTokens().length, 3, "token not listable again");
+    }
+
+    function testDelistTokenRemovesTheLastEntry() public {
+        address first = _listFreshToken();
+        listAndHaltDefaultToken();
+
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        address[] memory tokens = registry.allTokens();
+        assertEq(tokens.length, 1, "token list length mismatch");
+        assertEq(tokens[0], first, "remaining entry mismatch");
+    }
+
+    function testDelistTokenRefusesATokenThatIsNotHalted() public {
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotListed.selector, token));
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        listDefaultToken();
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
+        vm.prank(admin);
+        registry.delistToken(token);
+    }
+
+    function testDelistTokenRevertsForNonAdmin() public {
+        listAndHaltDefaultToken();
+
+        expectNotAdmin(guardian);
+        vm.prank(guardian);
+        registry.delistToken(token);
+
+        expectNotAdmin(stranger);
+        vm.prank(stranger);
+        registry.delistToken(token);
+    }
+
     function testSetTokenPoolRepointsHaltedTokenAndEmits() public {
         listAndHaltDefaultToken();
         address newPool = _pairPool(token);
@@ -1038,6 +1111,10 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(admin);
         registry.setFeeRecipient(makeAddr("newFeeRecipient"));
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.delistToken(token);
 
         assertEq(registry.maxPositions(), 10, "max positions mismatch");
         assertEq(registry.allTokens().length, 1, "token list length mismatch");
