@@ -6,6 +6,7 @@ import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {MamoStakingStrategyV2} from "@contracts/MamoStakingStrategyV2.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
@@ -13,6 +14,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {MockERC20Decimals} from "./mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "./mocks/MockPriceChecker.sol";
+import {MockStockAccountRegistry} from "./mocks/MockStockAccountRegistry.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 
 contract MockHopPool {
@@ -53,6 +55,14 @@ contract MockStockAccount {
     }
 }
 
+contract MockStockPriceChecker is MockPriceChecker {
+    address public registry;
+
+    constructor(address registry_) {
+        registry = registry_;
+    }
+}
+
 contract MockMultiMarketStrategy {
     address public owner;
     address public token;
@@ -80,13 +90,15 @@ contract MamoStakingStrategyV2UnitTest is Test {
     MockSwapRouter internal router = new MockSwapRouter();
     MockSwapRouter internal stockRouter = new MockSwapRouter();
     MockPriceChecker internal checker = new MockPriceChecker();
-    MockPriceChecker internal stockChecker = new MockPriceChecker();
+    MockStockAccountRegistry internal stockRegistry = new MockStockAccountRegistry();
+    MockStockPriceChecker internal stockChecker = new MockStockPriceChecker(address(stockRegistry));
     MockStrategyRegistry internal strategyRegistry = new MockStrategyRegistry();
     MockStockAccount internal stockAccount = new MockStockAccount(user);
 
     MamoStakingRegistryV2 internal registry;
     MamoStakingStrategyV2 internal strategy;
     IMultiRewards internal multiRewards;
+    MockHopPool internal stockUsdc;
 
     function setUp() public {
         multiRewards = IMultiRewards(vm.deployCode("MultiRewards.sol:MultiRewards", abi.encode(admin, address(mamo))));
@@ -118,7 +130,8 @@ contract MamoStakingStrategyV2UnitTest is Test {
         );
         strategyRegistry.register(user, address(stockAccount));
 
-        MockHopPool stockUsdc = new MockHopPool(address(usdc), address(stock));
+        stockUsdc = new MockHopPool(address(usdc), address(stock));
+        _listStock(IStockAccountRegistry.TokenStatus.Active, address(stockUsdc));
         MockHopPool usdcMamo = new MockHopPool(address(mamo), address(usdc));
 
         vm.startPrank(backend);
@@ -277,8 +290,34 @@ contract MamoStakingStrategyV2UnitTest is Test {
         assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 10_000e18, "staked by the next compound");
     }
 
+    function test_compound_holdsAStockThatIsHaltedOrUnlisted() public {
+        stock.mint(address(strategy), 1e8);
+        cbBtc.mint(address(strategy), 1e6);
+        _listStock(IStockAccountRegistry.TokenStatus.None, address(stockUsdc));
+        vm.prank(address(strategy));
+        vm.expectRevert("Stock not sellable");
+        strategy.compoundRewardToken(address(stock), address(stockUsdc), 1e8, block.timestamp);
+
+        _listStock(IStockAccountRegistry.TokenStatus.Halted, address(stockUsdc));
+        vm.prank(address(strategy));
+        vm.expectRevert("Stock not sellable");
+        strategy.compoundRewardToken(address(stock), address(stockUsdc), 1e8, block.timestamp);
+
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.CompoundRewardTokenHeld(address(stock), 1e8);
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+        assertEq(stock.balanceOf(address(strategy)), 1e8, "held");
+        assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 10_000e18, "cbBTC still compounds");
+
+        // A sell-only stock is still sold
+        _listStock(IStockAccountRegistry.TokenStatus.SellOnly, address(stockUsdc));
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+        assertEq(stock.balanceOf(address(strategy)), 0);
+    }
+
     function test_setRoute_validatesTheRoute() public {
-        MockHopPool stockUsdc = new MockHopPool(address(usdc), address(stock));
         MamoStakingRegistryV2.Hop[] memory route = new MamoStakingRegistryV2.Hop[](1);
         route[0] = MamoStakingRegistryV2.Hop(address(stockUsdc), stockRouter, stockChecker);
 
@@ -300,6 +339,13 @@ contract MamoStakingStrategyV2UnitTest is Test {
         vm.prank(backend);
         registry.removeRewardToken(address(stock));
         assertEq(registry.getRoute(address(stock)).length, 2, "only the admin changes a route");
+    }
+
+    function _listStock(IStockAccountRegistry.TokenStatus status, address pool) internal {
+        stockRegistry.setTokenConfig(
+            address(stock),
+            IStockAccountRegistry.TokenConfig(status, IStockAccountRegistry.PriceSource.PoolTwap, pool, address(0))
+        );
     }
 
     function _setRate(MockSwapRouter r, MockPriceChecker c, address tokenIn, address tokenOut, uint256 rate) internal {

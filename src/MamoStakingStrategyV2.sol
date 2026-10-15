@@ -12,6 +12,7 @@ import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
@@ -586,6 +587,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         address token1 = ICLPool(hop.pool).token1();
         require(tokenIn == token0 || tokenIn == token1, "Token not in pool");
         tokenOut = tokenIn == token0 ? token1 : token0;
+        _checkStockHop(hop, tokenIn);
 
         expectedOut = hop.checker.getExpectedOut(expectedIn, tokenIn, tokenOut);
         uint256 amountOutMinimum = (expectedOut * (10000 - slippageInBps)) / 10000;
@@ -610,6 +612,21 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         require(received >= amountOutMinimum, "Insufficient MAMO received");
 
         IERC20(tokenIn).forceApprove(address(hop.router), 0);
+    }
+
+    /// @notice Refuses a hop priced by the stock checker unless it sells a listed stock that is not halted
+    /// @dev Only the stock checker answers registry(); the Chainlink checker has no such getter
+    function _checkStockHop(MamoStakingRegistry.Hop memory hop, address tokenIn) internal view {
+        (bool ok, bytes memory ret) = address(hop.checker).staticcall(abi.encodeWithSignature("registry()"));
+        if (!ok || ret.length != 32) return;
+
+        IStockAccountRegistry.TokenConfig memory cfg =
+            IStockAccountRegistry(abi.decode(ret, (address))).tokenConfig(tokenIn);
+        require(
+            cfg.status == IStockAccountRegistry.TokenStatus.Active
+                || cfg.status == IStockAccountRegistry.TokenStatus.SellOnly,
+            "Stock not sellable"
+        );
     }
 
     /**
