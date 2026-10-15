@@ -210,6 +210,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         for (uint256 i = 0; i < configurations.length; i++) {
             require(configurations[i].chainlinkFeed != address(0), "Invalid chainlink feed address");
             require(configurations[i].heartbeat > 0, "Heartbeat must be greater than 0");
+            _requireReadableFeed(configurations[i].chainlinkFeed);
             tokenPairOracleData[fromToken][toToken].push(configurations[i]);
 
             // Emit event for each configuration
@@ -599,6 +600,13 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         if (_bounds.maxAnswer == 0) return;
 
         require(answer >= _bounds.minAnswer && answer <= _bounds.maxAnswer, "Chainlink price out of bounds");
+    }
+
+    /// @dev Both calls succeed and return full-width data, so a typo'd feed can't be configured
+    function _requireReadableFeed(address chainlinkFeed) internal view {
+        (bool roundOk, bytes memory round) = chainlinkFeed.staticcall(abi.encodeCall(IPriceFeed.latestRoundData, ()));
+        (bool decimalsOk, bytes memory dec) = chainlinkFeed.staticcall(abi.encodeCall(IPriceFeed.decimals, ()));
+        require(roundOk && round.length == 160 && decimalsOk && dec.length == 32, "Chainlink feed not readable");
     }
 
     /**

@@ -5,6 +5,7 @@ import {BaseTest} from "./BaseTest.t.sol";
 import {console} from "@forge-std/console.sol";
 
 import {MockPool} from "./mocks/MockPool.sol";
+import {MockPriceChecker} from "./mocks/MockPriceChecker.sol";
 import {MamoStakingRegistryV2 as MamoStakingRegistry} from "@contracts/MamoStakingRegistryV2.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
@@ -644,7 +645,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     ///      checker is incident remediation too, so it must not require an unpause first.
     function testSetSlippagePriceCheckerSucceedsWhilePaused() public {
         MamoStakingRegistry registry = _freshRegistry();
-        address newChecker = makeAddr("newSlippagePriceChecker");
+        address newChecker = address(new MockPriceChecker());
 
         vm.prank(guardian);
         registry.pause();
@@ -656,6 +657,24 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         assertEq(
             address(registry.slippagePriceChecker()), newChecker, "price checker should be replaceable while paused"
         );
+    }
+
+    // ========== H48: THE PRICE CHECKER MUST ANSWER THE CHECKER SURFACE ==========
+
+    function testConstructorRevertsWhenCheckerLacksSurface() public {
+        address dexRouter = address(stakingRegistry.dexRouter());
+        address quoter = address(stakingRegistry.quoter());
+
+        vm.expectRevert("Not a slippage price checker");
+        new MamoStakingRegistry(admin, backend, guardian, mamoToken, dexRouter, quoter, pool1, DEFAULT_SLIPPAGE);
+    }
+
+    function testSetSlippagePriceCheckerRevertsWhenCheckerLacksSurface() public {
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.prank(admin);
+        vm.expectRevert("Not a slippage price checker");
+        registry.setSlippagePriceChecker(ISlippagePriceChecker(pool1));
     }
 
     // ========== RECOVERY FUNCTION TESTS ==========

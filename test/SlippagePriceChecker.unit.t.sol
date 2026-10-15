@@ -7,6 +7,8 @@ import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
+import {MockChainlinkAggregator} from "./mocks/MockChainlinkAggregator.sol";
+
 /// @notice Mocks-only unit coverage for the two audit fixes on SlippagePriceChecker: the
 ///         implementation initializer lock (Sherlock #44) and the reward-token latch that made a
 ///         mistaken configuration permanent.
@@ -17,7 +19,7 @@ contract SlippagePriceCheckerUnitTest is Test {
     address public owner = makeAddr("owner");
     address public rewardToken = makeAddr("rewardToken");
     address public underlying = makeAddr("underlying");
-    address public feed = makeAddr("chainlinkFeed");
+    address public feed = address(new MockChainlinkAggregator());
 
     function setUp() public {
         implementation = new SlippagePriceChecker();
@@ -31,10 +33,17 @@ contract SlippagePriceCheckerUnitTest is Test {
     }
 
     function _configure(address from, address to, uint256 maxTime) internal {
+        _configure(from, to, maxTime, feed);
+    }
+
+    function _configure(address from, address to, uint256 maxTime, address chainlinkFeed) internal {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] =
-            ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: feed, reverse: false, heartbeat: 3600});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkFeed,
+            reverse: false,
+            heartbeat: 3600
+        });
 
         vm.startPrank(owner);
         checker.addTokenConfiguration(from, to, configs);
@@ -143,5 +152,17 @@ contract SlippagePriceCheckerUnitTest is Test {
         vm.prank(owner);
         vm.expectRevert("Token not configured");
         checker.clearRewardToken(makeAddr("neverConfigured"));
+    }
+
+    // ==================== H48: A FEED MUST ANSWER THE AGGREGATOR SURFACE ====================
+
+    function test_addTokenConfigurationRejectsAFeedWithNoCode() public {
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, makeAddr("typoFeed"));
+    }
+
+    function test_addTokenConfigurationRejectsAContractWithoutLatestRoundData() public {
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, address(implementation));
     }
 }

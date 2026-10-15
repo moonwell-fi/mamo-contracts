@@ -103,6 +103,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         require(_dexRouter != address(0), "Invalid DEX router address");
         require(_quoter != address(0), "Invalid quoter address");
         require(_slippagePriceChecker != address(0), "Invalid slippage price checker address");
+        _requireSlippagePriceChecker(_slippagePriceChecker);
         require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Default slippage too high");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -283,6 +284,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
     {
         require(address(_slippagePriceChecker) != address(0), "Invalid slippage price checker");
         require(address(_slippagePriceChecker) != address(slippagePriceChecker), "Slippage price checker already set");
+        _requireSlippagePriceChecker(address(_slippagePriceChecker));
 
         address oldChecker = address(slippagePriceChecker);
         slippagePriceChecker = _slippagePriceChecker;
@@ -364,6 +366,13 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         address token1 = ICLPool(pool).token1();
         require(tokenIn == token0 || tokenIn == token1, "Token not in pool");
         return tokenIn == token0 ? token1 : token0;
+    }
+
+    /// @dev Probes maxTimePriceValid, which a checker answers for any token, unlike getExpectedOut
+    function _requireSlippagePriceChecker(address checker) private view {
+        (bool ok, bytes memory ret) =
+            checker.staticcall(abi.encodeCall(ISlippagePriceChecker.maxTimePriceValid, (address(0))));
+        require(ok && ret.length == 32, "Not a slippage price checker");
     }
 
     // ==================== RECOVERY FUNCTIONS ====================
