@@ -47,6 +47,7 @@ interface IStockAccountRegistry {
     error PoolNotAgainstAsset(address pool);
     error InvalidDepositBounds();
     error InvalidMaxOrderValue();
+    error PriceCheckerAssetMismatch(address checker);
 
     function asset() external view returns (address);
 

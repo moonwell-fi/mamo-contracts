@@ -50,6 +50,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         stockRegistry = new MockStockAccountRegistry();
         stockRegistry.setMaxPositions(10);
         stockRegistry.setMinTargetBps(100);
+        stockRegistry.setAsset(address(usdc));
         _listActive(address(nvda));
         _listActive(address(aapl));
 
@@ -221,6 +222,20 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(settlement),
             address(implementation),
             0
+        );
+    }
+
+    function testConstructorRevertsWhenTheAssetDiffersFromTheRegistry() public {
+        vm.expectRevert(StockAccountStrategyFactory.AssetMismatch.selector);
+        new StockAccountStrategyFactory(
+            admin,
+            backend,
+            address(registry),
+            address(stockRegistry),
+            address(nvda),
+            address(settlement),
+            address(implementation),
+            strategyTypeId
         );
     }
 

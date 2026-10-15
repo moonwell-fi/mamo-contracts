@@ -18,6 +18,14 @@ import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol
 
 contract Stub {}
 
+contract QuoteAssetStub {
+    address public quoteAsset;
+
+    constructor(address quoteAsset_) {
+        quoteAsset = quoteAsset_;
+    }
+}
+
 contract StockAccountRegistryUnitTest is Test {
     StockAccountRegistry internal registry;
 
@@ -1174,6 +1182,29 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(address(mock.aerodromeRouter()), address(router), "router mismatch");
         assertEq(address(mock.priceChecker()), address(checker), "price checker mismatch");
         assertEq(mock.asset(), asset, "asset mismatch");
+    }
+
+    function testSetPriceCheckerRefusesACheckerQuotingAnotherAsset() public {
+        address other = address(new QuoteAssetStub(makeAddr("otherAsset")));
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PriceCheckerAssetMismatch.selector, other));
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(other));
+
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.priceChecker = ISlippagePriceChecker(other);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PriceCheckerAssetMismatch.selector, other));
+        new StockAccountRegistry(config);
+
+        address matching = address(new QuoteAssetStub(asset));
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(matching));
+        assertEq(address(registry.priceChecker()), matching, "a checker quoting the asset is accepted");
+
+        address silent = _stub();
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(silent));
+        assertEq(address(registry.priceChecker()), silent, "a checker without quoteAsset is accepted");
     }
 
     function testSetPriceCheckerRevertsWhenAListedTokenCannotBeQuoted() public {

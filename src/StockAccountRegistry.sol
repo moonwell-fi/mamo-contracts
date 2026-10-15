@@ -339,6 +339,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         if (address(newPriceChecker) == address(0)) revert ZeroAddress();
         if (address(newPriceChecker).code.length == 0) revert NotAContract(address(newPriceChecker));
 
+        // A checker that does not expose quoteAsset() (the audited SlippagePriceChecker) is accepted
+        (bool ok, bytes memory ret) = address(newPriceChecker).staticcall(abi.encodeWithSignature("quoteAsset()"));
+        if (ok && ret.length == 32 && abi.decode(ret, (address)) != asset) {
+            revert PriceCheckerAssetMismatch(address(newPriceChecker));
+        }
+
         address oldPriceChecker = address(priceChecker);
         priceChecker = newPriceChecker;
 

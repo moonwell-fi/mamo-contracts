@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {ERC1967Proxy} from "./ERC1967Proxy.sol";
 import {StockAccountStrategy} from "./StockAccountStrategy.sol";
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
+import {IStockAccountRegistry} from "./interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "./interfaces/IStockAccountStrategy.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
@@ -28,6 +29,7 @@ contract StockAccountStrategyFactory is AccessControl {
     error StrategyTypeIdNotSet();
     error NotBackendOrUser();
     error StrategyAlreadyExists(address strategy);
+    error AssetMismatch();
 
     /**
      * @param admin Address to grant the DEFAULT_ADMIN_ROLE to
@@ -57,6 +59,7 @@ contract StockAccountStrategyFactory is AccessControl {
         if (_cowSettlement == address(0)) revert ZeroAddress();
         if (_strategyImplementation == address(0)) revert ZeroAddress();
         if (_strategyTypeId == 0) revert StrategyTypeIdNotSet();
+        if (_asset != IStockAccountRegistry(_stockRegistry).asset()) revert AssetMismatch();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
