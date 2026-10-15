@@ -678,9 +678,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
     }
 
+    /// @dev A Halted token is left out of the account value, so taking it out does not reduce principal either
     function _reducePrincipal(address token, uint256 amount) internal {
         uint256 value = amount;
-        if (token != address(asset)) (, value) = _tryValue(stockRegistry.priceChecker(), token, amount);
+        if (token != address(asset)) {
+            if (stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.Halted) return;
+            (, value) = _tryValue(stockRegistry.priceChecker(), token, amount);
+        }
         principal -= Math.min(value, principal);
     }
 

@@ -383,6 +383,23 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.principal(), 0, "a full exit clears it");
     }
 
+    function testWithdrawingAHaltedTokenLeavesPrincipalAlone() public {
+        _fundUsdc(funder, 1_000e18);
+        vm.prank(funder);
+        strategy.deposit(1_000e18);
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        _halt(address(nvda));
+        assertEq(strategy.getNAV(), 1_000e18, "the halted position is out of the value");
+
+        vm.prank(user);
+        strategy.withdrawToken(address(nvda), 10e18);
+
+        assertEq(strategy.principal(), 3_000e18, "so it is not taken out of principal either");
+    }
+
     function testWithdrawTokenMovesBalanceAndEmits() public {
         _fundToken(nvda, funder, 10e18);
         vm.prank(funder);
