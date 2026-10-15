@@ -36,6 +36,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
         uint16 maxDeviationBps;
+        uint256 maxOrderValue;
         uint8 maxPositions;
         uint256 maxStrategyDeposit;
         uint16 maxWithdrawSlippageBps;
@@ -61,6 +62,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     address public override feeRecipient;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
+    uint256 public override maxOrderValue;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     address[] internal _tokens;
@@ -75,6 +77,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
+    event MaxOrderValueUpdated(uint256 oldValue, uint256 newValue);
     event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
     event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
@@ -104,6 +107,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
         if (config.minStrategyDeposit > config.maxStrategyDeposit) revert InvalidDepositBounds();
+        _setMaxOrderValue(config.maxOrderValue);
         _setOrderSigner(config.orderSigner);
         _setManagementFeeBps(config.managementFeeBps);
         _setFeeRecipient(config.feeRecipient);
@@ -183,6 +187,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         if (newMaxDeposit == maxStrategyDeposit) revert AlreadySet();
         if (newMaxDeposit < minStrategyDeposit) revert InvalidDepositBounds();
         _setMaxStrategyDeposit(newMaxDeposit);
+    }
+
+    /// @notice Sets the largest value, in asset units, a single order may sell
+    function setMaxOrderValue(uint256 newMaxOrderValue) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newMaxOrderValue == maxOrderValue) revert AlreadySet();
+        _setMaxOrderValue(newMaxOrderValue);
     }
 
     /// @notice Sets the key the backend signs orders with, invalidating any order signed by the old one
@@ -401,6 +411,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         maxStrategyDeposit = newMaxDeposit;
 
         emit MaxStrategyDepositUpdated(oldValue, newMaxDeposit);
+    }
+
+    function _setMaxOrderValue(uint256 newMaxOrderValue) internal {
+        if (newMaxOrderValue == 0) revert InvalidMaxOrderValue();
+
+        uint256 oldValue = maxOrderValue;
+        maxOrderValue = newMaxOrderValue;
+
+        emit MaxOrderValueUpdated(oldValue, newMaxOrderValue);
     }
 
     function _setOrderSigner(address newSigner) internal {

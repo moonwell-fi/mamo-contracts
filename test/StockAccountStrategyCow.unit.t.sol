@@ -39,6 +39,22 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         assertTrue(_check(_order(address(usdc), address(nvda), 400e18, 2e18)) == MAGIC_VALUE, "magic value");
     }
 
+    function testOrderAboveTheMaxOrderValueIsRefusedAndOneAtItIsAccepted() public {
+        usdc.mint(address(strategy), 1000e18);
+
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 4000), 2000);
+
+        GPv2Order.Data memory order = _order(address(usdc), address(nvda), 400e18, 2e18);
+
+        stockRegistry.setMaxOrderValue(400e18 - 1);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.OrderValueExceedsMaximum.selector, 400e18));
+        _check(order);
+
+        stockRegistry.setMaxOrderValue(400e18);
+        assertTrue(_check(order) == MAGIC_VALUE, "an order at the bound is accepted");
+    }
+
     function testRevertsWhenDigestDoesNotMatch() public {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
 

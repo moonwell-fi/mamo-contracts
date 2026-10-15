@@ -106,6 +106,7 @@ contract StockAccountRouterSwapIntegrationTest is Test {
                 managementFeeBps: MANAGEMENT_FEE_BPS,
                 maxBackendSlippageBps: MAX_BACKEND_SLIPPAGE_BPS,
                 maxDeviationBps: 1000,
+                maxOrderValue: MAX_STRATEGY_DEPOSIT,
                 maxPositions: 10,
                 maxStrategyDeposit: MAX_STRATEGY_DEPOSIT,
                 maxWithdrawSlippageBps: MAX_WITHDRAW_SLIPPAGE_BPS,

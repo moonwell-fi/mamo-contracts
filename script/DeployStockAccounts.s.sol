@@ -93,24 +93,25 @@ contract DeployStockAccounts is Script {
             return existing;
         }
 
-        StockAccountRegistry.Config memory registryConfig = StockAccountRegistry.Config({
-            admin: addresses.getAddress(config.admin),
-            aerodromeRouter: ISwapRouter(addresses.getAddress(config.aerodromeRouter)),
-            asset: addresses.getAddress(config.asset),
-            feeRecipient: addresses.getAddress(config.feeRecipient),
-            guardian: addresses.getAddress(config.guardian),
-            managementFeeBps: config.managementFeeBps,
-            maxBackendSlippageBps: config.maxBackendSlippageBps,
-            maxDeviationBps: config.maxDeviationBps,
-            maxPositions: config.maxPositions,
-            maxStrategyDeposit: config.maxStrategyDeposit,
-            maxWithdrawSlippageBps: config.maxWithdrawSlippageBps,
-            minStrategyDeposit: config.minStrategyDeposit,
-            minTargetBps: config.minTargetBps,
-            orderSigner: addresses.getAddress(config.orderSigner),
-            priceChecker: ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker)),
-            twapWindow: config.twapWindow
-        });
+        // Field by field: as a 17-field literal it is too deep for the stack in this script
+        StockAccountRegistry.Config memory registryConfig;
+        registryConfig.admin = addresses.getAddress(config.admin);
+        registryConfig.aerodromeRouter = ISwapRouter(addresses.getAddress(config.aerodromeRouter));
+        registryConfig.asset = addresses.getAddress(config.asset);
+        registryConfig.feeRecipient = addresses.getAddress(config.feeRecipient);
+        registryConfig.guardian = addresses.getAddress(config.guardian);
+        registryConfig.managementFeeBps = config.managementFeeBps;
+        registryConfig.maxBackendSlippageBps = config.maxBackendSlippageBps;
+        registryConfig.maxDeviationBps = config.maxDeviationBps;
+        registryConfig.maxOrderValue = config.maxOrderValue;
+        registryConfig.maxPositions = config.maxPositions;
+        registryConfig.maxStrategyDeposit = config.maxStrategyDeposit;
+        registryConfig.maxWithdrawSlippageBps = config.maxWithdrawSlippageBps;
+        registryConfig.minStrategyDeposit = config.minStrategyDeposit;
+        registryConfig.minTargetBps = config.minTargetBps;
+        registryConfig.orderSigner = addresses.getAddress(config.orderSigner);
+        registryConfig.priceChecker = ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker));
+        registryConfig.twapWindow = config.twapWindow;
 
         vm.startBroadcast();
         StockAccountRegistry registry = new StockAccountRegistry(registryConfig);

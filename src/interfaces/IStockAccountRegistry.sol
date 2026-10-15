@@ -46,6 +46,7 @@ interface IStockAccountRegistry {
     error AssetNotListable();
     error PoolNotAgainstAsset(address pool);
     error InvalidDepositBounds();
+    error InvalidMaxOrderValue();
 
     function asset() external view returns (address);
 
@@ -64,6 +65,8 @@ interface IStockAccountRegistry {
     function minStrategyDeposit() external view returns (uint256);
 
     function maxStrategyDeposit() external view returns (uint256);
+
+    function maxOrderValue() external view returns (uint256);
 
     function twapWindow() external view returns (uint32);
 

@@ -134,6 +134,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 managementFeeBps: 100,
                 maxBackendSlippageBps: MAX_BACKEND_SLIPPAGE_BPS,
                 maxDeviationBps: 1000,
+                maxOrderValue: MAX_STRATEGY_DEPOSIT,
                 maxPositions: 10,
                 maxStrategyDeposit: MAX_STRATEGY_DEPOSIT,
                 maxWithdrawSlippageBps: 500,

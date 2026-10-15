@@ -48,6 +48,7 @@ interface IStockAccountStrategy {
     error SellExceedsBalance();
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);
+    error OrderValueExceedsMaximum(uint256 sellValue);
     error PriceCheckFailed();
     error FeeTokenNotAllowed(address token);
     error NoBalanceForFee(address token);

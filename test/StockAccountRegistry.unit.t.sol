@@ -66,6 +66,7 @@ contract StockAccountRegistryUnitTest is Test {
             managementFeeBps: 100,
             maxBackendSlippageBps: 100,
             maxDeviationBps: 500,
+            maxOrderValue: 25_000e6,
             maxPositions: 10,
             maxStrategyDeposit: 1_000_000e6,
             maxWithdrawSlippageBps: 200,
@@ -157,6 +158,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 1800, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 1_000_000e6, "max deposit mismatch");
+        assertEq(registry.maxOrderValue(), 25_000e6, "max order value mismatch");
         assertEq(registry.managementFeeBps(), 100, "management fee mismatch");
         assertEq(registry.maxManagementFeeBps(), 200, "max management fee mismatch");
         assertEq(registry.orderSigner(), orderSigner, "order signer mismatch");
@@ -241,6 +243,14 @@ contract StockAccountRegistryUnitTest is Test {
         config.feeRecipient = address(0);
 
         vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testConstructorRevertsOnZeroMaxOrderValue() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxOrderValue = 0;
+
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxOrderValue.selector);
         new StockAccountRegistry(config);
     }
 
@@ -384,6 +394,10 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(500e6);
 
         vm.expectEmit(address(registry));
+        emit StockAccountRegistry.MaxOrderValueUpdated(25_000e6, 10_000e6);
+        registry.setMaxOrderValue(10_000e6);
+
+        vm.expectEmit(address(registry));
         emit StockAccountRegistry.ManagementFeeBpsUpdated(100, 25);
         registry.setManagementFeeBps(25);
 
@@ -409,6 +423,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 600, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 250e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 500e6, "max deposit mismatch");
+        assertEq(registry.maxOrderValue(), 10_000e6, "max order value mismatch");
         assertEq(registry.managementFeeBps(), 25, "management fee mismatch");
         assertEq(registry.orderSigner(), newSigner, "order signer mismatch");
         assertEq(registry.feeRecipient(), newRecipient, "fee recipient mismatch");
@@ -449,6 +464,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         expectNotAdmin(guardian);
         registry.setMaxStrategyDeposit(500e6);
+
+        expectNotAdmin(guardian);
+        registry.setMaxOrderValue(10_000e6);
 
         expectNotAdmin(guardian);
         registry.setManagementFeeBps(25);
@@ -500,6 +518,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setMaxStrategyDeposit(1_000_000e6);
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        registry.setMaxOrderValue(25_000e6);
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setManagementFeeBps(100);
@@ -556,6 +577,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxOrderValue.selector);
+        registry.setMaxOrderValue(0);
 
         vm.expectRevert(IStockAccountRegistry.InvalidManagementFee.selector);
         registry.setManagementFeeBps(201);
@@ -1124,6 +1148,7 @@ contract StockAccountRegistryUnitTest is Test {
         mock.setMaxDeviationBps(400);
         mock.setMinStrategyDeposit(100e6);
         mock.setMaxStrategyDeposit(500e6);
+        mock.setMaxOrderValue(10_000e6);
         mock.setTwapWindow(600);
         mock.setMaxBackendSlippageBps(50);
         mock.setMaxWithdrawSlippageBps(75);
@@ -1139,6 +1164,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(mock.maxDeviationBps(), 400, "max deviation mismatch");
         assertEq(mock.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(mock.maxStrategyDeposit(), 500e6, "max deposit mismatch");
+        assertEq(mock.maxOrderValue(), 10_000e6, "max order value mismatch");
         assertEq(mock.twapWindow(), 600, "twap window mismatch");
         assertEq(mock.maxBackendSlippageBps(), 50, "backend slippage mismatch");
         assertEq(mock.maxWithdrawSlippageBps(), 75, "withdraw slippage mismatch");
@@ -1206,6 +1232,7 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
                 managementFeeBps: 100,
                 maxBackendSlippageBps: 100,
                 maxDeviationBps: 500,
+                maxOrderValue: 25_000e6,
                 maxPositions: 10,
                 maxStrategyDeposit: 1_000_000e6,
                 maxWithdrawSlippageBps: 200,

@@ -21,6 +21,7 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     address public override feeRecipient;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
+    uint256 public override maxOrderValue;
     uint16 public override managementFeeBps;
     uint16 public override maxManagementFeeBps = 200;
     uint16 public override backendSlippageCeilingBps = 500;
@@ -49,6 +50,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setMaxStrategyDeposit(uint256 value) external {
         maxStrategyDeposit = value;
+    }
+
+    function setMaxOrderValue(uint256 value) external {
+        maxOrderValue = value;
     }
 
     function setTwapWindow(uint32 value) external {

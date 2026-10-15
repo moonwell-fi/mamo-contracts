@@ -304,6 +304,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 sellHeld = _heldValue(tokens, values, sellToken);
         uint256 available = IERC20(sellToken).balanceOf(address(this));
         uint256 sellValue = sellToken == address(asset) ? sellAmount : (sellHeld * sellAmount) / available;
+        if (sellValue > stockRegistry.maxOrderValue()) revert OrderValueExceedsMaximum(sellValue);
         uint256 buyValue = (sellValue * Math.max(buyAmount, expectedOut)) / expectedOut;
 
         uint256 navAfter = nav - sellValue + buyValue;

@@ -146,6 +146,7 @@ contract DeployStockAccountSystem is MultisigProposal {
             managementFeeBps: cfg.managementFeeBps,
             maxBackendSlippageBps: cfg.maxBackendSlippageBps,
             maxDeviationBps: cfg.maxDeviationBps,
+            maxOrderValue: cfg.maxOrderValue,
             maxPositions: cfg.maxPositions,
             maxStrategyDeposit: cfg.maxStrategyDeposit,
             maxWithdrawSlippageBps: cfg.maxWithdrawSlippageBps,
@@ -489,6 +490,7 @@ contract DeployStockAccountSystem is MultisigProposal {
         assertEq(stockRegistry.twapWindow(), cfg.twapWindow, "Registry twapWindow mismatch");
         assertEq(stockRegistry.minStrategyDeposit(), cfg.minStrategyDeposit, "Registry minStrategyDeposit mismatch");
         assertEq(stockRegistry.maxStrategyDeposit(), cfg.maxStrategyDeposit, "Registry maxStrategyDeposit mismatch");
+        assertEq(stockRegistry.maxOrderValue(), cfg.maxOrderValue, "Registry maxOrderValue mismatch");
         assertFalse(stockRegistry.paused(), "Registry should not be paused");
 
         assertTrue(

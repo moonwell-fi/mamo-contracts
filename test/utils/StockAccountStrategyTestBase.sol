@@ -66,6 +66,7 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMaxDeviationBps(1000);
         stockRegistry.setMinStrategyDeposit(MIN_DEPOSIT);
         stockRegistry.setMaxStrategyDeposit(CAP);
+        stockRegistry.setMaxOrderValue(CAP);
         stockRegistry.setMaxBackendSlippageBps(100);
         stockRegistry.setManagementFeeBps(100);
         stockRegistry.setPriceChecker(priceChecker);
