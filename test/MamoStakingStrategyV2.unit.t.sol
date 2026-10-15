@@ -247,6 +247,36 @@ contract MamoStakingStrategyV2UnitTest is Test {
         new ERC1967Proxy(address(impl), abi.encodeCall(MamoStakingStrategyV2.initialize, (params)));
     }
 
+    function test_compoundAndReinvest_holdTheMamoWhileMultiRewardsIsPaused() public {
+        vm.prank(admin);
+        multiRewards.setPaused(true);
+        cbBtc.mint(address(strategy), 1e6);
+
+        mamo.mint(user, 1e18);
+        vm.startPrank(user);
+        mamo.approve(address(strategy), 1e18);
+        vm.expectRevert("This action cannot be performed while the contract is paused");
+        strategy.deposit(1e18);
+        vm.stopPrank();
+
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.MamoHeld(10_000e18);
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.MamoHeld(10_000e18);
+        vm.prank(backend);
+        strategy.reinvest(_destinations(address(0), address(0)));
+        assertEq(mamo.balanceOf(address(strategy)), 10_000e18, "held on the account");
+
+        vm.prank(admin);
+        multiRewards.setPaused(false);
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+        assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 10_000e18, "staked by the next compound");
+    }
+
     function test_setRoute_validatesTheRoute() public {
         MockHopPool stockUsdc = new MockHopPool(address(usdc), address(stock));
         MamoStakingRegistryV2.Hop[] memory route = new MamoStakingRegistryV2.Hop[](1);

@@ -68,6 +68,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
     event ReinvestRewardTokenHeld(address indexed rewardToken, uint256 amount);
     event CompoundRewardTokenHeld(address indexed rewardToken, uint256 amount);
+    event MamoHeld(uint256 amount);
     event Compounded(uint256 mamoAmount);
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
@@ -446,7 +447,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
         // Stake all MAMO
         uint256 totalMamo = mamoToken.balanceOf(address(this));
-        _stakeMamo(totalMamo);
+        _restakeMamo(totalMamo);
 
         emit Compounded(totalMamo);
     }
@@ -466,7 +467,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         uint256 mamoBalance = mamoToken.balanceOf(address(this));
 
         // Stake MAMO
-        _stakeMamo(mamoBalance);
+        _restakeMamo(mamoBalance);
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
@@ -620,5 +621,14 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
         mamoToken.forceApprove(address(multiRewards), amount);
         multiRewards.stake(amount);
+    }
+
+    /// @notice Stakes for compound and reinvest, holding the MAMO while MultiRewards is paused and refuses stake
+    function _restakeMamo(uint256 amount) internal {
+        if (amount != 0 && multiRewards.paused()) {
+            emit MamoHeld(amount);
+            return;
+        }
+        _stakeMamo(amount);
     }
 }
