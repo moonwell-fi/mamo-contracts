@@ -105,6 +105,19 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
         _tokenConfig[token] = cfg;
     }
 
+    /// @notice Drops a token from the list and resets its status to None, as the registry's delistToken does
+    function delistToken(address token) external {
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokens[i] == token) {
+                _tokens[i] = _tokens[_tokens.length - 1];
+                _tokens.pop();
+                break;
+            }
+        }
+        _listed[token] = false;
+        delete _tokenConfig[token];
+    }
+
     function tokenConfig(address token) external view override returns (TokenConfig memory) {
         return _tokenConfig[token];
     }

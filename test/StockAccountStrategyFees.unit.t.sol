@@ -643,6 +643,29 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(msft.balanceOf(user), 100e18, "the in-kind exit still works");
     }
 
+    /// @dev The real checker refuses to price an unlisted token, which the mock models with a zero rate
+    function testADelistedTokenStillExitsThroughWithdrawToken() public {
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+        uint256 principalBefore = strategy.principal();
+
+        stockRegistry.delistToken(address(msft));
+        _cannotPrice(address(msft));
+
+        vm.warp(startTime + 30 days);
+        uint256 due = strategy.feeDue();
+        assertEq(due, _feeValue(5_000e18, 30 days), "the fee runs on the listed holdings only");
+
+        vm.prank(user);
+        strategy.withdrawToken(address(msft), 100e18);
+
+        assertEq(msft.balanceOf(user), 100e18, "the owner receives the delisted tokens");
+        assertEq(usdc.balanceOf(feeRecipient), due, "the fee is settled from the asset");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
+        assertEq(strategy.principal(), principalBefore, "principal is not reduced for the unpriced leg");
+    }
+
     /// @dev An oracle outage fails both directions, which the mock models with a zero rate each way
     function _cannotPrice(address token) internal {
         priceChecker.setRate(token, address(usdc), 0);
