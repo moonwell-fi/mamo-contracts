@@ -35,7 +35,7 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  *      `script/stock-accounts/vnet-up.sh` drives; the two are deliberately not merged, because the
  *      vnet path impersonates unlocked admins and this one has to produce one signable batch.
  *
- *      ONE SAFE IS WHAT MAKES ONE BATCH POSSIBLE. In `8453_PROD.json` the stock registry admin, the
+ *      ONE SAFE IS WHAT MAKES ONE BATCH POSSIBLE. In `8453_PROD-016.json` the stock registry admin, the
  *      Mamo registry's `DEFAULT_ADMIN_ROLE` holder and the existing price checker's `owner()` are all
  *      MAMO_MULTISIG. {preBuildMock} asserts that identity rather than assuming it: if any of the
  *      three moves, the batch stops being executable and this proposal has to be split.
@@ -94,7 +94,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     bool internal _slotsSnapshotted;
 
     constructor() {
-        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD.json");
+        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD-016.json");
         vm.makePersistent(address(deployConfig));
 
         strategyTypeId = deployConfig.getConfig().strategyTypeId;

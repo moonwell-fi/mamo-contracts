@@ -19,6 +19,6 @@
   "minTargetBps": 500,
   "orderSigner": "DEPLOYER_EOA",
   "placeholderPriceChecker": "CHAINLINK_SWAP_CHECKER_PROXY",
-  "strategyTypeId": 5,
+  "strategyTypeId": 7,
   "twapWindow": 180
 }
