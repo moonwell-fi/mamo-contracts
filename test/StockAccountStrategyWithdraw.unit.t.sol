@@ -267,6 +267,25 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         strategy.withdraw(1_500e18, 100, new address[](1), new uint256[](0), block.timestamp);
     }
 
+    function testAHaltedTokenWhoseBalanceReadRevertsIsSkipped() public {
+        _halt(address(new RevertingBalanceToken()));
+
+        assertEq(strategy.getNAV(), 4_500e18, "valued without reading the halted balance");
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 4_500e18, "user asset");
+
+        // The emptied account still answers the fee clock and the in-kind sweep without reading it
+        vm.warp(block.timestamp + 1);
+        strategy.payFees(address(usdc));
+        assertEq(strategy.lastFeePaid(), block.timestamp, "an empty account advances the clock");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+    }
+
     function testWithdrawOnlyOwner() public {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
@@ -301,5 +320,11 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
                 chainlinkFeed: address(0)
             })
         );
+    }
+}
+
+contract RevertingBalanceToken {
+    function balanceOf(address) external pure returns (uint256) {
+        revert("balanceOf");
     }
 }

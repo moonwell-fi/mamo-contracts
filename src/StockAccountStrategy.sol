@@ -333,12 +333,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         ISlippagePriceChecker checker = stockRegistry.priceChecker();
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
-            if (balance == 0) {
+            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) {
                 continue;
             }
 
-            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) {
+            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
+            if (balance == 0) {
                 continue;
             }
 
@@ -664,7 +664,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _sendAllInKind(address token, address to) internal {
-        uint256 balance = IERC20(token).balanceOf(address(this));
+        uint256 balance = _balanceOrZero(token);
         if (balance == 0) return;
 
         (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, balance)));
@@ -715,10 +715,18 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         address[] memory tokens = stockRegistry.allTokens();
         for (uint256 i = 0; i < tokens.length; i++) {
-            if (IERC20(tokens[i]).balanceOf(address(this)) > 0) return false;
+            if (_balanceOrZero(tokens[i]) > 0) return false;
         }
 
         return true;
+    }
+
+    function _balanceOrZero(address token) internal view returns (uint256) {
+        try IERC20(token).balanceOf(address(this)) returns (uint256 balance) {
+            return balance;
+        } catch {
+            return 0;
+        }
     }
 
     /// @dev New funds must not pay for time before they arrived, so the fee on the balance already held is settled first
@@ -783,9 +791,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 count;
 
         for (uint256 i = 0; i < listed.length; i++) {
+            if (stockRegistry.tokenConfig(listed[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
             uint256 balance = IERC20(listed[i]).balanceOf(address(this));
             if (balance == 0) continue;
-            if (stockRegistry.tokenConfig(listed[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
 
             (bool priced, uint256 value) = _tryValue(checker, listed[i], balance);
             if (!priced) continue;
