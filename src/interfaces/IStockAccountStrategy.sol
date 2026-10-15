@@ -46,7 +46,6 @@ interface IStockAccountStrategy {
     error OrderReceiverMismatch();
     error OrderFeeMustBeZero();
     error InvalidAppData();
-    error OrderExpiresTooSoon();
     error OrderExpiresTooLate();
     error TokensMustDiffer();
     error SellTokenNotSellable(address token);

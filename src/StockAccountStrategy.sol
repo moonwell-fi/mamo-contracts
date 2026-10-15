@@ -39,9 +39,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /// @notice Smallest value, in asset units, a cash exit sells of one token
     uint256 internal constant MIN_SELL_VALUE = 1e6;
 
-    /// @notice Shortest time an order may stay valid for
-    uint256 internal constant MIN_ORDER_VALIDITY = 5 minutes;
-
     /// @notice Longest time an order may stay valid for
     uint256 internal constant MAX_ORDER_VALIDITY = 30 minutes;
 
@@ -274,7 +271,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (order.receiver != address(this)) revert OrderReceiverMismatch();
         if (order.feeAmount != 0) revert OrderFeeMustBeZero();
         if (order.appData != keccak256(bytes(appDataDocument(address(order.buyToken))))) revert InvalidAppData();
-        if (order.validTo < block.timestamp + MIN_ORDER_VALIDITY) revert OrderExpiresTooSoon();
         if (order.validTo > block.timestamp + MAX_ORDER_VALIDITY) revert OrderExpiresTooLate();
 
         address sellToken = address(order.sellToken);

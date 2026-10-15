@@ -203,14 +203,6 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(order);
     }
 
-    function testRevertsWhenOrderExpiresTooSoon() public {
-        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
-        order.validTo = uint32(block.timestamp + 4 minutes);
-
-        vm.expectRevert(IStockAccountStrategy.OrderExpiresTooSoon.selector);
-        _check(order);
-    }
-
     function testRevertsWhenOrderExpiresTooFarInTheFuture() public {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
         order.validTo = uint32(block.timestamp + 31 minutes);
