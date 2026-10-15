@@ -244,10 +244,13 @@ contract DropAutomationV2 is Ownable {
     function withdrawGauge(address gauge, uint256 amount, address recipient) external onlyOwner {
         if (recipient == address(0)) revert ZeroAddress();
 
+        IERC20 lp = IERC20(IAerodromeGauge(gauge).stakingToken());
+        uint256 before = lp.balanceOf(address(this));
         IAerodromeGauge(gauge).withdraw(amount);
-        IERC20(IAerodromeGauge(gauge).stakingToken()).safeTransfer(recipient, amount);
+        uint256 received = lp.balanceOf(address(this)) - before;
+        lp.safeTransfer(recipient, received);
 
-        emit GaugeWithdrawn(gauge, recipient, amount);
+        emit GaugeWithdrawn(gauge, recipient, received);
     }
 
     /**

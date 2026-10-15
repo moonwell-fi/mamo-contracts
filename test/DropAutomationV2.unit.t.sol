@@ -28,11 +28,20 @@ contract MockQuoter {
 }
 
 contract MockGauge {
-    address public stakingToken = address(1);
+    MockERC20Decimals public immutable stakingToken;
     uint256 public claims;
+
+    constructor(MockERC20Decimals stakingToken_) {
+        stakingToken = stakingToken_;
+    }
 
     function getReward(address) external {
         claims++;
+    }
+
+    /// @dev Returns one unit less than asked
+    function withdraw(uint256 amount) external {
+        stakingToken.mint(msg.sender, amount - 1);
     }
 }
 
@@ -205,7 +214,7 @@ contract DropAutomationV2UnitTest is Test {
     }
 
     function test_gauges() public {
-        MockGauge gauge = new MockGauge();
+        MockGauge gauge = new MockGauge(new MockERC20Decimals("LP", 18));
 
         vm.prank(owner);
         drop.addGauge(address(gauge));
@@ -216,6 +225,21 @@ contract DropAutomationV2UnitTest is Test {
         vm.prank(owner);
         drop.removeGauge(address(gauge));
         assertEq(drop.getGauges().length, 0);
+    }
+
+    function test_withdrawGauge_sendsWhatTheGaugeReturned() public {
+        MockERC20Decimals lp = new MockERC20Decimals("LP", 18);
+        MockGauge gauge = new MockGauge(lp);
+        lp.mint(address(drop), 5);
+        address recipient = makeAddr("recipient");
+
+        vm.expectEmit(address(drop));
+        emit DropAutomationV2.GaugeWithdrawn(address(gauge), recipient, 99);
+        vm.prank(owner);
+        drop.withdrawGauge(address(gauge), 100, recipient);
+
+        assertEq(lp.balanceOf(recipient), 99);
+        assertEq(lp.balanceOf(address(drop)), 5, "other LP held is untouched");
     }
 
     function test_accessControl() public {
