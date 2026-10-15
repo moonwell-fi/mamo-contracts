@@ -302,13 +302,14 @@ contract DropAutomationV2 is Ownable {
 
     function _notify(address token) internal returns (bool) {
         uint256 amount = IERC20(token).balanceOf(address(this));
-        (, uint256 duration,,,,) = MULTI_REWARDS.rewardData(token);
+        (, uint256 duration, uint256 periodFinish, uint256 rewardRate,,) = MULTI_REWARDS.rewardData(token);
 
         // Below one unit per second the stream's rate rounds to zero, so the balance waits for the next drop
         if (amount == 0 || amount < duration) return false;
 
-        // The remainder of the division by the duration would never stream, so it is kept for the next drop
-        if (duration != 0) amount -= amount % duration;
+        // MultiRewards divides amount plus the running period's leftover; that sum's remainder is kept back
+        uint256 leftover = block.timestamp < periodFinish ? (periodFinish - block.timestamp) * rewardRate : 0;
+        if (duration != 0) amount -= (amount + leftover) % duration;
 
         try this.notifyReward(token, amount) {
             emit RewardNotified(token, amount);

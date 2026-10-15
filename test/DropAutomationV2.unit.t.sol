@@ -111,6 +111,22 @@ contract DropAutomationV2UnitTest is Test {
         assertEq(rate, (topUp + 4 days * firstRate) / DURATION, "the leftover rolls into the new period");
     }
 
+    function test_createDrop_topUpTrimsTheSumWithTheLeftover() public {
+        stock.mint(address(drop), 7e8);
+        _createDrop();
+
+        skip(3 days);
+        stock.mint(address(drop), 7e8);
+        (,, uint256 periodFinish, uint256 rate,,) = multiRewards.rewardData(address(stock));
+        uint256 leftover = (periodFinish - block.timestamp) * rate;
+        uint256 before = stock.balanceOf(address(multiRewards));
+        _createDrop();
+        uint256 notified = stock.balanceOf(address(multiRewards)) - before;
+
+        assertEq((notified + leftover) % DURATION, 0);
+        assertEq(multiRewards.getRewardForDuration(address(stock)), notified + leftover, "no dust left unstreamed");
+    }
+
     function test_createDrop_failingTokenDoesNotBlockTheRest() public {
         vm.prank(owner);
         drop.addRewardToken(address(weth));
