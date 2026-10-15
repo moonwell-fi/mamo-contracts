@@ -691,7 +691,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (balance == 0) return;
 
         (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, balance)));
-        bool sent = ok && (ret.length == 0 ? token.code.length > 0 : ret.length >= 32 && abi.decode(ret, (bool)));
+        bool sent =
+            ok && (ret.length == 0 ? token.code.length > 0 : ret.length >= 32 && abi.decode(ret, (uint256)) == 1);
 
         if (sent) emit WithdrawToken(token, balance);
         else emit WithdrawSkipped(token, balance);

@@ -508,6 +508,25 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.principal(), 5e18, "principal keeps the value left behind");
     }
 
+    function testWithdrawAllInKindSkipsATokenWhoseTransferReturnsNeitherTrueNorFalse() public {
+        TwoReturningToken odd = new TwoReturningToken();
+        _listActive(address(odd));
+        priceChecker.setRate(address(odd), address(usdc), 1e18);
+        odd.setBalance(address(strategy), 5e18);
+
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.WithdrawSkipped(address(odd), 5e18);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(nvda.balanceOf(user), 10e18, "the other stock still goes out");
+    }
+
     function testWithdrawAllInKindOnlyOwner() public {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
@@ -602,5 +621,18 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
                 chainlinkFeed: address(0)
             })
         );
+    }
+}
+
+/// @dev Returns 2 from transfer, a word that is not a valid bool, and moves nothing
+contract TwoReturningToken {
+    mapping(address => uint256) public balanceOf;
+
+    function setBalance(address account, uint256 amount) external {
+        balanceOf[account] = amount;
+    }
+
+    function transfer(address, uint256) external pure returns (uint256) {
+        return 2;
     }
 }
