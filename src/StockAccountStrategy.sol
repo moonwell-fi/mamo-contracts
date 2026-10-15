@@ -151,7 +151,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @notice Sends a token held by the account to the owner without selling anything
      * @param token The token to send, the asset included
      * @param amount The amount to send
-     * @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
+     * @dev The fee comes out of the other holdings first and out of this token only for what they leave,
+     *      and a fee that cannot be computed or paid stays owed
      */
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
         _tryPayFeesBefore(token);
@@ -668,12 +669,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         emit FeesPaid(credited, token, amount);
     }
 
-    /// @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
+    /// @dev The exit token pays only what the other holdings cannot, and a fee that cannot be paid stays owed
     function _tryPayFeesBefore(address token) internal {
-        if (_isFeeToken(token)) {
+        try this.payFeesFromAnyExcept(token) {} catch {}
+
+        if (!_feeSettled() && _isFeeToken(token)) {
             try this.payFees(token) {} catch {}
-        } else {
-            try this.payFeesFromAny() {} catch {}
         }
     }
 
@@ -705,10 +706,16 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /// @notice Pays the fee accrued since the last payment out of the balances the account holds, callable by anyone
     /// @dev Walks the balances until the fee is settled, so an exit cannot leave a remainder nothing can collect
     function payFeesFromAny() external override {
-        _payFeesFromAny();
+        _payFeesFromAny(address(0));
     }
 
-    function _payFeesFromAny() internal {
+    /// @dev External only so an exit can wrap the walk in try/catch; the account is the only caller
+    function payFeesFromAnyExcept(address skip) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        _payFeesFromAny(skip);
+    }
+
+    function _payFeesFromAny(address skip) internal {
         if (asset.balanceOf(address(this)) > 0) {
             _payFees(address(asset));
         }
@@ -718,7 +725,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         (address[] memory tokens, uint256[] memory values,,) = _valuation();
 
         for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
-            if (values[i] > 0) {
+            if (values[i] > 0 && tokens[i] != skip) {
                 _payFees(tokens[i]);
             }
         }
@@ -751,7 +758,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @dev New funds must not pay for time before they arrived, so the fee on the balance already held is settled first
     function _settleFeesBeforeDeposit() internal {
-        _payFeesFromAny();
+        _payFeesFromAny(address(0));
 
         // A remainder worth nothing on the balance held would otherwise be charged on the new funds
         (,,, bool complete) = _valuation();

@@ -20,6 +20,7 @@ interface IStockAccountStrategy {
     error ZeroAddress();
     error StrategyTypeIdNotSet();
     error ZeroAmount();
+    error NotSelf();
     error TokenNotActive(address token);
     error TokenNotListed(address token);
     error AccountBelowMinimum(uint256 nav);

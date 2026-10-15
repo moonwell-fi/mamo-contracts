@@ -400,12 +400,12 @@ Three things call it:
   NAV, so the cost grows with the basket: at `maxPositions` of 10, on a registry listing eleven tokens,
   the vnet measures `payFees` at 667,000 gas, about 3x inside the limit the document declares.
 - **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it.
-  `withdraw` and `withdrawAll` pay in USDC, after their sells. `withdrawToken(token)` pays in that
-  token; if it is Halted or unlisted the fee falls back to USDC and then to the sellable stocks.
+  `withdraw` and `withdrawAll` pay in USDC, after their sells. `withdrawToken(token)` pays from USDC
+  and then the other priced stocks, and out of `token` itself only for what they leave.
   `withdrawAllInKind` pays from USDC and then walks the listed tokens, stopping as soon as the period
   is settled, because the account is empty when it returns and anything left uncollected there is
-  uncollectable forever. It only moves the clock outright when the NAV is zero, which is the one case
-  where nothing is owed.
+  uncollectable forever. It only moves the clock outright when the account holds no balance at all,
+  which is the one case where nothing is owed.
 - **A poke.** An account that neither trades nor withdraws just keeps owing more; the backend calls
   `payFees(token)` on it directly, naming whichever balance it wants the fee taken out of.
 
@@ -521,7 +521,7 @@ its row up by address (`weights_index`) instead of taking the first one.
 | `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; the appData post-hook pays a day of fee in the token the order buys — NVDAc for the buy-in, the collector's USDC untouched; the same order carrying the document for the sell token is refused with `InvalidAppData`; NAV and weights survive the trade; the same trade sized past the band is refused by the account and therefore by the settlement; a solver-authored order with no backend signature is refused both ways and accepted once signed; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue, the buyer paying its fee in NVDAc and the seller in USDC. |
 | `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned (passed back as the owner's per-token caps, with a deadline) and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
-| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays in NVDAc and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
+| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays its fee out of the cash, not the token it sends, and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
 | `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — those the deploy already listed are left as they are — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 2,000,000 gas the appData post-hook is given. |
 
 Two things the range rule makes concrete and the scenarios assert. An account sitting on its targets

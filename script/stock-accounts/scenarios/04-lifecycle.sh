@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Account lifecycle: deterministic address, buy-in, basket change, and every way the management fee is
-# paid outside a settlement -- a cash withdrawal paying in USDC, an in-kind withdrawal paying in the
-# token it sends, a poke on an idle account, and a halted token that can no longer settle the fee but
-# is still withdrawable, the fee then coming out of the cash instead.
+# paid outside a settlement -- a cash withdrawal paying in USDC, an in-kind withdrawal paying out of
+# the cash rather than the token it sends, a poke on an idle account, and a halted token that can no
+# longer settle the fee but is still withdrawable, the fee then coming out of the cash instead.
 # Reads here are arguments to an assert or to `send`: a failed read prints nothing, the asserts refuse
 # an empty operand outright (see lib.sh), so it is recorded as a FAIL and cannot pass, and `send` will
 # not build a transaction out of one. Reads that decide control flow are captured into a variable
@@ -89,27 +89,27 @@ assert_eq "the owner still received what was asked" \
   "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_BEFORE")" "$FEE_WITHDRAW"
 record "$SCEN" "month of fee: paid vs feeDue" 1 "$PAID vs $FEE_DUE over ${CREDITED}s"
 
-# An in-kind withdrawal pays in the token it sends, not in cash.
+# An in-kind withdrawal settles its fee out of the cash first, so the token it sends is not eaten into.
 increase_time "$DAY"
 
 PART=$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT") // 2")
-FEE_DUE_NVDA=$(fee_due_in "$ACCT" "$NVDA")
-COLLECTOR_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")
-COLLECTOR_USDC_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
+FEE_DUE=$(fee_due "$ACCT")
+COLLECTOR_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")
+COLLECTOR_NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")
 OWNER_NVDA=$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C")
 
 RECEIPT=$(send "$USER_C" "$ACCT" 'withdrawToken(address,uint256)' "$NVDA" "$PART")
-PAID_NVDA=$(fees_paid "$RECEIPT" "$ACCT" "$NVDA")
+PAID=$(fees_paid "$RECEIPT" "$ACCT" "$USDC")
 
-assert_eq "withdrawToken paid its fee in NVDAc" "$(fees_paid_token "$RECEIPT" "$ACCT")" "$NVDA"
-assert_eq "collector NVDAc grew by exactly that fee" \
-  "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID_NVDA"
-assert_eq "collector USDC untouched by an in-kind withdrawal" \
-  "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR")" "$COLLECTOR_USDC_BEFORE"
-assert_approx "that fee is feeDueIn(NVDAc) read before it" "$PAID_NVDA" "$FEE_DUE_NVDA" "$FEE_TOL_BPS"
+assert_eq "withdrawToken paid its fee in USDC" "$(fees_paid_token "$RECEIPT" "$ACCT")" "$USDC"
+assert_eq "collector USDC grew by exactly that fee" \
+  "$(bn "$(call "$USDC" 'balanceOf(address)(uint256)' "$COLLECTOR") - $COLLECTOR_BEFORE")" "$PAID"
+assert_eq "collector NVDAc untouched by an in-kind withdrawal" \
+  "$(call "$NVDA" 'balanceOf(address)(uint256)' "$COLLECTOR")" "$COLLECTOR_NVDA_BEFORE"
+assert_approx "that fee is feeDue read before it" "$PAID" "$FEE_DUE" "$FEE_TOL_BPS"
 assert_eq "the owner received the tokens asked for" \
   "$(bn "$(call "$NVDA" 'balanceOf(address)(uint256)' "$USER_C") - $OWNER_NVDA")" "$PART"
-record "$SCEN" "in-kind fee: paid vs feeDueIn(NVDAc)" 1 "$PAID_NVDA vs $FEE_DUE_NVDA"
+record "$SCEN" "in-kind fee: paid vs feeDue" 1 "$PAID vs $FEE_DUE"
 
 # An account nobody touches is poked instead, which is how the backend settles an idle one. The poke
 # names the token, so the backend can take it out of a position rather than out of the cash.

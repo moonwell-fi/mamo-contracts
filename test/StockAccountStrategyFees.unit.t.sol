@@ -376,21 +376,26 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(address(strategy)), 0, "idle drained");
     }
 
-    function testWithdrawTokenPaysTheFeeInThatToken() public {
+    function testWithdrawTokenPaysTheFeeFromTheCashFirst() public {
         vm.warp(startTime + 30 days);
 
-        uint256 fee = strategy.feeDueIn(address(nvda));
+        uint256 due = strategy.feeDue();
 
         vm.prank(user);
-        strategy.withdrawToken(address(nvda), 10e18 - fee);
+        strategy.withdrawToken(address(nvda), 10e18);
 
-        assertEq(nvda.balanceOf(feeRecipient), fee, "nvda fee");
-        assertEq(nvda.balanceOf(user), 10e18 - fee, "user balance");
-        assertEq(nvda.balanceOf(address(strategy)), 0, "account emptied");
-        assertEq(usdc.balanceOf(feeRecipient), 0, "asset untouched");
+        assertEq(usdc.balanceOf(feeRecipient), due, "the cash pays the fee");
+        assertEq(nvda.balanceOf(feeRecipient), 0, "the exit token is not touched");
+        assertEq(nvda.balanceOf(user), 10e18, "user balance");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
     }
 
-    function testWithdrawingTheWholeBalanceSendsWhatIsLeftAfterTheFee() public {
+    function testTheExitTokenPaysOnlyWhenNothingElseCanAndTheOwnerGetsTheRest() public {
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18);
+        strategy.withdrawToken(address(aapl), 20e18);
+        vm.stopPrank();
+
         vm.warp(startTime + 30 days);
         uint256 fee = strategy.feeDueIn(address(nvda));
 
@@ -413,15 +418,15 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(aapl.balanceOf(address(strategy)), 0, "account emptied");
     }
 
-    function testRecoveringTheWholeBalanceSendsWhatIsLeftAfterTheFee() public {
+    function testRecoveringTheWholeBalancePaysTheFeeFromTheCash() public {
         vm.warp(startTime + 30 days);
-        uint256 fee = strategy.feeDueIn(address(nvda));
+        uint256 due = strategy.feeDue();
 
         vm.prank(user);
         strategy.recoverERC20(address(nvda), user, 10e18);
 
-        assertEq(nvda.balanceOf(feeRecipient), fee, "the fee is paid first");
-        assertEq(nvda.balanceOf(user), 10e18 - fee, "the owner gets the rest");
+        assertEq(usdc.balanceOf(feeRecipient), due, "the cash pays the fee");
+        assertEq(nvda.balanceOf(user), 10e18, "the owner gets the whole balance");
     }
 
     function testWithdrawAllInKindPaysTheFeeInTheAssetWhenItIsHeld() public {
@@ -547,14 +552,15 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(feeRecipient), 0, "the old recipient gets nothing");
     }
 
-    function testRecoverERC20SettlesTheFeeBeforeRecovering() public {
+    function testRecoverERC20OfTheCashStillPaysTheFeeInCashFirst() public {
         vm.warp(startTime + 365 days);
         uint256 owed = strategy.feeDue();
 
         vm.prank(user);
         strategy.recoverERC20(address(usdc), user, 100e18);
 
-        assertEq(usdc.balanceOf(feeRecipient), owed, "the whole fee is paid");
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the fee is paid in the asset even when the asset is leaving");
+        assertEq(nvda.balanceOf(feeRecipient), 0, "no stock is sold for the fee");
         assertEq(strategy.lastFeePaid(), startTime + 365 days, "the period is settled");
         assertEq(usdc.balanceOf(user), 100e18, "the owner gets the amount asked for");
     }
@@ -575,6 +581,11 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
     }
 
     function testRecoverERC20StillRecoversWhenTheFeeCannotBePriced() public {
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), 1_000e18);
+        strategy.withdrawToken(address(aapl), 20e18);
+        vm.stopPrank();
+
         _cannotPrice(address(nvda));
         vm.warp(startTime + 365 days);
 
@@ -582,7 +593,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         strategy.recoverERC20(address(nvda), user, 10e18);
 
         assertEq(nvda.balanceOf(user), 10e18, "the owner is not trapped");
-        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing is paid");
+        assertEq(nvda.balanceOf(feeRecipient), 0, "nothing is paid");
         assertEq(strategy.lastFeePaid(), startTime, "the fee stays owed");
     }
 
@@ -716,7 +727,7 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
     }
 
-    function testWithdrawTokenSurvivesAHoldingThatCannotBePricedAndTheFeeStaysCollectable() public {
+    function testWithdrawTokenOfAnUnpriceableHoldingPaysTheFeeOnThePricedOnesFromTheCash() public {
         _fundToken(msft, funder, 100e18);
         vm.prank(funder);
         strategy.depositToken(address(msft), 100e18);
@@ -728,19 +739,21 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         strategy.withdrawToken(address(msft), 100e18);
 
         assertEq(msft.balanceOf(user), 100e18, "user msft");
-        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing could be charged");
-        assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
+        assertEq(usdc.balanceOf(feeRecipient), _feeValue(5_000e18, 30 days), "the fee on what can be priced");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
+    }
 
-        priceChecker.setRate(address(msft), address(usdc), 50e18);
-        priceChecker.setRate(address(usdc), address(msft), 2e16);
+    function testWithdrawTokenOfDustWorthLessThanTheFeeStillReachesTheOwner() public {
+        msft.mint(address(strategy), 1e15);
+        vm.warp(startTime + 365 days);
+        uint256 owed = strategy.feeDue();
 
-        uint256 due = strategy.feeDue();
-        assertEq(due, _feeValue(5_000e18, 30 days), "the whole period is still owed");
+        vm.prank(user);
+        strategy.withdrawToken(address(msft), 1e15);
 
-        strategy.payFees(address(usdc));
-
-        assertEq(usdc.balanceOf(feeRecipient), due, "and it is collected once the price is back");
-        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the clock catches up");
+        assertEq(msft.balanceOf(user), 1e15, "the dust reached the owner");
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the fee was paid in cash");
+        assertEq(msft.balanceOf(feeRecipient), 0, "and not out of the dust");
     }
 
     function testInKindExitStillPaysWhenTheUnpriceableHoldingIsHalted() public {
@@ -799,5 +812,10 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         assertEq(nvda.balanceOf(address(strategy)), 10e18 - amounts[0], "nvda sold");
         assertEq(aapl.balanceOf(address(strategy)), 20e18 - amounts[1], "aapl sold");
+    }
+
+    function testTheFeeWalkThatSkipsATokenIsOnlyCallableByTheAccount() public {
+        vm.expectRevert(IStockAccountStrategy.NotSelf.selector);
+        strategy.payFeesFromAnyExcept(address(usdc));
     }
 }
