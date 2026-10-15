@@ -40,12 +40,13 @@ contract StockAccountRegistryUnitTest is Test {
     address internal feeRecipient = makeAddr("feeRecipient");
     address internal clFactory = makeAddr("clFactory");
 
-    address internal asset = makeAddr("asset");
+    address internal asset;
     address internal token;
     address internal pool;
     address internal feed;
 
     function setUp() public {
+        asset = address(new MockERC20Decimals("USDC", 6));
         MockSwapRouter mockRouter = new MockSwapRouter();
         mockRouter.setFactory(clFactory);
         router = mockRouter;
@@ -55,6 +56,7 @@ contract StockAccountRegistryUnitTest is Test {
         feed = _stub();
 
         checker.setRate(token, asset, 1e18);
+        checker.setRate(asset, token, 1e18);
 
         registry = new StockAccountRegistry(defaultConfig());
     }
@@ -769,6 +771,7 @@ contract StockAccountRegistryUnitTest is Test {
         for (uint256 i = 0; i < registry.MAX_LISTED_TOKENS(); i++) {
             address listed = address(new MockERC20Decimals("TOKEN", 8));
             checker.setRate(listed, asset, 1e18);
+            checker.setRate(asset, listed, 1e18);
             registry.listToken(
                 listed,
                 IStockAccountRegistry.TokenConfig({
@@ -860,6 +863,22 @@ contract StockAccountRegistryUnitTest is Test {
             uint256(IStockAccountRegistry.TokenStatus.None),
             "token should stay unlisted"
         );
+    }
+
+    function testListTokenRefusesACheckerThatPricesOnlyTokenToAsset() public {
+        checker.setRate(asset, token, 0);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, token));
+        vm.prank(admin);
+        registry.listToken(token, activeConfig());
+
+        checker.setRate(asset, token, 1);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, token));
+        vm.prank(admin);
+        registry.listToken(token, activeConfig());
+
+        checker.setRate(asset, token, 1e18);
+        listDefaultToken();
+        assertEq(registry.allTokens().length, 1, "two-way checker refused");
     }
 
     function testListTokenRevertsWhenQuoteIsZero() public {
@@ -1014,6 +1033,7 @@ contract StockAccountRegistryUnitTest is Test {
     function _listFreshToken() internal returns (address listed) {
         listed = address(new MockERC20Decimals("TOKEN", 8));
         checker.setRate(listed, asset, 1e18);
+        checker.setRate(asset, listed, 1e18);
         IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
         cfg.pool = _pairPool(listed);
         vm.prank(admin);
@@ -1418,6 +1438,7 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setPriceChecker(other);
 
         other.setRate(token, asset, 1e18);
+        other.setRate(asset, token, 1e18);
 
         vm.prank(admin);
         registry.setPriceChecker(other);

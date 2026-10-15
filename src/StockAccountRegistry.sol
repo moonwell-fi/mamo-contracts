@@ -346,8 +346,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _requirePriceable(address token) internal view {
-        uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
-        try priceChecker.getExpectedOut(oneToken, token, asset) returns (uint256 quote) {
+        _requireQuote(token, 10 ** IERC20Metadata(token).decimals(), token, asset);
+        _requireQuote(token, 10 ** IERC20Metadata(asset).decimals(), asset, token);
+    }
+
+    function _requireQuote(address token, uint256 amountIn, address fromToken, address toToken) internal view {
+        try priceChecker.getExpectedOut(amountIn, fromToken, toToken) returns (uint256 quote) {
             if (quote == 0) revert TokenNotPriceable(token);
         } catch {
             revert TokenNotPriceable(token);
