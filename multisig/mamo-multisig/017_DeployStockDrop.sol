@@ -7,12 +7,13 @@ import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 import {MamoStakingStrategyV2} from "@contracts/MamoStakingStrategyV2.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
-import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactory.sol";
+import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC5313} from "@openzeppelin/contracts/interfaces/IERC5313.sol";
@@ -23,20 +24,21 @@ import {StockAccountsConfig} from "@script/StockAccountsConfig.sol";
  * @title DeployStockDrop
  * @notice First of the stock drop proposals, the MAMO_MULTISIG batch:
  *           - deploys {DropAutomationV2}, {MamoStakingRegistryV2} (the cbBTC, WETH and USDC pools and
- *             the stock routes to MAMO), the {MamoStakingStrategyV2} implementation, a staking factory for it, and a
- *             stock account factory whose fee recipient is DropAutomationV2;
+ *             the stock routes to MAMO), the {MamoStakingStrategyV2} implementation and a staking factory for it;
  *           - as the multisig: whitelists the staking implementation under the existing staking type id so
- *             live accounts can upgrade, moves BACKEND_ROLE from the old staking and stock factories to the
- *             new ones, and configures the USDC, cbBTC and WETH -> MAMO pairs on the Chainlink checker.
- * @dev F-MAMO owns MultiRewards, DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO
- *      proposal (f-mamo/006), and the in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
+ *             live accounts can upgrade, moves BACKEND_ROLE from the old staking factory to the new one, points the
+ *             V2 stock registry's fee recipient at DropAutomationV2, and configures the USDC, cbBTC and WETH -> MAMO
+ *             pairs on the Chainlink checker.
+ * @dev Runs after mamo-multisig/019, which redeploys the stock accounts system this reads. F-MAMO owns MultiRewards,
+ *      DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO proposal (f-mamo/006), and the
+ *      in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
  */
 contract DeployStockDrop is MultisigProposal {
     string internal constant DROP_KEY = "DROP_AUTOMATION_V2";
     string internal constant STAKING_REGISTRY_KEY = "MAMO_STAKING_REGISTRY_V2";
     string internal constant STAKING_IMPL_KEY = "MAMO_STAKING_STRATEGY_V2";
     string internal constant STAKING_FACTORY_KEY = "MAMO_STAKING_STRATEGY_FACTORY_V2";
-    string internal constant STOCK_FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
+    string internal constant STOCK_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_V2";
 
     /// @notice The staking strategy type id, whose latest implementation live accounts upgrade to
     uint256 internal constant STAKING_TYPE_ID = 3;
@@ -78,7 +80,7 @@ contract DeployStockDrop is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory, stock account factory paying fees to DropAutomationV2), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new factories, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
+        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
     }
 
     // ─── deploy ──────────────────────────────────────────────────────────────────────────────────
@@ -87,7 +89,6 @@ contract DeployStockDrop is MultisigProposal {
         _deployDropAutomation();
         _deployStakingRegistry();
         _deployStakingStrategy();
-        _deployStockFactory();
     }
 
     function _deployDropAutomation() internal {
@@ -177,31 +178,6 @@ contract DeployStockDrop is MultisigProposal {
         addresses.addAddress(STAKING_FACTORY_KEY, address(factory), true);
     }
 
-    /// @dev The live factory with DropAutomationV2 as the fee recipient, which is immutable on the factory
-    function _deployStockFactory() internal {
-        if (addresses.isAddressSet(STOCK_FACTORY_KEY)) return;
-
-        StockAccountsConfig.DeploymentConfig memory cfg = deployConfig.getConfig();
-        StockAccountStrategyFactory live =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
-
-        vm.startBroadcast(addresses.getAddress("DEPLOYER_EOA"));
-        StockAccountStrategyFactory factory = new StockAccountStrategyFactory(
-            addresses.getAddress(cfg.admin),
-            addresses.getAddress(cfg.backend),
-            address(live.mamoStrategyRegistry()),
-            live.stockRegistry(),
-            live.asset(),
-            live.cowSettlement(),
-            live.strategyImplementation(),
-            live.strategyTypeId(),
-            addresses.getAddress(DROP_KEY)
-        );
-        vm.stopBroadcast();
-
-        addresses.addAddress(STOCK_FACTORY_KEY, address(factory), true);
-    }
-
     // ─── preconditions ───────────────────────────────────────────────────────────────────────────
 
     function preBuildMock() public override {
@@ -233,6 +209,11 @@ contract DeployStockDrop is MultisigProposal {
             liveRegistry.hasRole(liveRegistry.DEFAULT_ADMIN_ROLE(), fMamo), "F-MAMO should admin the live registry"
         );
         assertTrue(registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), fMamo), "F-MAMO should admin the V2 registry");
+
+        StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY));
+        assertTrue(stockRegistry.hasRole(stockRegistry.DEFAULT_ADMIN_ROLE(), multisig), "Stock registry admin");
+        assertFalse(stockRegistry.paused(), "Stock registry should not be paused");
+        assertTrue(stockRegistry.feeRecipient() != addresses.getAddress(DROP_KEY), "Stock fees already go to drop");
     }
 
     // ─── the batch ───────────────────────────────────────────────────────────────────────────────
@@ -244,13 +225,14 @@ contract DeployStockDrop is MultisigProposal {
         // 1. The upgrade target for live staking accounts, under the existing type id
         mamoRegistry.whitelistImplementation(addresses.getAddress(STAKING_IMPL_KEY), STAKING_TYPE_ID);
 
-        // 2. New accounts come only from the new factories
+        // 2. New staking accounts come only from the new factory
         mamoRegistry.grantRole(backendRole, addresses.getAddress(STAKING_FACTORY_KEY));
         mamoRegistry.revokeRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"));
-        mamoRegistry.grantRole(backendRole, addresses.getAddress(STOCK_FACTORY_KEY));
-        mamoRegistry.revokeRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
 
-        // 3. The pairs compounding prices against
+        // 3. Stock account fees fund the drop
+        StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).setFeeRecipient(addresses.getAddress(DROP_KEY));
+
+        // 4. The pairs compounding prices against
         _configurePriceChecker();
     }
 
@@ -312,14 +294,14 @@ contract DeployStockDrop is MultisigProposal {
         assertEq(mamoRegistry.latestImplementationById(STAKING_TYPE_ID), implementation, "Type id 3 should be V2");
 
         assertTrue(mamoRegistry.hasRole(backendRole, addresses.getAddress(STAKING_FACTORY_KEY)), "Staking factory role");
-        assertTrue(mamoRegistry.hasRole(backendRole, addresses.getAddress(STOCK_FACTORY_KEY)), "Stock factory role");
         assertFalse(
             mamoRegistry.hasRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY")),
             "Old staking factory should lose BACKEND_ROLE"
         );
-        assertFalse(
-            mamoRegistry.hasRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY")),
-            "Old stock factory should lose BACKEND_ROLE"
+        assertEq(
+            StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).feeRecipient(),
+            addresses.getAddress(DROP_KEY),
+            "Stock fees go to DropAutomationV2"
         );
     }
 
@@ -344,6 +326,7 @@ contract DeployStockDrop is MultisigProposal {
         MamoStakingRegistryV2 registry = MamoStakingRegistryV2(addresses.getAddress(STAKING_REGISTRY_KEY));
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         StockAccountsConfig.TokenListEntry[] memory stocks = _stocks();
+        StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY));
 
         assertTrue(registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), addresses.getAddress("F-MAMO")), "Registry admin");
         assertTrue(registry.hasRole(registry.GUARDIAN_ROLE(), addresses.getAddress("F-MAMO")), "Registry guardian");
@@ -355,6 +338,7 @@ contract DeployStockDrop is MultisigProposal {
         assertEq(registry.defaultSlippageInBps(), DEFAULT_SLIPPAGE_IN_BPS, "Registry default slippage");
 
         assertEq(registry.getRewardTokenCount(), 3 + stocks.length, "cbBTC, WETH, USDC and every stock");
+        assertEq(stockRegistry.allTokens().length, stocks.length, "Routes cover every V2 stock listing");
         assertEq(
             registry.getRewardTokenPool(addresses.getAddress("WETH")),
             addresses.getAddress("WETH_MAMO_CL_POOL"),
@@ -382,10 +366,16 @@ contract DeployStockDrop is MultisigProposal {
             );
             assertEq(
                 address(route[0].checker),
-                addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"),
+                addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_V2"),
                 string.concat(stocks[i].symbol, " route checker")
             );
             assertEq(route[1].pool, addresses.getAddress("USDC_MAMO_CL_POOL"), "USDC to MAMO hop");
+
+            // Every routed stock is listed and priced on the same pool by the V2 stock system
+            IStockAccountRegistry.TokenConfig memory listing = stockRegistry.tokenConfig(stocks[i].token);
+            assertEq(uint256(listing.status), uint256(IStockAccountRegistry.TokenStatus.Active), "Stock listed");
+            assertEq(uint256(listing.source), uint256(IStockAccountRegistry.PriceSource.PoolTwap), "Stock source");
+            assertEq(listing.pool, stocks[i].pool, string.concat(stocks[i].symbol, " listed pool"));
         }
     }
 
@@ -400,14 +390,6 @@ contract DeployStockDrop is MultisigProposal {
         );
         assertEq(stakingFactory.strategyTypeId(), STAKING_TYPE_ID, "Staking factory type id");
         assertEq(stakingFactory.multiRewards(), addresses.getAddress("MAMO_MULTI_REWARDS"), "Staking factory rewards");
-
-        StockAccountStrategyFactory live =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
-        StockAccountStrategyFactory stockFactory = StockAccountStrategyFactory(addresses.getAddress(STOCK_FACTORY_KEY));
-        assertEq(stockFactory.feeRecipient(), addresses.getAddress(DROP_KEY), "Stock fees go to DropAutomationV2");
-        assertEq(stockFactory.strategyImplementation(), live.strategyImplementation(), "Stock factory impl");
-        assertEq(stockFactory.strategyTypeId(), live.strategyTypeId(), "Stock factory type id");
-        assertEq(stockFactory.stockRegistry(), live.stockRegistry(), "Stock factory registry");
     }
 
     function _validatePriceChecker() internal view {
@@ -443,7 +425,7 @@ contract DeployStockDrop is MultisigProposal {
         route[0] = MamoStakingRegistryV2.Hop({
             pool: stockPool,
             router: ISwapRouter(addresses.getAddress("AERODROME_STOCKS_SWAP_ROUTER")),
-            checker: ISlippagePriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"))
+            checker: ISlippagePriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_V2"))
         });
         route[1] = MamoStakingRegistryV2.Hop({
             pool: addresses.getAddress("USDC_MAMO_CL_POOL"),

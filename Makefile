@@ -84,8 +84,8 @@ stock-router-swap:
 stock-accounts-setup:
 	forge test --ffi --match-contract StockAccountSystemSetupTest -vvv
 
-# Base-fork rehearsal of the stock drop proposals (mamo-multisig 017, f-mamo 006 and 007) and the lifecycle on the
-# result. Self-forks at a PINNED block in setUp (no --fork-url), and needs BASE_RPC_URL.
+# Base-fork rehearsal of the stock drop proposals (mamo-multisig 019 then 017, f-mamo 006 and 007) and the lifecycle
+# on the result. Self-forks at a PINNED block in setUp (no --fork-url), and needs BASE_RPC_URL.
 stock-drop-setup:
 	forge test --ffi --match-contract StockDropSetupTest -vvv
 # Base-fork rehearsal of multisig proposal 018 (halt cbBTC, list the stock universe) against the live
