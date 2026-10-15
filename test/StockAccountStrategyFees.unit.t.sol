@@ -607,6 +607,31 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(msft.balanceOf(address(strategy)), 100e18, "the unpriceable one stays, for an in-kind exit");
     }
 
+    function testAnUnpriceableHoldingStopsNoExitAndDoesNotResetTheClock() public {
+        msft.mint(address(strategy), 100e18);
+        _cannotPrice(address(msft));
+
+        _withdraw(500e18, 500);
+        assertEq(usdc.balanceOf(user), 500e18, "a cash withdrawal still works");
+
+        vm.startPrank(user);
+        strategy.withdrawToken(address(usdc), type(uint256).max);
+        strategy.withdrawToken(address(nvda), type(uint256).max);
+        strategy.withdrawToken(address(aapl), type(uint256).max);
+        vm.stopPrank();
+        assertEq(strategy.getNAV(), 0, "only the unpriceable holding is left");
+
+        uint256 lastPaid = strategy.lastFeePaid();
+        vm.warp(lastPaid + 30 days);
+        strategy.payFees(address(usdc));
+        strategy.payFeesFromAny();
+        assertEq(strategy.lastFeePaid(), lastPaid, "a holding that cannot be valued is not an empty account");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+        assertEq(msft.balanceOf(user), 100e18, "the in-kind exit still works");
+    }
+
     /// @dev An oracle outage fails both directions, which the mock models with a zero rate each way
     function _cannotPrice(address token) internal {
         priceChecker.setRate(token, address(usdc), 0);
@@ -639,6 +664,21 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
                 chainlinkFeed: address(0)
             })
         );
+    }
+
+    function testADepositDoesNotForgiveTheFeeOnAHoldingThatCannotBePriced() public {
+        StockAccountStrategy bare = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+        nvda.mint(address(bare), 10e18);
+        _cannotPrice(address(nvda));
+
+        vm.warp(startTime + 365 days);
+        usdc.mint(funder, 100e18);
+        vm.prank(funder);
+        usdc.approve(address(bare), 100e18);
+        vm.prank(funder);
+        bare.deposit(100e18);
+
+        assertEq(bare.lastFeePaid(), startTime, "the fee on the unpriced holding stays owed");
     }
 
     function testWithdrawTokenOfHaltedTokenPaysFeeFromUsdcAndExits() public {

@@ -325,6 +325,14 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         _check(order);
     }
 
+    function testRefusesOrdersWhileAHeldTokenCannotBePriced() public {
+        priceChecker.setRate(address(aapl), address(usdc), 0);
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+
+        vm.expectRevert(IStockAccountStrategy.ValuationIncomplete.selector);
+        _check(order);
+    }
+
     function testValidOrderQuotesEveryHoldingPlusTheOrderOnce() public {
         vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.getExpectedOut.selector), 3);
         vm.expectCall(address(priceChecker), abi.encodeWithSelector(ISlippagePriceChecker.checkPrice.selector), 0);

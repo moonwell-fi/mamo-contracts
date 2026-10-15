@@ -299,7 +299,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 buyAmount,
         uint256 expectedOut
     ) internal view {
-        (address[] memory tokens, uint256[] memory values, uint256 nav) = _valuation();
+        (address[] memory tokens, uint256[] memory values, uint256 nav, bool complete) = _valuation();
+        if (!complete) revert ValuationIncomplete();
 
         uint256 sellHeld = _heldValue(tokens, values, sellToken);
         uint256 available = IERC20(sellToken).balanceOf(address(this));
@@ -318,10 +319,16 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (buyWeight > _targetOf(buyToken) + dev) revert BuyLeavesTokenAboveRange(buyToken);
     }
 
-    function _valuation() internal view returns (address[] memory tokens, uint256[] memory values, uint256 nav) {
+    /// @dev `complete` is false when a held token that is not halted failed to price, leaving it out of `nav`
+    function _valuation()
+        internal
+        view
+        returns (address[] memory tokens, uint256[] memory values, uint256 nav, bool complete)
+    {
         tokens = stockRegistry.allTokens();
         values = new uint256[](tokens.length);
         nav = asset.balanceOf(address(this));
+        complete = true;
 
         ISlippagePriceChecker checker = stockRegistry.priceChecker();
 
@@ -336,7 +343,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             }
 
             (bool priced, uint256 value) = _tryValue(checker, tokens[i], balance);
-            if (!priced) continue;
+            if (!priced) {
+                complete = false;
+                continue;
+            }
 
             values[i] = value;
             nav += value;
@@ -471,7 +481,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
     function getNAV() public view override returns (uint256 valueUsdc) {
-        (,, valueUsdc) = _valuation();
+        (,, valueUsdc,) = _valuation();
     }
 
     /// @notice Current and target weight of every listed token, in basis points of the account value
@@ -483,7 +493,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     {
         uint256[] memory values;
         uint256 nav;
-        (tokens, values, nav) = _valuation();
+        (tokens, values, nav,) = _valuation();
 
         currentBps = new uint256[](tokens.length);
         targetBps = new uint256[](tokens.length);
@@ -614,7 +624,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 due = _feeDue(elapsed);
         if (due == 0) {
             // Only a zero rate or an empty account owes nothing, a due that merely rounds down stays owed
-            if (stockRegistry.managementFeeBps() == 0 || getNAV() == 0) lastFeePaid = uint64(block.timestamp);
+            if (stockRegistry.managementFeeBps() == 0 || _holdsNothing()) lastFeePaid = uint64(block.timestamp);
             return;
         }
 
@@ -685,7 +695,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         if (_feeSettled()) return;
 
-        (address[] memory tokens, uint256[] memory values,) = _valuation();
+        (address[] memory tokens, uint256[] memory values,,) = _valuation();
 
         for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
             if (values[i] > 0) {
@@ -694,9 +704,21 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
 
         // Nothing the fee is charged on is left, so nothing is owed and the clock catches up
-        if (!_feeSettled() && getNAV() == 0) {
+        if (!_feeSettled() && _holdsNothing()) {
             lastFeePaid = uint64(block.timestamp);
         }
+    }
+
+    /// @dev A held balance that cannot be valued right now is still held, so it does not stop the fee clock
+    function _holdsNothing() internal view returns (bool) {
+        if (asset.balanceOf(address(this)) > 0) return false;
+
+        address[] memory tokens = stockRegistry.allTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (IERC20(tokens[i]).balanceOf(address(this)) > 0) return false;
+        }
+
+        return true;
     }
 
     /// @dev New funds must not pay for time before they arrived, so the fee on the balance already held is settled first
@@ -704,7 +726,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         _payFeesFromAny();
 
         // A remainder worth nothing on the balance held would otherwise be charged on the new funds
-        if (!_feeSettled() && feeDue() == 0) lastFeePaid = uint64(block.timestamp);
+        (,,, bool complete) = _valuation();
+        if (!_feeSettled() && complete && feeDue() == 0) lastFeePaid = uint64(block.timestamp);
     }
 
     function _feeSettled() internal view returns (bool) {

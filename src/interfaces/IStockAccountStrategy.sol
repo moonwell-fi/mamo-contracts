@@ -53,6 +53,7 @@ interface IStockAccountStrategy {
     error BuyLeavesTokenAboveRange(address token);
     error OrderValueExceedsMaximum(uint256 sellValue);
     error PriceCheckFailed();
+    error ValuationIncomplete();
     error FeeTokenNotAllowed(address token);
     error NoBalanceForFee(address token);
     error RegistryPaused();
