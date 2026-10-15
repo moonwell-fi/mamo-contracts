@@ -333,7 +333,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 buyWeight = navAfter == 0 ? 0 : ((buyHeld + buyValue) * TOTAL_BPS) / navAfter;
 
         if (sellWeight + dev < _targetOf(sellToken)) revert SellLeavesTokenBelowRange(sellToken);
-        if (buyWeight > _targetOf(buyToken) + dev) revert BuyLeavesTokenAboveRange(buyToken);
+        // Winding a SellOnly token down into cash is not stopped by the cash ceiling
+        bool windDown = buyToken == address(asset)
+            && stockRegistry.tokenConfig(sellToken).status == IStockAccountRegistry.TokenStatus.SellOnly;
+        if (!windDown && buyWeight > _targetOf(buyToken) + dev) revert BuyLeavesTokenAboveRange(buyToken);
     }
 
     /// @dev `complete` is false when a held token that is not halted failed to price, leaving it out of `nav`

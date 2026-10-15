@@ -313,6 +313,29 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         }
     }
 
+    function testASellOnlyPositionWindsDownIntoCashPastTheCashCeiling() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 9000), 1000);
+        deal(address(aapl), address(strategy), 0);
+        deal(address(nvda), address(strategy), 112.5e18);
+        usdc.mint(address(strategy), 2_500e18);
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.SellOnly);
+
+        // $3,000 of a $25,000 account lifts cash to 22%, past its 10% target and 10% band
+        assertTrue(_check(_order(address(nvda), address(usdc), 15e18, 2_985e18)) == MAGIC_VALUE, "magic value");
+    }
+
+    function testASellOnlySaleIntoAnotherStockStillRespectsItsCeiling() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 4500, address(aapl), 4500), 1000);
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.SellOnly);
+
+        GPv2Order.Data memory order = _order(address(nvda), address(aapl), 2e18, 4e18);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(aapl)));
+        _check(order);
+    }
+
     function testBuyRangeIsCheckedAtTheReferenceNotTheLimit() public {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 3000, address(aapl), 6000), 1000);
