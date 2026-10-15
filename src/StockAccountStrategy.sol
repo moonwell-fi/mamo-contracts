@@ -31,13 +31,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     uint16 internal constant TOTAL_BPS = 10_000;
 
     /// @notice Gas the CoW settlement grants the fee post-hook
-    uint256 public constant HOOK_GAS_LIMIT = 1_000_000;
+    uint256 public constant HOOK_GAS_LIMIT = 2_000_000;
 
     /// @notice Value returned to CoW when this account accepts an order, per EIP-1271
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
 
-    /// @notice Shortest time an order may stay valid for
-    uint256 internal constant MIN_ORDER_VALIDITY = 5 minutes;
+    /// @notice Smallest value, in asset units, a cash exit sells of one token
+    uint256 internal constant MIN_SELL_VALUE = 1e6;
 
     /// @notice Longest time an order may stay valid for
     uint256 internal constant MAX_ORDER_VALIDITY = 30 minutes;
@@ -62,21 +62,20 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     BasketEntry[] internal _entries;
 
-    /// @notice Address the management fee is paid to
-    address public feeRecipient;
-
     /// @notice Timestamp the fee was last paid at
     uint64 public override lastFeePaid;
 
     /// @notice Capital deposited less capital withdrawn, which the deposit cap applies to
     uint256 public override principal;
 
+    /// @notice Whether the owner has stopped every order from settling on this account
+    bool public override ordersDisabled;
+
     struct InitParams {
         address asset;
         uint16 cashTargetBps;
         address cowSettlement;
         BasketEntry[] entries;
-        address feeRecipient;
         address mamoStrategyRegistry;
         address owner;
         address stockRegistry;
@@ -88,11 +87,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         _disableInitializers();
     }
 
-    modifier onlyBackend() {
-        if (!_isBackend(msg.sender)) revert NotBackend();
-        _;
-    }
-
     /**
      * @notice Initializer that sets all the parameters and the initial basket
      * @dev This is used instead of a constructor since the contract is designed to be used with proxies
@@ -101,7 +95,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function initialize(InitParams calldata params) external initializer {
         if (params.asset == address(0)) revert ZeroAddress();
         if (params.cowSettlement == address(0)) revert ZeroAddress();
-        if (params.feeRecipient == address(0)) revert ZeroAddress();
         if (params.mamoStrategyRegistry == address(0)) revert ZeroAddress();
         if (params.stockRegistry == address(0)) revert ZeroAddress();
         if (params.strategyTypeId == 0) revert StrategyTypeIdNotSet();
@@ -112,7 +105,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         stockRegistry = IStockAccountRegistry(params.stockRegistry);
         cowDomainSeparator = IGPv2Settlement(params.cowSettlement).domainSeparator();
         cowVaultRelayer = IGPv2Settlement(params.cowSettlement).vaultRelayer();
-        feeRecipient = params.feeRecipient;
+        if (cowDomainSeparator == bytes32(0) || cowVaultRelayer == address(0)) revert InvalidCowSettlement();
         lastFeePaid = uint64(block.timestamp);
 
         _setBasket(params.entries, params.cashTargetBps);
@@ -156,7 +149,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @notice Sends a token held by the account to the owner without selling anything
      * @param token The token to send, the asset included
      * @param amount The amount to send
-     * @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
+     * @dev The fee comes out of the other holdings first and out of this token only for what they leave,
+     *      and a fee that cannot be computed or paid stays owed
      */
     function withdrawToken(address token, uint256 amount) external override onlyOwner {
         _tryPayFeesBefore(token);
@@ -190,8 +184,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function withdrawAllInKind() external override onlyOwner {
         try this.payFeesFromAny() {} catch {}
 
-        principal = 0;
-
         address to = owner();
         _sendAllInKind(address(asset), to);
 
@@ -199,6 +191,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         for (uint256 i = 0; i < tokens.length; i++) {
             _sendAllInKind(tokens[i], to);
         }
+
+        // A balance the sweep had to skip keeps its value in principal
+        principal = Math.min(principal, getNAV());
     }
 
     /**
@@ -211,6 +206,16 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /**
+     * @notice Stops or resumes order settlement on this account, whatever the backend signs
+     * @param disabled True to refuse every order
+     */
+    function setOrdersDisabled(bool disabled) external override onlyOwner {
+        ordersDisabled = disabled;
+
+        emit OrdersDisabledUpdated(disabled);
+    }
+
+    /**
      * @notice Sets the slippage this account tolerates on swaps
      * @param bps The slippage in basis points, zero to follow the registry cap
      */
@@ -220,18 +225,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         emit SlippageUpdated(accountSlippageBps, bps);
 
         accountSlippageBps = bps;
-    }
-
-    /**
-     * @notice Sets the address the accrued fees are collected to
-     * @param newRecipient The new fee recipient
-     */
-    function setFeeRecipient(address newRecipient) external override onlyBackend {
-        if (newRecipient == address(0)) revert ZeroAddress();
-
-        emit FeeRecipientUpdated(feeRecipient, newRecipient);
-
-        feeRecipient = newRecipient;
     }
 
     /**
@@ -269,6 +262,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (!SignatureChecker.isValidSignatureNow(stockRegistry.orderSigner(), orderDigest, backendSig)) {
             revert InvalidBackendSignature();
         }
+        if (ordersDisabled) revert OrdersDisabled();
         if (order.kind != GPv2Order.KIND_SELL) revert OrderMustBeSell();
         if (order.partiallyFillable) revert OrderMustBeFillOrKill();
         if (order.sellTokenBalance != GPv2Order.BALANCE_ERC20 || order.buyTokenBalance != GPv2Order.BALANCE_ERC20) {
@@ -277,7 +271,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (order.receiver != address(this)) revert OrderReceiverMismatch();
         if (order.feeAmount != 0) revert OrderFeeMustBeZero();
         if (order.appData != keccak256(bytes(appDataDocument(address(order.buyToken))))) revert InvalidAppData();
-        if (order.validTo < block.timestamp + MIN_ORDER_VALIDITY) revert OrderExpiresTooSoon();
         if (order.validTo > block.timestamp + MAX_ORDER_VALIDITY) revert OrderExpiresTooLate();
 
         address sellToken = address(order.sellToken);
@@ -322,11 +315,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 buyAmount,
         uint256 expectedOut
     ) internal view {
-        (address[] memory tokens, uint256[] memory values, uint256 nav) = _valuation();
+        (address[] memory tokens, uint256[] memory values, uint256 nav, bool complete) = _valuation();
+        if (!complete) revert ValuationIncomplete();
 
         uint256 sellHeld = _heldValue(tokens, values, sellToken);
         uint256 available = IERC20(sellToken).balanceOf(address(this));
         uint256 sellValue = sellToken == address(asset) ? sellAmount : (sellHeld * sellAmount) / available;
+        if (sellValue > stockRegistry.maxOrderValue()) revert OrderValueExceedsMaximum(sellValue);
         uint256 buyValue = (sellValue * Math.max(buyAmount, expectedOut)) / expectedOut;
 
         uint256 navAfter = nav - sellValue + buyValue;
@@ -337,28 +332,40 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 buyWeight = navAfter == 0 ? 0 : ((buyHeld + buyValue) * TOTAL_BPS) / navAfter;
 
         if (sellWeight + dev < _targetOf(sellToken)) revert SellLeavesTokenBelowRange(sellToken);
-        if (buyWeight > _targetOf(buyToken) + dev) revert BuyLeavesTokenAboveRange(buyToken);
+        // Winding a SellOnly token down into cash is not stopped by the cash ceiling
+        bool windDown = buyToken == address(asset)
+            && stockRegistry.tokenConfig(sellToken).status == IStockAccountRegistry.TokenStatus.SellOnly;
+        if (!windDown && buyWeight > _targetOf(buyToken) + dev) revert BuyLeavesTokenAboveRange(buyToken);
     }
 
-    function _valuation() internal view returns (address[] memory tokens, uint256[] memory values, uint256 nav) {
+    /// @dev `complete` is false when a held token that is not halted failed to price, leaving it out of `nav`
+    function _valuation()
+        internal
+        view
+        returns (address[] memory tokens, uint256[] memory values, uint256 nav, bool complete)
+    {
         tokens = stockRegistry.allTokens();
         values = new uint256[](tokens.length);
         nav = asset.balanceOf(address(this));
+        complete = true;
 
         ISlippagePriceChecker checker = stockRegistry.priceChecker();
 
         for (uint256 i = 0; i < tokens.length; i++) {
+            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) {
+                continue;
+            }
+
             uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
             if (balance == 0) {
                 continue;
             }
 
-            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) {
+            (bool priced, uint256 value) = _tryValue(checker, tokens[i], balance);
+            if (!priced) {
+                complete = false;
                 continue;
             }
-
-            (bool priced, uint256 value) = _tryValue(checker, tokens[i], balance);
-            if (!priced) continue;
 
             values[i] = value;
             nav += value;
@@ -408,18 +415,30 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
      * @notice Sends the asset to the owner, selling positions pro rata when the idle balance falls short
      * @param usdcAmount The amount of the asset the owner receives
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
+     * @param tokens The tokens the owner allows to be sold, in any order
+     * @param maxAmounts The most of each of `tokens` that may be sold
+     * @param deadline The last timestamp the withdrawal may execute at
      */
-    function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external override onlyOwner {
+    function withdraw(
+        uint256 usdcAmount,
+        uint16 maxSlippageBps,
+        address[] calldata tokens,
+        uint256[] calldata maxAmounts,
+        uint256 deadline
+    ) external override onlyOwner {
         if (usdcAmount == 0) revert ZeroAmount();
+        if (block.timestamp > deadline) revert DeadlineExpired();
+        if (tokens.length != maxAmounts.length) revert LengthMismatch();
         _checkWithdrawSlippage(maxSlippageBps);
 
         uint256 shortfall = _shortfall(usdcAmount);
         uint256 sold;
 
         if (shortfall > 0) {
-            (address[] memory tokens, uint256[] memory amounts, uint256[] memory legValues,,) =
+            (address[] memory sells, uint256[] memory amounts, uint256[] memory legValues,,) =
                 _planSells(shortfall, maxSlippageBps);
-            sold = _executeSells(tokens, amounts, legValues, maxSlippageBps);
+            _checkSellCaps(sells, amounts, tokens, maxAmounts);
+            sold = _executeSells(sells, amounts, legValues, maxSlippageBps, deadline);
         }
 
         _payFees(address(asset));
@@ -435,17 +454,21 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /**
      * @notice Sells every position that is not halted and sends all the asset to the owner
      * @param maxSlippageBps The slippage each sell leg tolerates, in basis points
+     * @param minUsdcOut The least the owner accepts to receive, after the fee
+     * @param deadline The last timestamp the withdrawal may execute at
      */
-    function withdrawAll(uint16 maxSlippageBps) external override onlyOwner {
+    function withdrawAll(uint16 maxSlippageBps, uint256 minUsdcOut, uint256 deadline) external override onlyOwner {
+        if (block.timestamp > deadline) revert DeadlineExpired();
         _checkWithdrawSlippage(maxSlippageBps);
 
         (address[] memory tokens, uint256[] memory balances, uint256[] memory values) = _sellable();
-        uint256 sold = _executeSells(tokens, balances, values, maxSlippageBps);
+        uint256 sold = _executeSells(tokens, balances, values, maxSlippageBps, deadline);
 
         _payFees(address(asset));
 
         uint256 usdcOut = asset.balanceOf(address(this));
         if (usdcOut == 0) revert EmptyBalance();
+        if (usdcOut < minUsdcOut) revert InsufficientProceeds();
 
         principal = 0;
 
@@ -477,7 +500,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice Value of everything the account holds, in asset units, at registry reference prices
     function getNAV() public view override returns (uint256 valueUsdc) {
-        (,, valueUsdc) = _valuation();
+        (,, valueUsdc,) = _valuation();
     }
 
     /// @notice Current and target weight of every listed token, in basis points of the account value
@@ -489,7 +512,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     {
         uint256[] memory values;
         uint256 nav;
-        (tokens, values, nav) = _valuation();
+        (tokens, values, nav,) = _valuation();
 
         currentBps = new uint256[](tokens.length);
         targetBps = new uint256[](tokens.length);
@@ -620,7 +643,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 due = _feeDue(elapsed);
         if (due == 0) {
             // Only a zero rate or an empty account owes nothing, a due that merely rounds down stays owed
-            if (stockRegistry.managementFeeBps() == 0 || getNAV() == 0) lastFeePaid = uint64(block.timestamp);
+            if (stockRegistry.managementFeeBps() == 0 || _holdsNothing()) lastFeePaid = uint64(block.timestamp);
             return;
         }
 
@@ -639,32 +662,37 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         // forge-lint: disable-next-line(unsafe-typecast)
         lastFeePaid = uint64(lastFeePaid + credited);
 
-        IERC20(token).safeTransfer(feeRecipient, amount);
+        IERC20(token).safeTransfer(stockRegistry.feeRecipient(), amount);
 
         emit FeesPaid(credited, token, amount);
     }
 
-    /// @dev A fee that cannot be computed or paid stays owed rather than trapping the owner
+    /// @dev The exit token pays only what the other holdings cannot, and a fee that cannot be paid stays owed
     function _tryPayFeesBefore(address token) internal {
-        if (_isFeeToken(token)) {
+        try this.payFeesFromAnyExcept(token) {} catch {}
+
+        if (!_feeSettled() && _isFeeToken(token)) {
             try this.payFees(token) {} catch {}
-        } else {
-            try this.payFeesFromAny() {} catch {}
         }
     }
 
+    /// @dev A Halted token is left out of the account value, so taking it out does not reduce principal either
     function _reducePrincipal(address token, uint256 amount) internal {
         uint256 value = amount;
-        if (token != address(asset)) (, value) = _tryValue(stockRegistry.priceChecker(), token, amount);
+        if (token != address(asset)) {
+            if (stockRegistry.tokenConfig(token).status == IStockAccountRegistry.TokenStatus.Halted) return;
+            (, value) = _tryValue(stockRegistry.priceChecker(), token, amount);
+        }
         principal -= Math.min(value, principal);
     }
 
     function _sendAllInKind(address token, address to) internal {
-        uint256 balance = IERC20(token).balanceOf(address(this));
+        uint256 balance = _balanceOrZero(token);
         if (balance == 0) return;
 
         (bool ok, bytes memory ret) = token.call(abi.encodeCall(IERC20.transfer, (to, balance)));
-        bool sent = ok && (ret.length == 0 ? token.code.length > 0 : ret.length >= 32 && abi.decode(ret, (bool)));
+        bool sent =
+            ok && (ret.length == 0 ? token.code.length > 0 : ret.length >= 32 && abi.decode(ret, (uint256)) == 1);
 
         if (sent) emit WithdrawToken(token, balance);
         else emit WithdrawSkipped(token, balance);
@@ -681,36 +709,63 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /// @notice Pays the fee accrued since the last payment out of the balances the account holds, callable by anyone
     /// @dev Walks the balances until the fee is settled, so an exit cannot leave a remainder nothing can collect
     function payFeesFromAny() external override {
-        _payFeesFromAny();
+        _payFeesFromAny(address(0));
     }
 
-    function _payFeesFromAny() internal {
+    /// @dev External only so an exit can wrap the walk in try/catch; the account is the only caller
+    function payFeesFromAnyExcept(address skip) external {
+        if (msg.sender != address(this)) revert NotSelf();
+        _payFeesFromAny(skip);
+    }
+
+    function _payFeesFromAny(address skip) internal {
         if (asset.balanceOf(address(this)) > 0) {
             _payFees(address(asset));
         }
 
         if (_feeSettled()) return;
 
-        (address[] memory tokens, uint256[] memory values,) = _valuation();
+        (address[] memory tokens, uint256[] memory values,,) = _valuation();
 
         for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
-            if (values[i] > 0) {
+            if (values[i] > 0 && tokens[i] != skip) {
                 _payFees(tokens[i]);
             }
         }
 
         // Nothing the fee is charged on is left, so nothing is owed and the clock catches up
-        if (!_feeSettled() && getNAV() == 0) {
+        if (!_feeSettled() && _holdsNothing()) {
             lastFeePaid = uint64(block.timestamp);
+        }
+    }
+
+    /// @dev A held balance that cannot be valued right now is still held, so it does not stop the fee clock
+    function _holdsNothing() internal view returns (bool) {
+        if (asset.balanceOf(address(this)) > 0) return false;
+
+        address[] memory tokens = stockRegistry.allTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            if (_balanceOrZero(tokens[i]) > 0) return false;
+        }
+
+        return true;
+    }
+
+    function _balanceOrZero(address token) internal view returns (uint256) {
+        try IERC20(token).balanceOf(address(this)) returns (uint256 balance) {
+            return balance;
+        } catch {
+            return 0;
         }
     }
 
     /// @dev New funds must not pay for time before they arrived, so the fee on the balance already held is settled first
     function _settleFeesBeforeDeposit() internal {
-        _payFeesFromAny();
+        _payFeesFromAny(address(0));
 
         // A remainder worth nothing on the balance held would otherwise be charged on the new funds
-        if (!_feeSettled() && feeDue() == 0) lastFeePaid = uint64(block.timestamp);
+        (,,, bool complete) = _valuation();
+        if (!_feeSettled() && complete && feeDue() == 0) lastFeePaid = uint64(block.timestamp);
     }
 
     function _feeSettled() internal view returns (bool) {
@@ -766,12 +821,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 count;
 
         for (uint256 i = 0; i < listed.length; i++) {
+            if (stockRegistry.tokenConfig(listed[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
             uint256 balance = IERC20(listed[i]).balanceOf(address(this));
             if (balance == 0) continue;
-            if (stockRegistry.tokenConfig(listed[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
 
+            // A balance too small to clear the pool's rounding stays for the in-kind exit
             (bool priced, uint256 value) = _tryValue(checker, listed[i], balance);
-            if (!priced) continue;
+            if (!priced || value < MIN_SELL_VALUE) continue;
 
             tokens[count] = listed[i];
             balances[count] = balance;
@@ -797,7 +853,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return needed > idle ? needed - idle : 0;
     }
 
-    /// @dev The largest leg carries the rounding the other legs drop, so the plan cannot come in under its target
+    /// @dev Every leg rounds up so the plan cannot undershoot, and the largest also carries the legs too small to sell
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)
         internal
         view
@@ -831,21 +887,31 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             return (new address[](0), new uint256[](0), new uint256[](0), 0, 0);
         }
 
-        uint256 target = (shortfall * TOTAL_BPS) / (TOTAL_BPS - maxSlippageBps);
+        uint256 target = Math.ceilDiv(shortfall * TOTAL_BPS, TOTAL_BPS - maxSlippageBps);
         if (target > total) {
             target = total;
         }
 
         uint256[] memory planned = new uint256[](sellable.length);
-        uint256 count;
+        uint256 folded;
+        uint256 spare = values[largest] - Math.ceilDiv(values[largest] * target, total);
 
         for (uint256 i = 0; i < sellable.length; i++) {
-            uint256 numerator = balances[i] * target;
-            planned[i] = i == largest ? (numerator + total - 1) / total : numerator / total;
+            if (i == largest) continue;
 
-            if (planned[i] > 0) {
-                count++;
-            }
+            uint256 share = Math.ceilDiv(values[i] * target, total);
+            if (share < MIN_SELL_VALUE && folded + share <= spare) folded += share;
+            else planned[i] = Math.min(Math.ceilDiv(balances[i] * target, total), balances[i]);
+        }
+
+        uint256 largestAmount =
+            Math.ceilDiv(balances[largest] * target, total) + Math.ceilDiv(balances[largest] * folded, values[largest]);
+        largestAmount = Math.max(largestAmount, Math.ceilDiv(balances[largest] * MIN_SELL_VALUE, values[largest]));
+        planned[largest] = Math.min(largestAmount, balances[largest]);
+
+        uint256 count;
+        for (uint256 i = 0; i < sellable.length; i++) {
+            if (planned[i] > 0) count++;
         }
 
         tokens = new address[](count);
@@ -868,33 +934,55 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
     }
 
+    /// @dev Matched by address, so the caps can come in any order and a cap the plan does not use is ignored
+    function _checkSellCaps(
+        address[] memory sells,
+        uint256[] memory amounts,
+        address[] calldata tokens,
+        uint256[] calldata maxAmounts
+    ) internal pure {
+        for (uint256 i = 0; i < sells.length; i++) {
+            uint256 j;
+            while (j < tokens.length && tokens[j] != sells[i]) j++;
+            if (j == tokens.length || amounts[i] > maxAmounts[j]) revert SellExceedsCap(sells[i]);
+        }
+    }
+
     function _executeSells(
         address[] memory tokens,
         uint256[] memory amounts,
         uint256[] memory values,
-        uint16 maxSlippageBps
+        uint16 maxSlippageBps,
+        uint256 deadline
     ) internal returns (uint256 sold) {
         for (uint256 i = 0; i < tokens.length; i++) {
-            sold += _sell(tokens[i], amounts[i], (values[i] * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS);
+            sold += _sell(tokens[i], amounts[i], (values[i] * (TOTAL_BPS - maxSlippageBps)) / TOTAL_BPS, deadline);
         }
     }
 
-    function _sell(address token, uint256 amountIn, uint256 minOut) internal returns (uint256 amountOut) {
+    function _sell(address token, uint256 amountIn, uint256 minOut, uint256 deadline)
+        internal
+        returns (uint256 amountOut)
+    {
         ISwapRouter router = stockRegistry.aerodromeRouter();
 
         IERC20(token).forceApprove(address(router), amountIn);
+        uint256 before = asset.balanceOf(address(this));
 
-        amountOut = router.exactInputSingle(
+        router.exactInputSingle(
             ISwapRouter.ExactInputSingleParams({
                 tokenIn: token,
                 tokenOut: address(asset),
                 tickSpacing: IPool(stockRegistry.tokenConfig(token).pool).tickSpacing(),
                 recipient: address(this),
-                deadline: block.timestamp,
+                deadline: deadline,
                 amountIn: amountIn,
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
         );
+
+        amountOut = asset.balanceOf(address(this)) - before;
+        if (amountOut < minOut) revert RouterUnderpaid(token);
     }
 }

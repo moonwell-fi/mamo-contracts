@@ -620,7 +620,9 @@ contract StockAccountStrategyHandler is Test {
             _latch("an accepted order left the sell token below its range");
         }
 
-        if (buyWeight > buyTarget + dev + WEIGHT_TOLERANCE_BPS) {
+        // Winding a SellOnly token down into cash is exempt from the cash ceiling
+        bool windDown = buyToken == tokens[0] && _status(sellToken) == IStockAccountRegistry.TokenStatus.SellOnly;
+        if (!windDown && buyWeight > buyTarget + dev + WEIGHT_TOLERANCE_BPS) {
             rangeViolated = true;
             _latch("an accepted order left the buy token above its range");
         }

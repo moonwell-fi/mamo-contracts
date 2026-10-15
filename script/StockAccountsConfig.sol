@@ -46,6 +46,7 @@ contract StockAccountsConfig is Script {
         uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
         uint16 maxDeviationBps;
+        uint256 maxOrderValue;
         uint8 maxPositions;
         uint256 maxStrategyDeposit;
         uint16 maxWithdrawSlippageBps;
@@ -76,6 +77,7 @@ contract StockAccountsConfig is Script {
         config.managementFeeBps = uint16(json.readUint(".managementFeeBps"));
         config.maxBackendSlippageBps = uint16(json.readUint(".maxBackendSlippageBps"));
         config.maxDeviationBps = uint16(json.readUint(".maxDeviationBps"));
+        config.maxOrderValue = json.readUint(".maxOrderValue");
         config.maxPositions = uint8(json.readUint(".maxPositions"));
         config.maxStrategyDeposit = json.readUint(".maxStrategyDeposit");
         config.maxWithdrawSlippageBps = uint16(json.readUint(".maxWithdrawSlippageBps"));
@@ -99,7 +101,11 @@ contract StockAccountsConfig is Script {
     ///      and an empty loop is a deploy that lists nothing and a readiness run that checks nothing.
     ///      Every entry is validated here, so a malformed one fails before any consumer reads it
     function loadTokenList() public view returns (TokenListEntry[] memory) {
-        string memory path = string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json");
+        return loadTokenList(string.concat("./config/stock-accounts/", vm.toString(config.chainId), ".json"));
+    }
+
+    /// @notice The tokens in the list at `path`, validated the same way
+    function loadTokenList(string memory path) public view returns (TokenListEntry[] memory) {
         require(vm.isFile(path), string.concat("Token list: no such file, ", path));
 
         bytes memory raw = vm.parseJson(vm.readFile(path), ".tokens");

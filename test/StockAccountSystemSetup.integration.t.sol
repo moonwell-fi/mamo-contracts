@@ -364,7 +364,7 @@ contract StockAccountSystemSetupTest is Test {
 
         uint256 before = IERC20(usdc).balanceOf(user);
         vm.prank(user);
-        account.withdraw(CASH_WITHDRAWAL, WITHDRAW_SLIPPAGE_BPS);
+        account.withdraw(CASH_WITHDRAWAL, WITHDRAW_SLIPPAGE_BPS, toSell, new uint256[](0), block.timestamp);
         assertEq(IERC20(usdc).balanceOf(user) - before, CASH_WITHDRAWAL, "the owner received the cash");
 
         // Take the cbBTC back in kind, which leaves the account holding cash only.
@@ -381,7 +381,7 @@ contract StockAccountSystemSetupTest is Test {
     ///      past its heartbeat and turn a fee assertion into an oracle-staleness revert.
     function _proveFeeSettlement(StockAccountStrategy account) internal {
         address feeRecipient = addresses.getAddress("F-MAMO");
-        assertEq(account.feeRecipient(), feeRecipient, "the account pays its fee to F-MAMO");
+        assertEq(account.stockRegistry().feeRecipient(), feeRecipient, "the account pays its fee to F-MAMO");
         assertEq(account.feeDue(), 0, "nothing is owed before any time passes");
 
         uint256 nav = account.getNAV();

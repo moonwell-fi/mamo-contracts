@@ -11,6 +11,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 import {MockFailingERC20} from "./MockFailingERC20.sol";
+import {MockGPv2Settlement} from "./mocks/MockGPv2Settlement.sol";
 import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase.sol";
 
 contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
@@ -24,7 +25,6 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.owner(), user, "owner");
         assertEq(strategy.cashTargetBps(), 0, "cash target");
         assertEq(strategy.accountSlippageBps(), 0, "account slippage");
-        assertEq(strategy.feeRecipient(), feeRecipient, "fee recipient");
         assertEq(strategy.lastFeePaid(), block.timestamp, "last fee paid");
         assertEq(
             strategy.appDataHash(address(nvda)),
@@ -54,6 +54,18 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         params.cowSettlement = address(0);
 
         vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
+        _deployProxy(params);
+    }
+
+    function testInitializeRevertsOnASettlementWithoutADomainSeparatorOrRelayer() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+
+        params.cowSettlement = address(new MockGPv2Settlement(bytes32(0), relayer));
+        vm.expectRevert(IStockAccountStrategy.InvalidCowSettlement.selector);
+        _deployProxy(params);
+
+        params.cowSettlement = address(new MockGPv2Settlement(SEPARATOR, address(0)));
+        vm.expectRevert(IStockAccountStrategy.InvalidCowSettlement.selector);
         _deployProxy(params);
     }
 
@@ -384,6 +396,23 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.principal(), 0, "a full exit clears it");
     }
 
+    function testWithdrawingAHaltedTokenLeavesPrincipalAlone() public {
+        _fundUsdc(funder, 1_000e18);
+        vm.prank(funder);
+        strategy.deposit(1_000e18);
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        _halt(address(nvda));
+        assertEq(strategy.getNAV(), 1_000e18, "the halted position is out of the value");
+
+        vm.prank(user);
+        strategy.withdrawToken(address(nvda), 10e18);
+
+        assertEq(strategy.principal(), 3_000e18, "so it is not taken out of principal either");
+    }
+
     function testWithdrawTokenMovesBalanceAndEmits() public {
         _fundToken(nvda, funder, 10e18);
         vm.prank(funder);
@@ -476,6 +505,26 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(user), 1_000e18, "the asset still goes out");
         assertEq(nvda.balanceOf(user), 10e18, "the other stock still goes out");
         assertEq(frozen.balanceOf(address(strategy)), 5e18, "the frozen token stays behind");
+        assertEq(strategy.principal(), 5e18, "principal keeps the value left behind");
+    }
+
+    function testWithdrawAllInKindSkipsATokenWhoseTransferReturnsNeitherTrueNorFalse() public {
+        TwoReturningToken odd = new TwoReturningToken();
+        _listActive(address(odd));
+        priceChecker.setRate(address(odd), address(usdc), 1e18);
+        odd.setBalance(address(strategy), 5e18);
+
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.WithdrawSkipped(address(odd), 5e18);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        assertEq(nvda.balanceOf(user), 10e18, "the other stock still goes out");
     }
 
     function testWithdrawAllInKindOnlyOwner() public {
@@ -572,5 +621,18 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
                 chainlinkFeed: address(0)
             })
         );
+    }
+}
+
+/// @dev Returns 2 from transfer, a word that is not a valid bool, and moves nothing
+contract TwoReturningToken {
+    mapping(address => uint256) public balanceOf;
+
+    function setBalance(address account, uint256 amount) external {
+        balanceOf[account] = amount;
+    }
+
+    function transfer(address, uint256) external pure returns (uint256) {
+        return 2;
     }
 }

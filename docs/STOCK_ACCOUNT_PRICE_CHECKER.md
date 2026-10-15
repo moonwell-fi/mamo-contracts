@@ -6,6 +6,26 @@ pool over `StockAccountRegistry.twapWindow()` and converts it to a USDC price; f
 `PriceSource.Chainlink` it delegates to the audited `SlippagePriceChecker`. Every quote is composed
 through USDC, so a token-to-token quote is two of those legs.
 
+PoolTwap quotes are gated on the Base sequencer uptime feed: while the sequencer is down, and for one
+hour (`sequencerGracePeriod`, 3600) after it comes back, every PoolTwap quote reverts. During that time
+orders are refused, `withdraw` pays only from idle cash, `withdrawAll` pays out the cash and leaves the
+stocks in the account, `withdrawToken` and `withdrawAllInKind` work as usual, and every listing,
+`setPriceChecker` and `setTwapWindow` probe fails until the grace period ends.
+
+The owner's cash exits carry their own bounds: `withdrawAll(maxSlippageBps, minUsdcOut, deadline)`
+and `withdraw(usdcAmount, maxSlippageBps, tokens, maxAmounts, deadline)`. The TWAP floor alone moves
+with a price held down for the whole window; these bounds do not, provided they come from a quote
+the pool cannot move. In market hours the frontend takes that quote from the Chainlink equity feed;
+off-hours, when those feeds freeze, it falls back to `previewWithdraw` and warns the user.
+
+Size `maxAmounts` from that independent quote plus the slippage tolerance. Caps copied verbatim from
+`previewWithdraw` revert with `SellExceedsCap` as soon as the transaction lands a block later: the
+shortfall includes the fee, which accrues every second, the TWAP moves, and the legs round up. When
+the frontend falls back to `previewWithdraw` it adds headroom of at least the slippage tolerance on
+every leg and never passes the preview unchanged. Anyone who sends the account 1 USDC or more of an
+Active stock missing from `tokens` also makes that withdrawal revert, because the plan now sells it;
+the owner recovers by previewing again, or through `withdrawAll` or `withdrawAllInKind`.
+
 The checker is a reference, not a trade route: the backend still has to fill at or above
 `expectedOut * (10_000 - maxBackendSlippageBps) / 10_000`. This document answers what it costs someone
 to push that reference far enough to be worth attacking, and what they can take once they have. All
@@ -101,10 +121,12 @@ min( sellHeld - (target_sell - maxDeviationBps) x navAfter ,
 The sell floor collapses to `sellValue <= sellHeld` whenever `target_sell <= maxDeviationBps`, because
 the weight left behind can never be negative, and the buy leg is then the only binding constraint.
 With `maxDeviationBps` at 1,000 that is exactly the case for a ten-position equal-weight basket, whose
-buy leg caps one order at (1,000 + 1,000) / 10,000 = 20% of NAV, i.e. **5,000 USDC** at the deposit
-cap. A basket with fewer, heavier positions has `target_sell` above the band and the sell floor binds
+buy leg caps one order at (1,000 + 1,000) / 10,000 = 20% of NAV, i.e. **5,000 USDC** on a 25,000 USDC
+account. A basket with fewer, heavier positions has `target_sell` above the band and the sell floor binds
 first, tighter. The worst case is the other end: a single-position basket (target 10,000, cash 0) is
-bounded by neither leg, and one order can move the whole NAV — the full **25,000 USDC** deposit cap.
+bounded by neither leg, and one order could move the whole NAV. The deposit cap does not bound that:
+it limits principal, not value, and an account that appreciated or was sent tokens holds more. The
+registry's `maxOrderValue` does, refusing any order selling more than **25,000 USDC** at launch.
 
 ## Break-even
 
@@ -138,7 +160,7 @@ and four orders inside a single manipulated window, and the worst cell for them 
 the smallest and the largest manipulations are both cheaper per basis point of edge than the ones in
 between.
 
-So the deposit cap and the deviation band, not the slippage budget, are what bound a single order. And
+So `maxOrderValue` and the deviation band, not the slippage budget, are what bound a single order. And
 up to the drift that opens the whole budget — the first three rows, the cheap ones — the slippage
 budget is at least half the edge on its own, before any manipulation.
 

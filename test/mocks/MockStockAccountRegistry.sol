@@ -18,8 +18,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
     address public override orderSigner;
+    address public override feeRecipient;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
+    uint256 public override maxOrderValue;
     uint16 public override managementFeeBps;
     uint16 public override maxManagementFeeBps = 200;
     uint16 public override backendSlippageCeilingBps = 500;
@@ -50,6 +52,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
         maxStrategyDeposit = value;
     }
 
+    function setMaxOrderValue(uint256 value) external {
+        maxOrderValue = value;
+    }
+
     function setTwapWindow(uint32 value) external {
         twapWindow = value;
     }
@@ -68,6 +74,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setOrderSigner(address value) external {
         orderSigner = value;
+    }
+
+    function setFeeRecipient(address value) external {
+        feeRecipient = value;
     }
 
     function setAerodromeRouter(ISwapRouter value) external {
@@ -93,6 +103,19 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
             _tokens.push(token);
         }
         _tokenConfig[token] = cfg;
+    }
+
+    /// @notice Drops a token from the list and resets its status to None, as the registry's delistToken does
+    function delistToken(address token) external {
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            if (_tokens[i] == token) {
+                _tokens[i] = _tokens[_tokens.length - 1];
+                _tokens.pop();
+                break;
+            }
+        }
+        _listed[token] = false;
+        delete _tokenConfig[token];
     }
 
     function tokenConfig(address token) external view override returns (TokenConfig memory) {

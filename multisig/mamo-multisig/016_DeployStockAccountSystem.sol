@@ -35,7 +35,7 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  *      `script/stock-accounts/vnet-up.sh` drives; the two are deliberately not merged, because the
  *      vnet path impersonates unlocked admins and this one has to produce one signable batch.
  *
- *      ONE SAFE IS WHAT MAKES ONE BATCH POSSIBLE. In `8453_PROD.json` the stock registry admin, the
+ *      ONE SAFE IS WHAT MAKES ONE BATCH POSSIBLE. In `8453_PROD-016.json` the stock registry admin, the
  *      Mamo registry's `DEFAULT_ADMIN_ROLE` holder and the existing price checker's `owner()` are all
  *      MAMO_MULTISIG. {preBuildMock} asserts that identity rather than assuming it: if any of the
  *      three moves, the batch stops being executable and this proposal has to be split.
@@ -67,6 +67,9 @@ contract DeployStockAccountSystem is MultisigProposal {
     string internal constant IMPL_KEY = "STOCK_ACCOUNT_STRATEGY_IMPL";
     string internal constant FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
+    /// @notice The launch list this proposal executed with, frozen so later list edits do not rewrite it
+    string internal constant TOKEN_LIST = "./config/stock-accounts/8453-016.json";
+
     /// @notice Staleness bound of the USDC/USD hop every Chainlink entry is quoted through
     /// @dev Deliberately above the feed's nominal 86,400 heartbeat, and identical to the value
     ///      `script/DeployStockAccounts.s.sol` uses. Walking the live Base aggregator over 31.8 days,
@@ -74,6 +77,9 @@ contract DeployStockAccountSystem is MultisigProposal {
     ///      cycle, and valuation has no try/catch, so at 86,400 the quote reverts for a minute or so
     ///      each day. Do not tighten this back to the nominal heartbeat
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
+
+    /// @notice Price checker's sequencer grace period, same as proposal 013
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
 
     /// @notice Strategy type slots that already hold live implementations and must survive untouched
     uint256 internal constant GUARDED_SLOTS = 4;
@@ -88,7 +94,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     bool internal _slotsSnapshotted;
 
     constructor() {
-        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD.json");
+        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD-016.json");
         vm.makePersistent(address(deployConfig));
 
         strategyTypeId = deployConfig.getConfig().strategyTypeId;
@@ -138,10 +144,12 @@ contract DeployStockAccountSystem is MultisigProposal {
             admin: addresses.getAddress(cfg.admin),
             aerodromeRouter: ISwapRouter(addresses.getAddress(cfg.aerodromeRouter)),
             asset: addresses.getAddress(cfg.asset),
+            feeRecipient: addresses.getAddress(cfg.feeRecipient),
             guardian: addresses.getAddress(cfg.guardian),
             managementFeeBps: cfg.managementFeeBps,
             maxBackendSlippageBps: cfg.maxBackendSlippageBps,
             maxDeviationBps: cfg.maxDeviationBps,
+            maxOrderValue: cfg.maxOrderValue,
             maxPositions: cfg.maxPositions,
             maxStrategyDeposit: cfg.maxStrategyDeposit,
             maxWithdrawSlippageBps: cfg.maxWithdrawSlippageBps,
@@ -168,7 +176,9 @@ contract DeployStockAccountSystem is MultisigProposal {
         StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
             IStockAccountRegistry(addresses.getAddress(REGISTRY_KEY)),
             addresses.getAddress(cfg.asset),
-            ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker))
+            ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker)),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            SEQUENCER_GRACE_PERIOD
         );
         vm.stopBroadcast();
 
@@ -200,9 +210,7 @@ contract DeployStockAccountSystem is MultisigProposal {
             addresses.getAddress(REGISTRY_KEY),
             addresses.getAddress(cfg.asset),
             addresses.getAddress(cfg.cowSettlement),
-            addresses.getAddress(IMPL_KEY),
-            strategyTypeId,
-            addresses.getAddress(cfg.feeRecipient)
+            strategyTypeId
         );
         vm.stopBroadcast();
 
@@ -244,7 +252,7 @@ contract DeployStockAccountSystem is MultisigProposal {
         );
         assertLt(mamoRegistry.nextStrategyTypeId(), strategyTypeId, "strategy type id is within reach of the counter");
 
-        // The factory constructor rejects a zero fee recipient, so it is a deploy-time blocker.
+        // The registry constructor rejects a zero fee recipient, so it is a deploy-time blocker.
         assertTrue(addresses.getAddress(cfg.feeRecipient) != address(0), "Fee recipient should be set");
 
         // `setPriceChecker` reverts `AlreadySet` on a no-op, so the first action needs a real change.
@@ -289,7 +297,7 @@ contract DeployStockAccountSystem is MultisigProposal {
      *      token: cbBTC, an ordinary contract, is never stood in for.
      */
     function _standInForNodeNativeTokens() internal {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         for (uint256 i = 0; i < entries.length; i++) {
             bytes memory code = entries[i].token.code;
@@ -331,7 +339,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     ///      Chainlink entry on the launch list; the loop is over the config so adding one needs no edit
     function _configureExistingChecker() internal {
         StockAccountsConfig.DeploymentConfig memory cfg = deployConfig.getConfig();
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         ISlippagePriceChecker existing = ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker));
         address asset = addresses.getAddress(cfg.asset);
@@ -364,7 +372,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     }
 
     function _listTokens(StockAccountRegistry stockRegistry) internal {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         for (uint256 i = 0; i < entries.length; i++) {
             if (stockRegistry.tokenConfig(entries[i].token).status != IStockAccountRegistry.TokenStatus.None) continue;
@@ -440,6 +448,12 @@ contract DeployStockAccountSystem is MultisigProposal {
             addresses.getAddress(cfg.existingPriceChecker),
             "Checker existingChecker mismatch"
         );
+        assertEq(
+            checker.sequencerUptimeFeed(),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            "Checker sequencer feed mismatch"
+        );
+        assertEq(checker.sequencerGracePeriod(), SEQUENCER_GRACE_PERIOD, "Checker grace period mismatch");
     }
 
     /// @notice Slots 1-4 still hold exactly the implementations they held before the batch
@@ -470,6 +484,7 @@ contract DeployStockAccountSystem is MultisigProposal {
         );
         assertEq(stockRegistry.asset(), addresses.getAddress(cfg.asset), "Registry asset mismatch");
         assertEq(stockRegistry.orderSigner(), addresses.getAddress(cfg.orderSigner), "Registry orderSigner mismatch");
+        assertEq(stockRegistry.feeRecipient(), addresses.getAddress(cfg.feeRecipient), "Registry feeRecipient mismatch");
         assertEq(stockRegistry.maxPositions(), cfg.maxPositions, "Registry maxPositions mismatch");
         assertEq(stockRegistry.minTargetBps(), cfg.minTargetBps, "Registry minTargetBps mismatch");
         assertEq(stockRegistry.maxDeviationBps(), cfg.maxDeviationBps, "Registry maxDeviationBps mismatch");
@@ -485,6 +500,7 @@ contract DeployStockAccountSystem is MultisigProposal {
         assertEq(stockRegistry.twapWindow(), cfg.twapWindow, "Registry twapWindow mismatch");
         assertEq(stockRegistry.minStrategyDeposit(), cfg.minStrategyDeposit, "Registry minStrategyDeposit mismatch");
         assertEq(stockRegistry.maxStrategyDeposit(), cfg.maxStrategyDeposit, "Registry maxStrategyDeposit mismatch");
+        assertEq(stockRegistry.maxOrderValue(), cfg.maxOrderValue, "Registry maxOrderValue mismatch");
         assertFalse(stockRegistry.paused(), "Registry should not be paused");
 
         assertTrue(
@@ -514,7 +530,6 @@ contract DeployStockAccountSystem is MultisigProposal {
             factory.strategyImplementation(), addresses.getAddress(IMPL_KEY), "Factory strategyImplementation mismatch"
         );
         assertEq(factory.strategyTypeId(), strategyTypeId, "Factory strategyTypeId mismatch");
-        assertEq(factory.feeRecipient(), addresses.getAddress(cfg.feeRecipient), "Factory feeRecipient mismatch");
 
         assertTrue(
             factory.hasRole(factory.DEFAULT_ADMIN_ROLE(), addresses.getAddress(cfg.admin)), "Factory admin mismatch"
@@ -527,7 +542,7 @@ contract DeployStockAccountSystem is MultisigProposal {
     /// @dev Every launch token Active, with the configured source and pool, and quoting a real price.
     function _validateTokenList() internal view {
         StockAccountsConfig.DeploymentConfig memory cfg = deployConfig.getConfig();
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(REGISTRY_KEY));
         StockAccountPriceChecker checker = StockAccountPriceChecker(addresses.getAddress(PRICE_CHECKER_KEY));
         address asset = addresses.getAddress(cfg.asset);

@@ -66,9 +66,11 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMaxDeviationBps(1000);
         stockRegistry.setMinStrategyDeposit(MIN_DEPOSIT);
         stockRegistry.setMaxStrategyDeposit(CAP);
+        stockRegistry.setMaxOrderValue(CAP);
         stockRegistry.setMaxBackendSlippageBps(100);
         stockRegistry.setManagementFeeBps(100);
         stockRegistry.setPriceChecker(priceChecker);
+        stockRegistry.setFeeRecipient(feeRecipient);
 
         (orderSigner, orderSignerKey) = makeAddrAndKey("orderSigner");
         stockRegistry.setOrderSigner(orderSigner);
@@ -124,7 +126,6 @@ abstract contract StockAccountStrategyTestBase is Test {
             cashTargetBps: 0,
             cowSettlement: address(settlement),
             entries: _entries(address(nvda), 5000, address(aapl), 5000),
-            feeRecipient: feeRecipient,
             mamoStrategyRegistry: address(registry),
             owner: user,
             stockRegistry: address(stockRegistry),
@@ -141,6 +142,13 @@ abstract contract StockAccountStrategyTestBase is Test {
     function _sign(bytes32 digest) internal view returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(orderSignerKey, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev The owner's withdrawal capped at what the preview plans, as the app sends it
+    function _withdraw(uint256 usdcAmount, uint16 maxSlippageBps) internal {
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(usdcAmount, maxSlippageBps);
+        vm.prank(user);
+        strategy.withdraw(usdcAmount, maxSlippageBps, tokens, amounts, block.timestamp);
     }
 
     function _fundUsdc(address to, uint256 amount) internal {

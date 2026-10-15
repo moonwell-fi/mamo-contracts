@@ -42,6 +42,9 @@ contract DeployStockAccounts is Script {
     ///      it. Do not tighten this back to the nominal heartbeat
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
 
+    /// @notice Price checker's sequencer grace period, same as proposal 013
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
+
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
     StockAccountsConfig.DeploymentConfig internal config;
@@ -71,7 +74,7 @@ contract DeployStockAccounts is Script {
         _setPriceChecker(stockRegistry, priceChecker);
         address implementation = _deployImplementation();
         uint256 strategyTypeId = _whitelistImplementation(mamoRegistry, implementation);
-        address factory = _deployFactory(stockRegistry, implementation, strategyTypeId);
+        address factory = _deployFactory(stockRegistry, strategyTypeId);
         _grantBackendRole(mamoRegistry, factory);
         _listTokens(stockRegistry);
 
@@ -93,23 +96,25 @@ contract DeployStockAccounts is Script {
             return existing;
         }
 
-        StockAccountRegistry.Config memory registryConfig = StockAccountRegistry.Config({
-            admin: addresses.getAddress(config.admin),
-            aerodromeRouter: ISwapRouter(addresses.getAddress(config.aerodromeRouter)),
-            asset: addresses.getAddress(config.asset),
-            guardian: addresses.getAddress(config.guardian),
-            managementFeeBps: config.managementFeeBps,
-            maxBackendSlippageBps: config.maxBackendSlippageBps,
-            maxDeviationBps: config.maxDeviationBps,
-            maxPositions: config.maxPositions,
-            maxStrategyDeposit: config.maxStrategyDeposit,
-            maxWithdrawSlippageBps: config.maxWithdrawSlippageBps,
-            minStrategyDeposit: config.minStrategyDeposit,
-            minTargetBps: config.minTargetBps,
-            orderSigner: addresses.getAddress(config.orderSigner),
-            priceChecker: ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker)),
-            twapWindow: config.twapWindow
-        });
+        // Field by field: as a 17-field literal it is too deep for the stack in this script
+        StockAccountRegistry.Config memory registryConfig;
+        registryConfig.admin = addresses.getAddress(config.admin);
+        registryConfig.aerodromeRouter = ISwapRouter(addresses.getAddress(config.aerodromeRouter));
+        registryConfig.asset = addresses.getAddress(config.asset);
+        registryConfig.feeRecipient = addresses.getAddress(config.feeRecipient);
+        registryConfig.guardian = addresses.getAddress(config.guardian);
+        registryConfig.managementFeeBps = config.managementFeeBps;
+        registryConfig.maxBackendSlippageBps = config.maxBackendSlippageBps;
+        registryConfig.maxDeviationBps = config.maxDeviationBps;
+        registryConfig.maxOrderValue = config.maxOrderValue;
+        registryConfig.maxPositions = config.maxPositions;
+        registryConfig.maxStrategyDeposit = config.maxStrategyDeposit;
+        registryConfig.maxWithdrawSlippageBps = config.maxWithdrawSlippageBps;
+        registryConfig.minStrategyDeposit = config.minStrategyDeposit;
+        registryConfig.minTargetBps = config.minTargetBps;
+        registryConfig.orderSigner = addresses.getAddress(config.orderSigner);
+        registryConfig.priceChecker = ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker));
+        registryConfig.twapWindow = config.twapWindow;
 
         vm.startBroadcast();
         StockAccountRegistry registry = new StockAccountRegistry(registryConfig);
@@ -133,7 +138,9 @@ contract DeployStockAccounts is Script {
         StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
             IStockAccountRegistry(stockRegistry),
             addresses.getAddress(config.asset),
-            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker))
+            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker)),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            SEQUENCER_GRACE_PERIOD
         );
         vm.stopBroadcast();
 
@@ -202,10 +209,7 @@ contract DeployStockAccounts is Script {
     }
 
     /// @notice Deploys the StockAccountStrategyFactory, or returns the one already recorded in addresses
-    function _deployFactory(address stockRegistry, address implementation, uint256 strategyTypeId)
-        internal
-        returns (address)
-    {
+    function _deployFactory(address stockRegistry, uint256 strategyTypeId) internal returns (address) {
         if (addresses.isAddressSet(FACTORY_NAME)) {
             address existing = addresses.getAddress(FACTORY_NAME);
             console.log("step 6 skipped, %s already deployed at %s", FACTORY_NAME, existing);
@@ -220,9 +224,7 @@ contract DeployStockAccounts is Script {
             stockRegistry,
             addresses.getAddress(config.asset),
             addresses.getAddress(config.cowSettlement),
-            implementation,
-            strategyTypeId,
-            addresses.getAddress(config.feeRecipient)
+            strategyTypeId
         );
         vm.stopBroadcast();
 

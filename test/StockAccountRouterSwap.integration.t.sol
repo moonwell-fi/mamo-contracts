@@ -49,6 +49,8 @@ contract StockAccountRouterSwapIntegrationTest is Test {
     address internal constant CHAINLINK_BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
     address internal constant CHAINLINK_SWAP_CHECKER_PROXY = 0x5A8F10be44E25Bb21492C5f46DA94cDb1f0b2fF6;
+    address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
     address internal constant COWSWAP_SETTLEMENT = 0x9008D19f58AAbD9eD0D60971565AA8510560ab41;
 
     /// @dev The staleness bounds of `DeployStockAccounts`: the launch list's cbBTC heartbeat, and the
@@ -101,10 +103,12 @@ contract StockAccountRouterSwapIntegrationTest is Test {
                 admin: admin,
                 aerodromeRouter: ISwapRouter(AERODROME_STOCKS_SWAP_ROUTER),
                 asset: USDC,
+                feeRecipient: feeRecipient,
                 guardian: guardian,
                 managementFeeBps: MANAGEMENT_FEE_BPS,
                 maxBackendSlippageBps: MAX_BACKEND_SLIPPAGE_BPS,
                 maxDeviationBps: 1000,
+                maxOrderValue: MAX_STRATEGY_DEPOSIT,
                 maxPositions: 10,
                 maxStrategyDeposit: MAX_STRATEGY_DEPOSIT,
                 maxWithdrawSlippageBps: MAX_WITHDRAW_SLIPPAGE_BPS,
@@ -116,8 +120,13 @@ contract StockAccountRouterSwapIntegrationTest is Test {
             })
         );
 
-        priceChecker =
-            new StockAccountPriceChecker(stockRegistry, USDC, ISlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY));
+        priceChecker = new StockAccountPriceChecker(
+            stockRegistry,
+            USDC,
+            ISlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY),
+            CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
+            SEQUENCER_GRACE_PERIOD
+        );
 
         vm.prank(admin);
         stockRegistry.setPriceChecker(priceChecker);
@@ -155,7 +164,6 @@ contract StockAccountRouterSwapIntegrationTest is Test {
                                     cashTargetBps: 0,
                                     cowSettlement: COWSWAP_SETTLEMENT,
                                     entries: entries,
-                                    feeRecipient: feeRecipient,
                                     mamoStrategyRegistry: address(mamoRegistry),
                                     owner: user,
                                     stockRegistry: address(stockRegistry),
@@ -240,7 +248,8 @@ contract StockAccountRouterSwapIntegrationTest is Test {
     function test_fork_withdrawSellsCbbtcOnTheRealPool() public {
         _fundAccount();
 
-        (,, uint256 referenceValue, uint256 minProceeds) = strategy.previewWithdraw(WITHDRAW_AMOUNT, TOLERANCE_BPS);
+        (address[] memory tokens, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds) =
+            strategy.previewWithdraw(WITHDRAW_AMOUNT, TOLERANCE_BPS);
         assertGt(minProceeds, 0, "vacuous: nothing planned to sell");
 
         uint256 poolCbbtcBefore = IERC20(CBBTC).balanceOf(CBBTC_USDC_POOL);
@@ -248,7 +257,7 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         (uint160 sqrtPriceBefore,,,,,) = ICLPool(CBBTC_USDC_POOL).slot0();
 
         vm.prank(user);
-        strategy.withdraw(WITHDRAW_AMOUNT, TOLERANCE_BPS);
+        strategy.withdraw(WITHDRAW_AMOUNT, TOLERANCE_BPS, tokens, amounts, block.timestamp);
 
         uint256 sold = CBBTC_POSITION - IERC20(CBBTC).balanceOf(address(strategy));
         uint256 proceeds = IERC20(USDC).balanceOf(address(strategy)) + WITHDRAW_AMOUNT - strategyUsdcBefore;
@@ -282,7 +291,7 @@ contract StockAccountRouterSwapIntegrationTest is Test {
 
         vm.recordLogs();
         vm.prank(user);
-        strategy.withdraw(WITHDRAW_AMOUNT, TOLERANCE_BPS);
+        strategy.withdraw(WITHDRAW_AMOUNT, TOLERANCE_BPS, tokens, amounts, block.timestamp);
 
         uint256 sold = CBBTC_POSITION - IERC20(CBBTC).balanceOf(address(strategy));
         uint256 proceeds = IERC20(USDC).balanceOf(address(strategy)) + WITHDRAW_AMOUNT - strategyUsdcBefore;
@@ -296,22 +305,23 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         _deal(CBBTC, address(strategy), IMPACT_POSITION);
         uint256 requested = (priceChecker.getExpectedOut(IMPACT_POSITION, CBBTC, USDC) * IMPACT_REQUEST_BPS) / TOTAL_BPS;
 
-        (,,, uint256 tightFloor) = strategy.previewWithdraw(requested, IMPACT_TOO_TIGHT_BPS);
+        (address[] memory tokens, uint256[] memory amounts,, uint256 tightFloor) =
+            strategy.previewWithdraw(requested, IMPACT_TOO_TIGHT_BPS);
         assertGt(tightFloor, 0, "vacuous: nothing planned to sell");
 
         uint256 snapshot = vm.snapshotState();
 
         vm.prank(user);
         vm.expectRevert(bytes("Too little received"));
-        strategy.withdraw(requested, IMPACT_TOO_TIGHT_BPS);
+        strategy.withdraw(requested, IMPACT_TOO_TIGHT_BPS, tokens, amounts, block.timestamp);
 
         vm.revertToState(snapshot);
 
-        (, uint256[] memory amounts, uint256 referenceValue,) =
-            strategy.previewWithdraw(requested, IMPACT_WIDE_ENOUGH_BPS);
+        uint256 referenceValue;
+        (tokens, amounts, referenceValue,) = strategy.previewWithdraw(requested, IMPACT_WIDE_ENOUGH_BPS);
 
         vm.prank(user);
-        strategy.withdraw(requested, IMPACT_WIDE_ENOUGH_BPS);
+        strategy.withdraw(requested, IMPACT_WIDE_ENOUGH_BPS, tokens, amounts, block.timestamp);
 
         uint256 sold = IMPACT_POSITION - IERC20(CBBTC).balanceOf(address(strategy));
         uint256 proceeds = IERC20(USDC).balanceOf(address(strategy)) + requested;
@@ -331,7 +341,7 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         uint256 referenceValue = priceChecker.getExpectedOut(CBBTC_POSITION, CBBTC, USDC);
 
         vm.prank(user);
-        strategy.withdrawAll(TOLERANCE_BPS);
+        strategy.withdrawAll(TOLERANCE_BPS, 0, block.timestamp);
 
         assertEq(IERC20(CBBTC).balanceOf(address(strategy)), 0, "position left behind");
         assertEq(IERC20(USDC).balanceOf(address(strategy)), 0, "asset left behind");
@@ -339,6 +349,24 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         uint256 received = IERC20(USDC).balanceOf(user);
         assertGe(received, IDLE_USDC + (referenceValue * (TOTAL_BPS - TOLERANCE_BPS)) / TOTAL_BPS, "under the floor");
         assertLt(received, IDLE_USDC + referenceValue, "vacuous: the real pool paid the reference exactly");
+    }
+
+    /// @dev Five wei of cbBTC: the pool rounds its fee up to at least a wei, so a leg this size can
+    ///      never clear its own floor, and selling it used to revert the whole exit.
+    function test_fork_withdrawAllLeavesUnsellableDustBehind() public {
+        _deal(USDC, funder, IDLE_USDC);
+        vm.prank(funder);
+        IERC20(USDC).approve(address(strategy), IDLE_USDC);
+        vm.prank(funder);
+        strategy.deposit(IDLE_USDC);
+
+        _deal(CBBTC, address(strategy), 5);
+
+        vm.prank(user);
+        strategy.withdrawAll(TOLERANCE_BPS, IDLE_USDC, block.timestamp);
+
+        assertEq(IERC20(USDC).balanceOf(user), IDLE_USDC, "owner asset");
+        assertEq(IERC20(CBBTC).balanceOf(address(strategy)), 5, "the dust stays for the in-kind exit");
     }
 
     function test_fork_withdrawAllInKindMovesTheRealBalances() public {
