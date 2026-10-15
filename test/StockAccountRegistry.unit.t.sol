@@ -571,6 +571,9 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
         registry.setMaxDeviationBps(10_001);
 
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
+        registry.setMaxDeviationBps(99);
+
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxBackendSlippageBps(501);
 
@@ -578,10 +581,16 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxBackendSlippageBps(10_000);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        registry.setMaxBackendSlippageBps(9);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(1_001);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(10_000);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        registry.setMaxWithdrawSlippageBps(49);
 
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
@@ -629,6 +638,48 @@ contract StockAccountRegistryUnitTest is Test {
 
         assertEq(registry.maxBackendSlippageBps(), 500, "backend slippage mismatch");
         assertEq(registry.maxWithdrawSlippageBps(), 1_000, "withdraw slippage mismatch");
+    }
+
+    function testCapSettersAcceptTheirFloors() public {
+        vm.startPrank(admin);
+        registry.setMaxDeviationBps(100);
+        registry.setMaxBackendSlippageBps(10);
+        registry.setMaxWithdrawSlippageBps(50);
+        vm.stopPrank();
+
+        assertEq(registry.maxDeviationBps(), 100, "max deviation mismatch");
+        assertEq(registry.maxBackendSlippageBps(), 10, "backend slippage mismatch");
+        assertEq(registry.maxWithdrawSlippageBps(), 50, "withdraw slippage mismatch");
+    }
+
+    function testConstructorRefusesCapsBelowTheirFloors() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxDeviationBps = 99;
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
+        new StockAccountRegistry(config);
+
+        config = defaultConfig();
+        config.maxBackendSlippageBps = 9;
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        new StockAccountRegistry(config);
+
+        config = defaultConfig();
+        config.maxWithdrawSlippageBps = 49;
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testDeployConfigsClearTheCapFloors() public {
+        string[2] memory files = ["deploy/stock-accounts/8453_PROD.json", "deploy/stock-accounts/8453_TESTING.json"];
+        for (uint256 i = 0; i < files.length; i++) {
+            string memory json = vm.readFile(files[i]);
+            StockAccountRegistry.Config memory config = defaultConfig();
+            config.maxDeviationBps = uint16(vm.parseJsonUint(json, ".maxDeviationBps"));
+            config.maxBackendSlippageBps = uint16(vm.parseJsonUint(json, ".maxBackendSlippageBps"));
+            config.maxWithdrawSlippageBps = uint16(vm.parseJsonUint(json, ".maxWithdrawSlippageBps"));
+            config.twapWindow = uint32(vm.parseJsonUint(json, ".twapWindow"));
+            new StockAccountRegistry(config);
+        }
     }
 
     function testListTokenStoresConfigAndEmits() public {

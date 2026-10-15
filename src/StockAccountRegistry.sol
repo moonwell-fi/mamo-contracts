@@ -394,7 +394,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxDeviationBps(uint16 newMaxDeviationBps) internal {
-        if (newMaxDeviationBps > 10_000) revert InvalidMaxDeviation();
+        if (newMaxDeviationBps < 100 || newMaxDeviationBps > 10_000) revert InvalidMaxDeviation();
 
         uint16 oldValue = maxDeviationBps;
         maxDeviationBps = newMaxDeviationBps;
@@ -403,7 +403,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > backendSlippageCeilingBps) revert InvalidSlippageCap();
+        if (newSlippageBps < 10 || newSlippageBps > backendSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -412,7 +412,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > withdrawSlippageCeilingBps) revert InvalidSlippageCap();
+        if (newSlippageBps < 50 || newSlippageBps > withdrawSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;
