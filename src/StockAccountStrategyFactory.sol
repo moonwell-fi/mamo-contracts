@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {ERC1967Proxy} from "./ERC1967Proxy.sol";
 import {StockAccountStrategy} from "./StockAccountStrategy.sol";
+import {IBaseStrategy} from "./interfaces/IBaseStrategy.sol";
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
 import {IStockAccountRegistry} from "./interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "./interfaces/IStockAccountStrategy.sol";
@@ -101,6 +102,13 @@ contract StockAccountStrategyFactory is AccessControl {
 
         address predicted = Create2.computeAddress(salt, keccak256(bytecode));
         if (predicted.code.length != 0) revert StrategyAlreadyExists(predicted);
+
+        address[] memory existing = mamoStrategyRegistry.getUserStrategies(user);
+        for (uint256 i = 0; i < existing.length; i++) {
+            if (IBaseStrategy(existing[i]).strategyTypeId() == strategyTypeId) {
+                revert StrategyAlreadyExists(existing[i]);
+            }
+        }
 
         strategy = Create2.deploy(0, salt, bytecode);
 

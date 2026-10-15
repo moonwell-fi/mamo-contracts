@@ -303,6 +303,48 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertTrue(registry.isUserStrategy(user, account), "registered for user");
     }
 
+    function testTransferredAccountBlocksASecondAccountForTheNewOwner() public {
+        vm.prank(user);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+        vm.prank(user);
+        StockAccountStrategy(payable(account)).transferOwnership(stranger);
+
+        assertTrue(factory.computeStrategyAddress(stranger) != account, "new owner's slot is still empty");
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(StockAccountStrategyFactory.StrategyAlreadyExists.selector, account));
+        factory.createStrategyForUser(stranger, _entries(5000, 5000), 0);
+    }
+
+    function testExistingAccountOnAnOlderImplementationBlocksASecondAccount() public {
+        vm.prank(backend);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        address newer = address(new StockAccountStrategy());
+        vm.prank(admin);
+        registry.whitelistImplementation(newer, strategyTypeId);
+
+        vm.prank(backend);
+        vm.expectRevert(abi.encodeWithSelector(StockAccountStrategyFactory.StrategyAlreadyExists.selector, account));
+        factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+    }
+
+    function testAStrategyOfAnotherTypeDoesNotBlockCreation() public {
+        address otherImplementation = address(new StockAccountStrategy());
+        vm.prank(admin);
+        uint256 otherTypeId = registry.whitelistImplementation(otherImplementation, 0);
+        StockAccountStrategyFactory otherFactory = _factoryFor(otherTypeId);
+
+        vm.prank(backend);
+        address other = otherFactory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        vm.prank(backend);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        assertTrue(registry.isUserStrategy(user, other), "other type kept");
+        assertTrue(registry.isUserStrategy(user, account), "stock account registered");
+    }
+
     function _factoryFor(uint256 typeId) internal returns (StockAccountStrategyFactory f) {
         f = new StockAccountStrategyFactory(
             admin, backend, address(registry), address(stockRegistry), address(usdc), address(settlement), typeId
