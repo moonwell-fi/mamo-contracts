@@ -14,6 +14,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
 import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "@test/mocks/MockPriceChecker.sol";
+import {MockSequencerUptimeFeed} from "@test/mocks/MockSequencerUptimeFeed.sol";
 import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol";
 import {MockSwapRouter} from "@test/mocks/MockSwapRouter.sol";
 
@@ -1497,7 +1498,14 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
             })
         );
 
-        checker = new StockAccountPriceChecker(IStockAccountRegistry(address(registry)), address(usdc), existingChecker);
+        vm.warp(1 days);
+        checker = new StockAccountPriceChecker(
+            IStockAccountRegistry(address(registry)),
+            address(usdc),
+            existingChecker,
+            address(new MockSequencerUptimeFeed(0, 1)),
+            3600
+        );
         vm.prank(admin);
         registry.setPriceChecker(ISlippagePriceChecker(address(checker)));
 

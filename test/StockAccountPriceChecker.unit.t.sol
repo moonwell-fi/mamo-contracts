@@ -12,16 +12,20 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
 import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "@test/mocks/MockPriceChecker.sol";
+import {MockSequencerUptimeFeed} from "@test/mocks/MockSequencerUptimeFeed.sol";
 import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol";
 
 contract StockAccountPriceCheckerUnitTest is Test {
     uint32 internal constant WINDOW = 180;
+    uint256 internal constant GRACE = 3600;
+    uint256 internal constant START = 1_700_000_000;
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant FEED_MAX_TIME_PRICE_VALID = 3600;
     uint256 internal constant EXPECTED_ALT_TICK_500000 = 5171760815372400971558161892130124037985;
 
     MockStockAccountRegistry internal registry;
     MockPriceChecker internal existingChecker;
+    MockSequencerUptimeFeed internal sequencerFeed;
     StockAccountPriceChecker internal checker;
 
     MockERC20Decimals internal usdc; // 6 dec
@@ -64,7 +68,9 @@ contract StockAccountPriceCheckerUnitTest is Test {
         existingChecker.setRate(address(feedAlt), address(usdc), 2e6);
         existingChecker.setMaxTimePriceValid(address(feedToken), FEED_MAX_TIME_PRICE_VALID);
 
-        checker = new StockAccountPriceChecker(registry, address(usdc), existingChecker);
+        vm.warp(START);
+        sequencerFeed = new MockSequencerUptimeFeed(0, START - 1 days);
+        checker = new StockAccountPriceChecker(registry, address(usdc), existingChecker, address(sequencerFeed), GRACE);
 
         stockPool.setMeanTick(0, WINDOW);
         altPool.setMeanTick(0, WINDOW);
@@ -93,15 +99,70 @@ contract StockAccountPriceCheckerUnitTest is Test {
     function test_constructor_setsRegistryAndQuoteAsset() public view {
         assertEq(address(checker.registry()), address(registry));
         assertEq(checker.quoteAsset(), address(usdc));
+        assertEq(checker.sequencerUptimeFeed(), address(sequencerFeed));
+        assertEq(checker.sequencerGracePeriod(), GRACE);
     }
 
     function test_constructor_revertsOnZeroAddresses() public {
+        address feed = address(sequencerFeed);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(IStockAccountRegistry(address(0)), address(usdc), existingChecker);
+        new StockAccountPriceChecker(IStockAccountRegistry(address(0)), address(usdc), existingChecker, feed, GRACE);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(0), existingChecker);
+        new StockAccountPriceChecker(registry, address(0), existingChecker, feed, GRACE);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(usdc), ISlippagePriceChecker(address(0)));
+        new StockAccountPriceChecker(registry, address(usdc), ISlippagePriceChecker(address(0)), feed, GRACE);
+        vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, address(0), GRACE);
+    }
+
+    function test_constructor_revertsOnZeroOrShortGracePeriod() public {
+        address feed = address(sequencerFeed);
+        vm.expectRevert(StockAccountPriceChecker.ZeroGracePeriod.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 0);
+        vm.expectRevert(StockAccountPriceChecker.GracePeriodTooShort.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes - 1);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes);
+    }
+
+    // ==================== sequencer gate ====================
+
+    function test_sequencerGate_upPastGraceQuotes() public {
+        sequencerFeed.set(0, block.timestamp - GRACE);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+        assertEq(checker.getExpectedOut(1e8, address(usdc), address(stock)), 1e8);
+    }
+
+    function test_sequencerGate_downRevertsTwapQuotes() public {
+        sequencerFeed.set(1, block.timestamp - 1 days);
+        vm.expectRevert(StockAccountPriceChecker.SequencerDown.selector);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+        vm.expectRevert(StockAccountPriceChecker.SequencerDown.selector);
+        checker.getExpectedOut(1e8, address(usdc), address(stock));
+        vm.expectRevert(StockAccountPriceChecker.SequencerDown.selector);
+        checker.checkPrice(1e8, address(stock), address(usdc), 1, 100);
+    }
+
+    function test_sequencerGate_backUpInsideGraceReverts() public {
+        sequencerFeed.set(0, block.timestamp - GRACE + 1);
+        vm.expectRevert(StockAccountPriceChecker.SequencerGracePeriodNotOver.selector);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+        vm.warp(block.timestamp + 1);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    function test_sequencerGate_incompleteRoundReverts() public {
+        sequencerFeed.set(0, 0);
+        vm.expectRevert(StockAccountPriceChecker.SequencerRoundIncomplete.selector);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    function test_sequencerGate_chainlinkTokenStillQuotesWhileDown() public {
+        sequencerFeed.set(1, block.timestamp);
+        assertEq(checker.getExpectedOut(3e8, address(feedToken), address(usdc)), 751_500_000);
+        assertEq(checker.getExpectedOut(250_500_000, address(usdc), address(feedToken)), 1e8);
+        assertEq(checker.getExpectedOut(1e8, address(feedToken), address(feedAlt)), 125.25e18);
+        vm.expectRevert(StockAccountPriceChecker.SequencerDown.selector);
+        checker.getExpectedOut(1e8, address(feedToken), address(stock));
     }
 
     // ==================== TWAP reference ====================

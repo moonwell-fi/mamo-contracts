@@ -62,6 +62,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     address internal constant CBBTC_USDC_POOL = 0x3F53aFD15909bF5B1c5963b5C0D28123668ce174; // cardinality 1 at the pin
     address internal constant CHAINLINK_BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
+    address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
     address internal constant STRANGER = 0x000000000000000000000000000000000000dEaD;
 
     /// @dev Swap inputs large enough to run the pool to the sqrt-price limit the helpers set; the
@@ -98,7 +100,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         // The checker takes the registry as an immutable, so the registry is built first against a
         // code-bearing stand-in (this test contract) and repointed once the real checker exists.
         registry = _deployRegistry();
-        checker = new StockAccountPriceChecker(registry, USDC, existingChecker);
+        checker = new StockAccountPriceChecker(
+            registry, USDC, existingChecker, CHAINLINK_L2_SEQUENCER_UPTIME_FEED, SEQUENCER_GRACE_PERIOD
+        );
         vm.prank(admin);
         registry.setPriceChecker(checker);
         assertEq(address(registry.priceChecker()), address(checker));
@@ -960,7 +964,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(cardinality, 1, "vacuous: the pool already keeps history");
 
         StockAccountRegistry poolRegistry = _deployRegistry();
-        StockAccountPriceChecker poolChecker = new StockAccountPriceChecker(poolRegistry, USDC, existingChecker);
+        StockAccountPriceChecker poolChecker = new StockAccountPriceChecker(
+            poolRegistry, USDC, existingChecker, CHAINLINK_L2_SEQUENCER_UPTIME_FEED, SEQUENCER_GRACE_PERIOD
+        );
         vm.startPrank(admin);
         poolRegistry.setPriceChecker(poolChecker);
         poolRegistry.listToken(CBBTC, _poolTwapConfig(CBBTC_USDC_POOL));

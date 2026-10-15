@@ -46,9 +46,10 @@ account's NAV after that (see below). The whole rerun is a no-op.
 
 1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
    deployed with the placeholder price checker (see Configuration)
-2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker)` — recorded as
-   `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker` that
-   every `PriceSource.Chainlink` token is priced against (see Configuration)
+2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker, sequencerUptimeFeed, 3600)` —
+   recorded as `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker`
+   that every `PriceSource.Chainlink` token is priced against (see Configuration); the last two gate
+   every PoolTwap quote on the Base sequencer being up for at least an hour
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
 4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the

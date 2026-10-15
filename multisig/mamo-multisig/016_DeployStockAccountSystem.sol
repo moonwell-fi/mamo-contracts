@@ -78,6 +78,9 @@ contract DeployStockAccountSystem is MultisigProposal {
     ///      each day. Do not tighten this back to the nominal heartbeat
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
 
+    /// @notice Price checker's sequencer grace period, same as proposal 013
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
+
     /// @notice Strategy type slots that already hold live implementations and must survive untouched
     uint256 internal constant GUARDED_SLOTS = 4;
 
@@ -173,7 +176,9 @@ contract DeployStockAccountSystem is MultisigProposal {
         StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
             IStockAccountRegistry(addresses.getAddress(REGISTRY_KEY)),
             addresses.getAddress(cfg.asset),
-            ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker))
+            ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker)),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            SEQUENCER_GRACE_PERIOD
         );
         vm.stopBroadcast();
 
@@ -444,6 +449,12 @@ contract DeployStockAccountSystem is MultisigProposal {
             addresses.getAddress(cfg.existingPriceChecker),
             "Checker existingChecker mismatch"
         );
+        assertEq(
+            checker.sequencerUptimeFeed(),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            "Checker sequencer feed mismatch"
+        );
+        assertEq(checker.sequencerGracePeriod(), SEQUENCER_GRACE_PERIOD, "Checker grace period mismatch");
     }
 
     /// @notice Slots 1-4 still hold exactly the implementations they held before the batch

@@ -42,6 +42,9 @@ contract DeployStockAccounts is Script {
     ///      it. Do not tighten this back to the nominal heartbeat
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
 
+    /// @notice Price checker's sequencer grace period, same as proposal 013
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
+
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
     StockAccountsConfig.DeploymentConfig internal config;
@@ -135,7 +138,9 @@ contract DeployStockAccounts is Script {
         StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
             IStockAccountRegistry(stockRegistry),
             addresses.getAddress(config.asset),
-            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker))
+            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker)),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            SEQUENCER_GRACE_PERIOD
         );
         vm.stopBroadcast();
 

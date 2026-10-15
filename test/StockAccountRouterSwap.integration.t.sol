@@ -49,6 +49,8 @@ contract StockAccountRouterSwapIntegrationTest is Test {
     address internal constant CHAINLINK_BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
     address internal constant CHAINLINK_SWAP_CHECKER_PROXY = 0x5A8F10be44E25Bb21492C5f46DA94cDb1f0b2fF6;
+    address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
     address internal constant COWSWAP_SETTLEMENT = 0x9008D19f58AAbD9eD0D60971565AA8510560ab41;
 
     /// @dev The staleness bounds of `DeployStockAccounts`: the launch list's cbBTC heartbeat, and the
@@ -118,8 +120,13 @@ contract StockAccountRouterSwapIntegrationTest is Test {
             })
         );
 
-        priceChecker =
-            new StockAccountPriceChecker(stockRegistry, USDC, ISlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY));
+        priceChecker = new StockAccountPriceChecker(
+            stockRegistry,
+            USDC,
+            ISlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY),
+            CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
+            SEQUENCER_GRACE_PERIOD
+        );
 
         vm.prank(admin);
         stockRegistry.setPriceChecker(priceChecker);
