@@ -218,6 +218,35 @@ contract MamoStakingStrategyV2UnitTest is Test {
         assertEq(stock.balanceOf(address(stockAccount)), 1e8, "the next destination still gets its deposit");
     }
 
+    function test_initialize_crossChecksTheRegistryAndMultiRewards() public {
+        MockERC20Decimals otherMamo = new MockERC20Decimals("MAMO2", 18);
+        MamoStakingStrategyV2 impl = new MamoStakingStrategyV2();
+        MamoStakingStrategyV2.InitParams memory params = MamoStakingStrategyV2.InitParams({
+            mamoStrategyRegistry: address(strategyRegistry),
+            stakingRegistry: address(registry),
+            multiRewards: address(multiRewards),
+            mamoToken: address(otherMamo),
+            strategyTypeId: 1,
+            owner: user
+        });
+
+        vm.expectRevert("Staking registry MAMO token mismatch");
+        new ERC1967Proxy(address(impl), abi.encodeCall(MamoStakingStrategyV2.initialize, (params)));
+
+        params.stakingRegistry = address(
+            new MamoStakingRegistryV2(
+                admin, backend, admin, address(otherMamo), address(router), address(1), address(checker), 100
+            )
+        );
+        vm.expectRevert("MultiRewards token mismatch");
+        new ERC1967Proxy(address(impl), abi.encodeCall(MamoStakingStrategyV2.initialize, (params)));
+
+        params.stakingRegistry = makeAddr("eoa");
+        vm.etch(params.stakingRegistry, ""); // the label's address carries delegated code on a Base fork
+        vm.expectRevert("Staking registry not a contract");
+        new ERC1967Proxy(address(impl), abi.encodeCall(MamoStakingStrategyV2.initialize, (params)));
+    }
+
     function test_setRoute_validatesTheRoute() public {
         MockHopPool stockUsdc = new MockHopPool(address(usdc), address(stock));
         MamoStakingRegistryV2.Hop[] memory route = new MamoStakingRegistryV2.Hop[](1);
