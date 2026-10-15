@@ -30,6 +30,10 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Most tokens the registry may list, bounding the valuation every account runs
     uint256 public constant MAX_LISTED_TOKENS = 30;
 
+    /// @notice Bounds on the TWAP window, in seconds
+    uint32 public constant MIN_TWAP_WINDOW = 60;
+    uint32 public constant MAX_TWAP_WINDOW = 3600;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
@@ -421,7 +425,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setTwapWindow(uint32 newTwapWindow) internal {
-        if (newTwapWindow == 0) revert InvalidTwapWindow();
+        if (newTwapWindow < MIN_TWAP_WINDOW || newTwapWindow > MAX_TWAP_WINDOW) revert InvalidTwapWindow();
 
         uint32 oldValue = twapWindow;
         twapWindow = newTwapWindow;

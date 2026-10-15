@@ -347,10 +347,17 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(created.maxWithdrawSlippageBps(), 500, "withdraw slippage mismatch");
     }
 
-    function testConstructorRevertsOnZeroTwapWindow() public {
+    function testConstructorRevertsOnTwapWindowOutsideItsBounds() public {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.twapWindow = 0;
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        new StockAccountRegistry(config);
 
+        config.twapWindow = 59;
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        new StockAccountRegistry(config);
+
+        config.twapWindow = 3601;
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         new StockAccountRegistry(config);
     }
@@ -595,6 +602,12 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
 
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        registry.setTwapWindow(59);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        registry.setTwapWindow(3601);
+
         vm.expectRevert(IStockAccountRegistry.InvalidMaxOrderValue.selector);
         registry.setMaxOrderValue(0);
 
@@ -650,6 +663,16 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.maxDeviationBps(), 100, "max deviation mismatch");
         assertEq(registry.maxBackendSlippageBps(), 10, "backend slippage mismatch");
         assertEq(registry.maxWithdrawSlippageBps(), 50, "withdraw slippage mismatch");
+    }
+
+    function testTwapWindowAcceptsItsBounds() public {
+        vm.startPrank(admin);
+        registry.setTwapWindow(registry.MIN_TWAP_WINDOW());
+        assertEq(registry.twapWindow(), 60, "min window mismatch");
+
+        registry.setTwapWindow(registry.MAX_TWAP_WINDOW());
+        assertEq(registry.twapWindow(), 3600, "max window mismatch");
+        vm.stopPrank();
     }
 
     function testConstructorRefusesCapsBelowTheirFloors() public {

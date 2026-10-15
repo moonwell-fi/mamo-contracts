@@ -211,19 +211,15 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertFalse(checker.checkPrice(amountIn, NVDAC, USDC, floor - 1, 100));
     }
 
-    /// @dev The registry refuses a window the live pool cannot serve, so the token is halted first to
-    ///      reach the checker's own behaviour behind that guard.
+    /// @dev The live pools serve the registry's longest window, so the window is mocked past their history
     function test_fork_windowLongerThanHistoryReverts() public {
-        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, NVDAC));
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         vm.prank(admin);
         registry.setTwapWindow(type(uint32).max);
 
-        vm.startPrank(admin);
-        registry.setTokenStatus(NVDAC, IStockAccountRegistry.TokenStatus.Halted);
-        registry.setTokenStatus(AAPLC, IStockAccountRegistry.TokenStatus.Halted);
-        registry.setTwapWindow(type(uint32).max);
-        vm.stopPrank();
-
+        vm.mockCall(
+            address(registry), abi.encodeCall(IStockAccountRegistry.twapWindow, ()), abi.encode(type(uint32).max)
+        );
         vm.expectRevert(
             abi.encodeWithSelector(
                 StockAccountPriceChecker.InsufficientObservations.selector, NVDAC_USDC_POOL, type(uint32).max
