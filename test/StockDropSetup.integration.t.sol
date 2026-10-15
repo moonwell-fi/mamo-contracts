@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {StockDropCutover} from "../multisig/f-mamo/006_StockDropCutover.sol";
 import {AddStockRewards} from "../multisig/f-mamo/007_AddStockRewards.sol";
+import {SlippagePriceCheckerOracleHardening} from
+    "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
 import {DeployStockDrop} from "../multisig/mamo-multisig/017_DeployStockDrop.sol";
 import {RedeployStockAccountSystem} from "../multisig/mamo-multisig/019_RedeployStockAccountSystem.sol";
 
@@ -25,8 +27,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
-/// @notice Base-fork rehearsal of the stock drop proposals in mainnet order (mamo-multisig/019, which redeploys the
-///         stock accounts system, then mamo-multisig/017, f-mamo/006 and f-mamo/007) through the real Safes, followed by the lifecycle on the result: a live-style staking account
+/// @notice Base-fork rehearsal of the stock drop proposals in mainnet order (mamo-multisig/013, the sequencer-guarded
+///         price checker 017 requires, and 019, which redeploys the stock accounts system, then mamo-multisig/017, f-mamo/006 and f-mamo/007) through the real Safes, followed by the lifecycle on the result: a live-style staking account
 ///         upgrades and migrates, a drop tops up the running streams and starts WETH and USDC ones, the account
 ///         compounds all three through the live pools,
 ///         and a new stock account pays its fee to DropAutomationV2.
@@ -49,6 +51,7 @@ contract StockDropSetupTest is Test {
     Addresses internal addresses;
     address internal user = makeAddr("stockDropUser");
 
+    SlippagePriceCheckerOracleHardening internal oracleProposal;
     RedeployStockAccountSystem internal redeployProposal;
     DeployStockDrop internal deployProposal;
     StockDropCutover internal cutoverProposal;
@@ -65,10 +68,12 @@ contract StockDropSetupTest is Test {
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", makeAddr("stockDropDeployer"), false);
 
+        oracleProposal = new SlippagePriceCheckerOracleHardening();
         redeployProposal = new RedeployStockAccountSystem();
         deployProposal = new DeployStockDrop();
         cutoverProposal = new StockDropCutover();
         stockRewardsProposal = new AddStockRewards();
+        oracleProposal.setAddresses(addresses);
         redeployProposal.setAddresses(addresses);
         deployProposal.setAddresses(addresses);
         cutoverProposal.setAddresses(addresses);
@@ -78,10 +83,12 @@ contract StockDropSetupTest is Test {
     function test_stockDropSetup_andLifecycle() public {
         address account = _createLiveStakingAccount();
 
+        // 013: upgrade, sequencer feed, 6 backfills, 2 WETH pairs
+        _run(oracleProposal, 10);
         // 019: 4 wiring actions, 12 listings, 2 v1 retirements
         _run(redeployProposal, 18);
-        // 017: whitelist, grant, 2 revokes, fee recipient, 3 pairs
-        _run(deployProposal, 8);
+        // 017: sequencer feed, whitelist, grant, 2 revokes, fee recipient, 3 pairs
+        _run(deployProposal, 9);
         // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module
         _run(cutoverProposal, 10);
         // 007: addReward and addRewardToken for WETH, USDC and each stock
