@@ -15,6 +15,7 @@ interface IStockAccountStrategy {
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
     event FeesPaid(uint256 credited, address indexed token, uint256 amount);
+    event OrdersDisabledUpdated(bool disabled);
 
     error ZeroAddress();
     error StrategyTypeIdNotSet();
@@ -58,6 +59,7 @@ interface IStockAccountStrategy {
     error FeeTokenNotAllowed(address token);
     error NoBalanceForFee(address token);
     error RegistryPaused();
+    error OrdersDisabled();
 
     function deposit(uint256 amount) external;
 
@@ -80,6 +82,8 @@ interface IStockAccountStrategy {
     function setBasket(BasketEntry[] calldata entries, uint16 cashTargetBps) external;
 
     function setAccountSlippage(uint16 bps) external;
+
+    function setOrdersDisabled(bool disabled) external;
 
     function approveCowRelayer(address token) external;
 
@@ -116,4 +120,6 @@ interface IStockAccountStrategy {
     function lastFeePaid() external view returns (uint64);
 
     function principal() external view returns (uint256);
+
+    function ordersDisabled() external view returns (bool);
 }

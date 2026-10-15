@@ -7,6 +7,7 @@ import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
@@ -90,6 +91,30 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
 
         vm.expectRevert(IStockAccountStrategy.InvalidBackendSignature.selector);
         strategy.isValidSignature(digest, abi.encode(order, signature));
+    }
+
+    function testTheOwnerCanStopAndResumeOrders() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+        assertTrue(_check(order) == MAGIC_VALUE, "accepted before");
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.OrdersDisabledUpdated(true);
+        vm.prank(user);
+        strategy.setOrdersDisabled(true);
+        assertTrue(strategy.ordersDisabled(), "flag set");
+
+        vm.expectRevert(IStockAccountStrategy.OrdersDisabled.selector);
+        _check(order);
+
+        vm.prank(user);
+        strategy.setOrdersDisabled(false);
+        assertTrue(_check(order) == MAGIC_VALUE, "accepted again once cleared");
+    }
+
+    function testOnlyTheOwnerCanStopOrders() public {
+        vm.prank(backend);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, backend));
+        strategy.setOrdersDisabled(true);
     }
 
     function testRevertsOnBuyOrder() public {

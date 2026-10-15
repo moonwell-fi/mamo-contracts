@@ -71,6 +71,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /// @notice Capital deposited less capital withdrawn, which the deposit cap applies to
     uint256 public override principal;
 
+    /// @notice Whether the owner has stopped every order from settling on this account
+    bool public override ordersDisabled;
+
     struct InitParams {
         address asset;
         uint16 cashTargetBps;
@@ -203,6 +206,16 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /**
+     * @notice Stops or resumes order settlement on this account, whatever the backend signs
+     * @param disabled True to refuse every order
+     */
+    function setOrdersDisabled(bool disabled) external override onlyOwner {
+        ordersDisabled = disabled;
+
+        emit OrdersDisabledUpdated(disabled);
+    }
+
+    /**
      * @notice Sets the slippage this account tolerates on swaps
      * @param bps The slippage in basis points, zero to follow the registry cap
      */
@@ -249,6 +262,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (!SignatureChecker.isValidSignatureNow(stockRegistry.orderSigner(), orderDigest, backendSig)) {
             revert InvalidBackendSignature();
         }
+        if (ordersDisabled) revert OrdersDisabled();
         if (order.kind != GPv2Order.KIND_SELL) revert OrderMustBeSell();
         if (order.partiallyFillable) revert OrderMustBeFillOrKill();
         if (order.sellTokenBalance != GPv2Order.BALANCE_ERC20 || order.buyTokenBalance != GPv2Order.BALANCE_ERC20) {
