@@ -33,6 +33,7 @@ interface IStockAccountStrategy {
     error DeadlineExpired();
     error LengthMismatch();
     error SellExceedsCap(address token);
+    error RouterUnderpaid(address token);
     error EmptyBalance();
     error OrderHashMismatch();
     error InvalidBackendSignature();

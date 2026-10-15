@@ -940,8 +940,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         ISwapRouter router = stockRegistry.aerodromeRouter();
 
         IERC20(token).forceApprove(address(router), amountIn);
+        uint256 before = asset.balanceOf(address(this));
 
-        amountOut = router.exactInputSingle(
+        router.exactInputSingle(
             ISwapRouter.ExactInputSingleParams({
                 tokenIn: token,
                 tokenOut: address(asset),
@@ -953,5 +954,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
                 sqrtPriceLimitX96: 0
             })
         );
+
+        amountOut = asset.balanceOf(address(this)) - before;
+        if (amountOut < minOut) revert RouterUnderpaid(token);
     }
 }

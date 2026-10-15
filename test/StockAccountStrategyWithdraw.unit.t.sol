@@ -10,6 +10,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 import {MockCLPool} from "./mocks/MockCLPool.sol";
+import {MockConfigurableSwapRouter} from "./mocks/MockConfigurableSwapRouter.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase.sol";
 
@@ -352,6 +353,28 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(user), 1_500e18 + 4.9e15, "user asset");
     }
 
+    function testARouterThatMovesLessThanTheFloorIsRefusedWhateverItReports() public {
+        MockConfigurableSwapRouter liar = _installConfigurableRouter();
+        liar.setDeliverShortBy(1);
+        liar.setOverReportBy(1);
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.RouterUnderpaid.selector, address(nvda)));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testTheSaleIsWhatTheAccountReceivedNotWhatTheRouterReports() public {
+        MockConfigurableSwapRouter liar = _installConfigurableRouter();
+        liar.setOverReportBy(1e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.Withdraw(4_460e18, 3_960e18);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+    }
+
     function testWithdrawOnlyOwner() public {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
@@ -362,6 +385,12 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
         strategy.withdrawAll(100, 0, block.timestamp);
+    }
+
+    function _installConfigurableRouter() internal returns (MockConfigurableSwapRouter configurable) {
+        configurable = new MockConfigurableSwapRouter();
+        usdc.mint(address(configurable), 1_000_000e18);
+        stockRegistry.setAerodromeRouter(configurable);
     }
 
     function _listWithPool(address token) internal {
