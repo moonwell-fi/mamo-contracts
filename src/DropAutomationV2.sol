@@ -23,6 +23,7 @@ contract DropAutomationV2 is Ownable {
     uint256 internal constant MAX_SLIPPAGE_BPS = 500;
     uint256 internal constant SWAP_DEADLINE_BUFFER = 300;
     int24 internal constant MAMO_CBBTC_TICK_SPACING = 200;
+    uint256 internal constant MAX_REWARD_TOKENS = 25;
 
     /// @notice The MAMO token
     IERC20 public immutable MAMO_TOKEN;
@@ -79,6 +80,8 @@ contract DropAutomationV2 is Ownable {
     error RewardTokenNotSwappable(address token);
     error InsufficientOutput();
     error NothingToDistribute();
+    error NotAToken(address token);
+    error TooManyRewardTokens();
 
     modifier onlyDedicatedMsgSender() {
         if (msg.sender != dedicatedMsgSender) revert NotDedicatedSender();
@@ -381,6 +384,11 @@ contract DropAutomationV2 is Ownable {
     function _addRewardToken(address token) internal {
         if (token == address(0)) revert ZeroAddress();
         if (isRewardToken[token]) revert AlreadyAdded(token);
+        if (rewardTokens.length >= MAX_REWARD_TOKENS) revert TooManyRewardTokens();
+
+        // A token without balanceOf would revert every drop in _notify
+        (bool ok, bytes memory data) = token.staticcall(abi.encodeCall(IERC20.balanceOf, (address(this))));
+        if (!ok || data.length < 32) revert NotAToken(token);
 
         rewardTokens.push(token);
         isRewardToken[token] = true;

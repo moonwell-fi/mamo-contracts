@@ -242,6 +242,28 @@ contract DropAutomationV2UnitTest is Test {
         assertEq(lp.balanceOf(address(drop)), 5, "other LP held is untouched");
     }
 
+    function test_addRewardToken_rejectsANonToken() public {
+        address eoa = makeAddr("eoa");
+
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.NotAToken.selector, eoa));
+        drop.addRewardToken(eoa);
+        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.NotAToken.selector, address(router)));
+        drop.addRewardToken(address(router));
+        vm.stopPrank();
+    }
+
+    function test_addRewardToken_capsTheList() public {
+        vm.startPrank(owner);
+        for (uint256 i = drop.getRewardTokens().length; i < 25; i++) {
+            drop.addRewardToken(address(new MockERC20Decimals("R", 18)));
+        }
+        address extra = address(new MockERC20Decimals("R", 18));
+        vm.expectRevert(DropAutomationV2.TooManyRewardTokens.selector);
+        drop.addRewardToken(extra);
+        vm.stopPrank();
+    }
+
     function test_accessControl() public {
         vm.expectRevert(DropAutomationV2.NotDedicatedSender.selector);
         drop.createDrop(new address[](0), new int24[](0), new bool[](0), new uint256[](0));
