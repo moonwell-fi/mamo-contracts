@@ -15,6 +15,7 @@ import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
 import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "@test/mocks/MockPriceChecker.sol";
 import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol";
+import {MockSwapRouter} from "@test/mocks/MockSwapRouter.sol";
 
 contract Stub {}
 
@@ -37,6 +38,7 @@ contract StockAccountRegistryUnitTest is Test {
     address internal stranger = makeAddr("stranger");
     address internal orderSigner = makeAddr("orderSigner");
     address internal feeRecipient = makeAddr("feeRecipient");
+    address internal clFactory = makeAddr("clFactory");
 
     address internal asset = makeAddr("asset");
     address internal token;
@@ -44,7 +46,9 @@ contract StockAccountRegistryUnitTest is Test {
     address internal feed;
 
     function setUp() public {
-        router = ISwapRouter(_stub());
+        MockSwapRouter mockRouter = new MockSwapRouter();
+        mockRouter.setFactory(clFactory);
+        router = mockRouter;
         checker = new MockPriceChecker();
         token = address(new MockERC20Decimals("TOKEN", 8));
         pool = _pairPool(token);
@@ -61,7 +65,9 @@ contract StockAccountRegistryUnitTest is Test {
 
     /// @dev A pool that pairs `forToken` with the asset, which listing and repointing now require
     function _pairPool(address forToken) internal returns (address) {
-        return address(new MockCLPoolObserve(forToken, asset));
+        MockCLPoolObserve paired = new MockCLPoolObserve(forToken, asset);
+        paired.setFactory(clFactory);
+        return address(paired);
     }
 
     function defaultConfig() internal view returns (StockAccountRegistry.Config memory config) {
@@ -115,6 +121,29 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotAgainstAsset.selector, cfg.pool));
         vm.prank(admin);
         registry.listToken(token, cfg);
+    }
+
+    function testListingAndRepointingRefuseAPoolFromAnotherFactory() public {
+        IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
+        MockCLPoolObserve(cfg.pool).setFactory(makeAddr("otherFactory"));
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotFromRouterFactory.selector, cfg.pool));
+        vm.prank(admin);
+        registry.listToken(token, cfg);
+
+        MockCLPoolObserve(cfg.pool).setFactory(clFactory);
+        listAndHaltDefaultToken();
+
+        address foreignPool = _pairPool(token);
+        MockCLPoolObserve(foreignPool).setFactory(makeAddr("otherFactory"));
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotFromRouterFactory.selector, foreignPool));
+        vm.prank(admin);
+        registry.setTokenPool(token, foreignPool);
+
+        MockCLPoolObserve(foreignPool).setFactory(clFactory);
+        vm.prank(admin);
+        registry.setTokenPool(token, foreignPool);
+        assertEq(registry.tokenConfig(token).pool, foreignPool, "matching pool refused");
     }
 
     function testDepositBoundsCannotCross() public {
@@ -1428,7 +1457,7 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
         registry = new StockAccountRegistry(
             StockAccountRegistry.Config({
                 admin: admin,
-                aerodromeRouter: ISwapRouter(address(new Stub())),
+                aerodromeRouter: new MockSwapRouter(),
                 asset: address(usdc),
                 feeRecipient: makeAddr("feeRecipient"),
                 guardian: guardian,

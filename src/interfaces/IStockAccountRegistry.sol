@@ -49,6 +49,7 @@ interface IStockAccountRegistry {
     error InvalidMaxOrderValue();
     error PriceCheckerAssetMismatch(address checker);
     error TooManyListedTokens();
+    error PoolNotFromRouterFactory(address pool);
 
     function asset() external view returns (address);
 

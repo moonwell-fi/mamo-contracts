@@ -55,6 +55,13 @@ contract MockConfigurableSwapRouter is ISwapRouter {
     /// @notice Number of `exactInputSingle` calls served
     uint256 public callCount;
 
+    /// @notice The factory reported by `factory()`
+    address public factory;
+
+    function setFactory(address factory_) external {
+        factory = factory_;
+    }
+
     function setPullBps(uint256 bps) external {
         require(bps <= 10_000, "pullBps > 100%");
         pullBps = bps;

@@ -342,6 +342,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     function _requireAssetPool(address token, address pool) internal view {
         (address a, address b) = (ICLPool(pool).token0(), ICLPool(pool).token1());
         if (!(a == token && b == asset) && !(a == asset && b == token)) revert PoolNotAgainstAsset(pool);
+        if (ICLPool(pool).factory() != aerodromeRouter.factory()) revert PoolNotFromRouterFactory(pool);
     }
 
     function _requirePriceable(address token) internal view {

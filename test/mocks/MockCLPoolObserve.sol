@@ -11,6 +11,7 @@ contract MockCLPoolObserve {
     bool public revertOld;
     /// @dev Longest window this pool has history for; 0 means any window
     uint32 public maxObservableWindow;
+    address public factory;
 
     constructor(address token0_, address token1_) {
         token0 = token0_;
@@ -27,6 +28,10 @@ contract MockCLPoolObserve {
     function setMeanTick(int24 tick, uint32 window) external {
         cumulativeAtWindow = 0;
         cumulativeNow = int56(tick) * int56(uint56(window));
+    }
+
+    function setFactory(address value) external {
+        factory = value;
     }
 
     function setRevertOld(bool value) external {

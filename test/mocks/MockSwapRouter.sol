@@ -8,6 +8,11 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /// @notice Swap router with freely settable fixed rates, paying out of its own balance, for use in tests
 contract MockSwapRouter is ISwapRouter {
     mapping(address => mapping(address => uint256)) public rate;
+    address public factory;
+
+    function setFactory(address factory_) external {
+        factory = factory_;
+    }
 
     function setRate(address tokenIn, address tokenOut, uint256 rate1e18) external {
         rate[tokenIn][tokenOut] = rate1e18;

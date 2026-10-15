@@ -57,7 +57,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     address internal constant NVDAC_USDC_POOL = 0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9; // tick spacing 10
     address internal constant AAPLC = 0xb200000000000000000000C2e324d24d7eEcd1fb; // 8 dec, pool token1
     address internal constant AAPLC_USDC_POOL = 0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0; // tick spacing 10
-    address internal constant AERODROME_CL_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5;
+    address internal constant AERODROME_STOCKS_SWAP_ROUTER = 0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F;
     address internal constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf; // 8 dec
     address internal constant CBBTC_USDC_POOL = 0x3F53aFD15909bF5B1c5963b5C0D28123668ce174; // cardinality 1 at the pin
     address internal constant CHAINLINK_BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
@@ -111,6 +111,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         // `listToken` requires a code-bearing trade venue for every token; the checker never reads it
         // for a Chainlink token, so a stand-in keeps this test from asserting anything about cbBTC pools.
         cbbtcVenue = address(new MockCLPoolObserve(USDC, CBBTC));
+        MockCLPoolObserve(cbbtcVenue).setFactory(registry.aerodromeRouter().factory());
         vm.prank(admin);
         registry.listToken(
             CBBTC,
@@ -127,7 +128,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         return new StockAccountRegistry(
             StockAccountRegistry.Config({
                 admin: admin,
-                aerodromeRouter: ISwapRouter(AERODROME_CL_ROUTER),
+                aerodromeRouter: ISwapRouter(AERODROME_STOCKS_SWAP_ROUTER),
                 asset: USDC,
                 feeRecipient: admin,
                 guardian: admin,
