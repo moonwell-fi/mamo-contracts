@@ -53,7 +53,8 @@ account's NAV after that (see below). The whole rerun is a no-op.
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
 4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the
-   deploy config (ids 1-4 are all taken on Base; the stock account implementation takes **5**)
+   deploy config (ids 1-5 are taken on Base and 6 is reserved for the leveraged-Aero account; both
+   deploy configs now say **7**, the id proposal 019 redeploys under)
 6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
 8. every entry of `config/stock-accounts/8453.json`, in two parts:
@@ -64,7 +65,8 @@ account's NAV after that (see below). The whole rerun is a no-op.
      registry admin is an EOA. Both are skipped when the pair is already configured.
    - **8b**: admin `StockAccountRegistry.listToken(...)`, one per entry. Each listing is probed
      against the registry's current price checker and refused with `TokenNotPriceable` unless one
-     whole token quotes into `asset`, so step 3 has to land first — and, for a `Chainlink` token, so
+     whole token quotes into `asset` and one whole `asset` quotes into the token, so step 3 has to
+     land first — and, for a `Chainlink` token, so
      does 8a: the probe routes straight through `existingPriceChecker`, which quotes nothing for an
      unconfigured pair.
 
@@ -157,8 +159,8 @@ Both environments now run all the way through: `STOCK_ORDER_SIGNER` and `F-MAMO`
 
 `multisig/mamo-multisig/016_DeployStockAccountSystem.sol` is the mainnet deployment. It is an FPS
 `MultisigProposal`, so it deploys, assembles the Safe batch, simulates it through a Safe and asserts
-the end state, all from the committed `deploy/stock-accounts/8453_PROD.json` and
-`config/stock-accounts/8453.json`.
+the end state, all from `deploy/stock-accounts/8453_PROD-016.json` and
+`config/stock-accounts/8453-016.json`, the config and token list it executed with, frozen.
 
 **One Safe is what makes one batch possible.** On PROD the stock registry admin, the
 `MamoStrategyRegistry` `DEFAULT_ADMIN_ROLE` holder and `CHAINLINK_SWAP_CHECKER_PROXY`'s `owner()` are
@@ -178,7 +180,7 @@ The batch, in order — the order is load-bearing for the same two reasons as th
 Run it against a Base fork:
 
 ```bash
-# DEPLOY_ENV is not read here: the proposal is pinned to deploy/stock-accounts/8453_PROD.json
+# DEPLOY_ENV is not read here: the proposal is pinned to deploy/stock-accounts/8453_PROD-016.json
 forge script multisig/mamo-multisig/016_DeployStockAccountSystem.sol:DeployStockAccountSystem \
   --fork-url base --ffi -vvv
 ```
@@ -220,6 +222,47 @@ The fork rehearsal of all of this is `test/StockAccountSystemSetup.integration.t
 (`make stock-accounts-setup`): it drives 016 hook by hook at a pinned block, checks the ten recorded
 actions, then runs a real cbBTC account through create, deposit, valuation, withdrawal and a fee
 settlement.
+
+## Mainnet: proposal 019
+
+`multisig/mamo-multisig/019_RedeployStockAccountSystem.sol` redeploys the whole system with the
+external-audit fixes under strategy type id **7** and retires v1. v1 accounts are not upgraded. It
+reads `deploy/stock-accounts/8453_PROD.json` and `config/stock-accounts/8453.json` (the twelve
+PoolTwap stocks) and records four new keys: `STOCK_ACCOUNT_REGISTRY_V2`,
+`STOCK_ACCOUNT_PRICE_CHECKER_V2`, `STOCK_ACCOUNT_STRATEGY_IMPL_V2` and
+`STOCK_ACCOUNT_STRATEGY_FACTORY_V2`. The v1 keys stay, since the batch acts on v1 too.
+
+The batch, all from `MAMO_MULTISIG`, in order:
+
+1. `STOCK_ACCOUNT_REGISTRY_V2.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER_V2)`
+2. `MAMO_STRATEGY_REGISTRY.whitelistImplementation(STOCK_ACCOUNT_STRATEGY_IMPL_V2, 7)`
+3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY_V2)`
+4. `MAMO_STRATEGY_REGISTRY.revokeRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY)` (the v1 factory)
+5-16. `STOCK_ACCOUNT_REGISTRY_V2.listToken(...)` for the twelve stocks
+17. `STOCK_ACCOUNT_REGISTRY.setOrderSigner(0x000000000000000000000000000000000000dEaD)`
+18. `STOCK_ACCOUNT_REGISTRY.pause()` (`GUARDIAN_ROLE`, which `MAMO_MULTISIG` holds on PROD)
+
+After it, no v1 order can validate (the signer is dead and the registry is paused) and the v1
+factory can no longer register an account, but every v1 exit keeps working. Before the batch, the
+owners of the v1 accounts close them with `withdrawAllInKind`; any left open can still exit after it.
+
+**019 executes before the stock drop's 017.** PR #113 prices stock rewards through the stock checker
+and the stock pools, so 017 against the v1 keys would price every staking compound through the
+paused system. #113 reads the V2 keys.
+
+**v2 changes both cash exits.** They are `withdrawAll(maxSlippageBps, minUsdcOut, deadline)` and
+`withdraw(usdcAmount, maxSlippageBps, tokens, maxAmounts, deadline)`. The frontend sizes `minUsdcOut`
+and `maxAmounts` from an independent quote, the Chainlink equity feed in market hours, plus the
+slippage tolerance. Off-hours it falls back to `previewWithdraw`, and then adds headroom of at least
+the slippage tolerance on every leg: caps copied verbatim from the preview revert with
+`SellExceedsCap` once the transaction lands a block later, because the fee accrues every second, the
+TWAP moves and the legs round up. Anyone sending the account 1 USDC or more of an Active stock not in
+`tokens` also makes that withdrawal revert; the owner previews again, or exits through `withdrawAll`
+or `withdrawAllInKind`. See `docs/STOCK_ACCOUNT_PRICE_CHECKER.md`.
+
+Re-run `make stock-pool-readiness` before signing (see [Pool readiness](#pool-readiness)). The
+fork rehearsal is `test/StockAccountRedeploy.integration.t.sol` (`make stock-accounts-redeploy`):
+019 hook by hook, a v2 account lifecycle, and a v1 account exiting after the pause.
 
 ## Configuration
 
@@ -298,9 +341,18 @@ entries by exact address and counting the pool-priced ones.
 
 `asset` (USDC) is the quote asset: it goes to the registry constructor, the price checker and the
 factory. The registry probes every listing and every raise back to `Active` through it, so a token
-the checker cannot quote — no pool against `asset`, or a pool whose history is shorter than
-`twapWindow` — is refused at listing instead of breaking `getNAV` for every holder. Lowering a
-token to `SellOnly` or `Halted` never probes.
+the checker cannot quote at all — no pool against `asset`, or a pool whose history is shorter than
+`twapWindow` — is refused. The probe only checks for a non-zero quote, in both directions; it does
+not check the pool's liquidity or observation history, so `make stock-pool-readiness` is a
+mandatory step before every listing (see below). Lowering a token to `SellOnly` or `Halted` never
+probes. Never list `asset` itself; the registry refuses it with `AssetNotListable`.
+
+The registry puts floors under the caps: `maxWithdrawSlippageBps` at least 50, `maxBackendSlippageBps`
+at least 10 and `maxDeviationBps` at least 100, and the `twapWindow` must sit between 60 and 3600
+seconds. A value outside those bounds is refused, in the constructor and in every setter.
+
+cbBTC, if it is ever listed again, is priced as BTC: its Chainlink route has no cbBTC/BTC leg, so a
+depeg does not show in its price. The depeg procedure is the guardian halt.
 
 ### Pool readiness
 
@@ -351,10 +403,29 @@ pools grown before step 8 probes them.
 `setPriceChecker` and `setTwapWindow` change what "priceable" means for every listing at once, so both
 apply the new value first and then re-probe every token that is not `Halted`, reverting the whole call
 with `TokenNotPriceable(token)` if any of them stops quoting. A window no pool can serve is therefore
-refused rather than silently bricking every holder's valuation. One broken pool blocks both calls until
+refused rather than silently bricking every holder's valuation. The `setPriceChecker` probe quotes
+token to `asset` and `asset` to token only; it never quotes token to token, so a replacement checker
+has to be reviewed for that path by hand. One broken pool blocks both calls until
 that token is halted, which is deliberate: auto-halting would change account value as a side effect of
 an unrelated admin action. Both calls probe on-chain, so they are not cheap — on a Base fork one
 pool-TWAP listing costs about 107k gas and one Chainlink listing about 113k.
+
+## Behaviour the audit accepted
+
+- **Onboarding.** The backend creates the account with the basket the user chose in the app; the
+  user does not sign that basket. The account holds nothing at creation, and `setBasket` is
+  owner-only.
+- **One order per account per auction.** Orders in the same batch are each checked against the
+  pre-trade state, so the planner never sends an account two orders in one auction.
+- **A blocked fee recipient.** If USDC blocks the registry's `feeRecipient`, `deposit`,
+  `depositToken`, `withdraw` and `withdrawAll` revert; `withdrawToken` and `withdrawAllInKind` still
+  work, and the registry admin can set a new recipient.
+- **The fee token.** Anyone calling `payFees(token)` chooses the token the fee is taken in, valued at
+  the reference price. Fees arrive as stocks by design.
+- **Solver surplus.** The range check values the buy leg at the larger of the signed amount and the
+  reference, so only surplus above the reference, a few basis points, can push past the band.
+- **Mid-settlement fee.** The post-hook values the fee on a NAV read inside the settlement; only the
+  settling solver can act on that, and it can only under-collect part of one fee period.
 
 ## Why the smoke test only deposits USDC
 

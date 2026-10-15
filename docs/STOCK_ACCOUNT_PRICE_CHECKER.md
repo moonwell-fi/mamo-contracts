@@ -6,6 +6,26 @@ pool over `StockAccountRegistry.twapWindow()` and converts it to a USDC price; f
 `PriceSource.Chainlink` it delegates to the audited `SlippagePriceChecker`. Every quote is composed
 through USDC, so a token-to-token quote is two of those legs.
 
+PoolTwap quotes are gated on the Base sequencer uptime feed: while the sequencer is down, and for one
+hour (`sequencerGracePeriod`, 3600) after it comes back, every PoolTwap quote reverts. During that time
+orders are refused, `withdraw` pays only from idle cash, `withdrawAll` pays out the cash and leaves the
+stocks in the account, `withdrawToken` and `withdrawAllInKind` work as usual, and every listing,
+`setPriceChecker` and `setTwapWindow` probe fails until the grace period ends.
+
+The owner's cash exits carry their own bounds: `withdrawAll(maxSlippageBps, minUsdcOut, deadline)`
+and `withdraw(usdcAmount, maxSlippageBps, tokens, maxAmounts, deadline)`. The TWAP floor alone moves
+with a price held down for the whole window; these bounds do not, provided they come from a quote
+the pool cannot move. In market hours the frontend takes that quote from the Chainlink equity feed;
+off-hours, when those feeds freeze, it falls back to `previewWithdraw` and warns the user.
+
+Size `maxAmounts` from that independent quote plus the slippage tolerance. Caps copied verbatim from
+`previewWithdraw` revert with `SellExceedsCap` as soon as the transaction lands a block later: the
+shortfall includes the fee, which accrues every second, the TWAP moves, and the legs round up. When
+the frontend falls back to `previewWithdraw` it adds headroom of at least the slippage tolerance on
+every leg and never passes the preview unchanged. Anyone who sends the account 1 USDC or more of an
+Active stock missing from `tokens` also makes that withdrawal revert, because the plan now sells it;
+the owner recovers by previewing again, or through `withdrawAll` or `withdrawAllInKind`.
+
 The checker is a reference, not a trade route: the backend still has to fill at or above
 `expectedOut * (10_000 - maxBackendSlippageBps) / 10_000`. This document answers what it costs someone
 to push that reference far enough to be worth attacking, and what they can take once they have. All
