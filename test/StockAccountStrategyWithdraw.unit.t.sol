@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
+
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
+import {MockERC20} from "./MockERC20.sol";
 import {MockCLPool} from "./mocks/MockCLPool.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase.sol";
@@ -284,6 +287,55 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
 
         vm.prank(user);
         strategy.withdrawAllInKind();
+    }
+
+    function testATinyShortfallSellsOnlyTheLargestLegAtTheMinimumValue() public {
+        _withdraw(500e18 + 1, 100);
+
+        assertEq(nvda.balanceOf(address(strategy)), 10e18 - 5_000, "one USDC of the largest leg");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18, "the other leg is not touched");
+        assertEq(usdc.balanceOf(user), 500e18 + 1, "user asset");
+        assertEq(usdc.balanceOf(address(strategy)), 1e6 - 1, "the extra proceeds stay idle");
+    }
+
+    /// @dev Three legs worth 1.5 USDC each against a 2.5 USDC shortfall: every share is under the
+    ///      minimum, but the largest leg cannot absorb them, so they stay planned pro rata
+    function testSmallLegsAreOnlyFoldedWhileTheLargestLegCanAbsorbThem() public {
+        MockERC20 msft = new MockERC20("MSFT Coin", "MSFTc");
+        priceChecker.setRate(address(msft), address(usdc), 100e18);
+        router.setRate(address(msft), address(usdc), 100e18);
+        _listWithPool(address(msft));
+
+        StockAccountStrategy small = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+        nvda.mint(address(small), 7_500);
+        aapl.mint(address(small), 15_000);
+        msft.mint(address(small), 15_000);
+
+        address[] memory tokens = new address[](3);
+        (tokens[0], tokens[1], tokens[2]) = (address(nvda), address(aapl), address(msft));
+        uint256[] memory caps = new uint256[](3);
+        (caps[0], caps[1], caps[2]) = (7_500, 15_000, 15_000);
+
+        vm.prank(user);
+        small.withdraw(2.5e6, 50, tokens, caps, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 2.5e6, "user asset");
+        assertGt(nvda.balanceOf(address(small)), 0, "no leg is sold out");
+        assertGt(aapl.balanceOf(address(small)), 0, "no leg is sold out");
+        assertGt(msft.balanceOf(address(small)), 0, "no leg is sold out");
+    }
+
+    function testWithdrawAllLeavesDustInAnotherTokenForTheInKindExit() public {
+        vm.prank(user);
+        strategy.withdrawToken(address(aapl), 20e18);
+        aapl.mint(address(strategy), 1_000);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(nvda.balanceOf(address(strategy)), 0, "nvda sold");
+        assertEq(aapl.balanceOf(address(strategy)), 1_000, "the dust stays");
+        assertEq(usdc.balanceOf(user), 2_500e18, "user asset");
     }
 
     function testWithdrawOnlyOwner() public {

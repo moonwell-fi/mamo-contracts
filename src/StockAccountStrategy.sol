@@ -36,6 +36,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     /// @notice Value returned to CoW when this account accepts an order, per EIP-1271
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
 
+    /// @notice Smallest value, in asset units, a cash exit sells of one token
+    uint256 internal constant MIN_SELL_VALUE = 1e6;
+
     /// @notice Shortest time an order may stay valid for
     uint256 internal constant MIN_ORDER_VALIDITY = 5 minutes;
 
@@ -795,8 +798,9 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
             uint256 balance = IERC20(listed[i]).balanceOf(address(this));
             if (balance == 0) continue;
 
+            // A balance too small to clear the pool's rounding stays for the in-kind exit
             (bool priced, uint256 value) = _tryValue(checker, listed[i], balance);
-            if (!priced) continue;
+            if (!priced || value < MIN_SELL_VALUE) continue;
 
             tokens[count] = listed[i];
             balances[count] = balance;
@@ -822,7 +826,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return needed > idle ? needed - idle : 0;
     }
 
-    /// @dev The largest leg carries the rounding the other legs drop, so the plan cannot come in under its target
+    /// @dev The largest leg carries the rounding the other legs drop and every leg too small to sell on its own
     function _planSells(uint256 shortfall, uint16 maxSlippageBps)
         internal
         view
@@ -862,15 +866,25 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         }
 
         uint256[] memory planned = new uint256[](sellable.length);
-        uint256 count;
+        uint256 folded;
+        uint256 spare = values[largest] - (values[largest] * target) / total;
 
         for (uint256 i = 0; i < sellable.length; i++) {
-            uint256 numerator = balances[i] * target;
-            planned[i] = i == largest ? (numerator + total - 1) / total : numerator / total;
+            if (i == largest) continue;
 
-            if (planned[i] > 0) {
-                count++;
-            }
+            uint256 share = (values[i] * target) / total;
+            if (share < MIN_SELL_VALUE && folded + share <= spare) folded += share;
+            else planned[i] = (balances[i] * target) / total;
+        }
+
+        uint256 largestAmount =
+            Math.ceilDiv(balances[largest] * target, total) + Math.ceilDiv(balances[largest] * folded, values[largest]);
+        largestAmount = Math.max(largestAmount, Math.ceilDiv(balances[largest] * MIN_SELL_VALUE, values[largest]));
+        planned[largest] = Math.min(largestAmount, balances[largest]);
+
+        uint256 count;
+        for (uint256 i = 0; i < sellable.length; i++) {
+            if (planned[i] > 0) count++;
         }
 
         tokens = new address[](count);

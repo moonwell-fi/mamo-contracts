@@ -344,6 +344,24 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         assertLt(received, IDLE_USDC + referenceValue, "vacuous: the real pool paid the reference exactly");
     }
 
+    /// @dev Five wei of cbBTC: the pool rounds its fee up to at least a wei, so a leg this size can
+    ///      never clear its own floor, and selling it used to revert the whole exit.
+    function test_fork_withdrawAllLeavesUnsellableDustBehind() public {
+        _deal(USDC, funder, IDLE_USDC);
+        vm.prank(funder);
+        IERC20(USDC).approve(address(strategy), IDLE_USDC);
+        vm.prank(funder);
+        strategy.deposit(IDLE_USDC);
+
+        _deal(CBBTC, address(strategy), 5);
+
+        vm.prank(user);
+        strategy.withdrawAll(TOLERANCE_BPS, IDLE_USDC, block.timestamp);
+
+        assertEq(IERC20(USDC).balanceOf(user), IDLE_USDC, "owner asset");
+        assertEq(IERC20(CBBTC).balanceOf(address(strategy)), 5, "the dust stays for the in-kind exit");
+    }
+
     function test_fork_withdrawAllInKindMovesTheRealBalances() public {
         _fundAccount();
 
