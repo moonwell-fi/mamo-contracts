@@ -375,7 +375,7 @@ account can only be read with `cast`.
 Every account charges the registry's `managementFeeBps` — 100 bps a year in both deploy configs — on
 its whole NAV. Nothing is accrued in storage: `payFees(token)` values the fee as
 `NAV x rate x elapsed / (10000 x 365 days)` in USDC, converts that to `token` at the price checker's
-reference, sends it to the fee recipient and emits `FeesPaid(credited, token, amount)` with `token`
+reference, sends it to the registry's `feeRecipient` and emits `FeesPaid(credited, token, amount)` with `token`
 indexed. It is permissionless.
 
 **A payment the balance cuts short only settles the part of the period it covers.** The clock moves

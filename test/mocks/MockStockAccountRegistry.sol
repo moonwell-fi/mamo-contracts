@@ -18,6 +18,7 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
     uint16 public override maxWithdrawSlippageBps;
     uint32 public override twapWindow;
     address public override orderSigner;
+    address public override feeRecipient;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
     uint16 public override managementFeeBps;
@@ -68,6 +69,10 @@ contract MockStockAccountRegistry is IStockAccountRegistry {
 
     function setOrderSigner(address value) external {
         orderSigner = value;
+    }
+
+    function setFeeRecipient(address value) external {
+        feeRecipient = value;
     }
 
     function setAerodromeRouter(ISwapRouter value) external {

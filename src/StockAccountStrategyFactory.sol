@@ -21,7 +21,6 @@ contract StockAccountStrategyFactory is AccessControl {
     address public immutable cowSettlement;
     address public immutable strategyImplementation;
     uint256 public immutable strategyTypeId;
-    address public immutable feeRecipient;
 
     event StrategyCreated(address indexed user, address indexed strategy);
 
@@ -39,7 +38,6 @@ contract StockAccountStrategyFactory is AccessControl {
      * @param _cowSettlement Address of the CoW settlement contract
      * @param _strategyImplementation Address of the StockAccountStrategy implementation
      * @param _strategyTypeId The strategy type ID assigned by the MamoStrategyRegistry
-     * @param _feeRecipient Address the management fee of every account is paid to
      */
     constructor(
         address admin,
@@ -49,8 +47,7 @@ contract StockAccountStrategyFactory is AccessControl {
         address _asset,
         address _cowSettlement,
         address _strategyImplementation,
-        uint256 _strategyTypeId,
-        address _feeRecipient
+        uint256 _strategyTypeId
     ) {
         if (admin == address(0)) revert ZeroAddress();
         if (backend == address(0)) revert ZeroAddress();
@@ -60,7 +57,6 @@ contract StockAccountStrategyFactory is AccessControl {
         if (_cowSettlement == address(0)) revert ZeroAddress();
         if (_strategyImplementation == address(0)) revert ZeroAddress();
         if (_strategyTypeId == 0) revert StrategyTypeIdNotSet();
-        if (_feeRecipient == address(0)) revert ZeroAddress();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -71,7 +67,6 @@ contract StockAccountStrategyFactory is AccessControl {
         cowSettlement = _cowSettlement;
         strategyImplementation = _strategyImplementation;
         strategyTypeId = _strategyTypeId;
-        feeRecipient = _feeRecipient;
     }
 
     /// @notice Returns the address at which the account of a given user is or would be deployed
@@ -115,7 +110,6 @@ contract StockAccountStrategyFactory is AccessControl {
                 cashTargetBps: cashTargetBps,
                 cowSettlement: cowSettlement,
                 entries: entries,
-                feeRecipient: feeRecipient,
                 mamoStrategyRegistry: address(mamoStrategyRegistry),
                 owner: user,
                 stockRegistry: stockRegistry,

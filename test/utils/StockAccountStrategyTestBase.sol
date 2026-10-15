@@ -69,6 +69,7 @@ abstract contract StockAccountStrategyTestBase is Test {
         stockRegistry.setMaxBackendSlippageBps(100);
         stockRegistry.setManagementFeeBps(100);
         stockRegistry.setPriceChecker(priceChecker);
+        stockRegistry.setFeeRecipient(feeRecipient);
 
         (orderSigner, orderSignerKey) = makeAddrAndKey("orderSigner");
         stockRegistry.setOrderSigner(orderSigner);
@@ -124,7 +125,6 @@ abstract contract StockAccountStrategyTestBase is Test {
             cashTargetBps: 0,
             cowSettlement: address(settlement),
             entries: _entries(address(nvda), 5000, address(aapl), 5000),
-            feeRecipient: feeRecipient,
             mamoStrategyRegistry: address(registry),
             owner: user,
             stockRegistry: address(stockRegistry),

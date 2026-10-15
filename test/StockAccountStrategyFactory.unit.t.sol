@@ -33,7 +33,6 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     address public relayer = makeAddr("relayer");
     address public user = makeAddr("user");
     address public stranger = makeAddr("stranger");
-    address public feeRecipient = makeAddr("feeRecipient");
 
     uint256 public strategyTypeId;
 
@@ -67,8 +66,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
 
         bytes32 backendRole = registry.BACKEND_ROLE();
@@ -106,7 +104,6 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(factory.cowSettlement(), address(settlement), "settlement");
         assertEq(factory.strategyImplementation(), address(implementation), "implementation");
         assertEq(factory.strategyTypeId(), strategyTypeId, "strategy type id");
-        assertEq(factory.feeRecipient(), feeRecipient, "fee recipient");
     }
 
     function testConstructorGrantsRoles() public view {
@@ -125,8 +122,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -140,8 +136,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -155,8 +150,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -170,8 +164,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -185,8 +178,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(0),
             address(settlement),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -200,8 +192,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(0),
             address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -215,8 +206,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(0),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -230,23 +220,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(usdc),
             address(settlement),
             address(implementation),
-            0,
-            feeRecipient
-        );
-    }
-
-    function testConstructorRevertsWithZeroFeeRecipient() public {
-        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
-        new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(registry),
-            address(stockRegistry),
-            address(usdc),
-            address(settlement),
-            address(implementation),
-            strategyTypeId,
-            address(0)
+            0
         );
     }
 
@@ -280,7 +254,6 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(account.strategyTypeId(), strategyTypeId, "strategy type id");
         assertEq(account.cowDomainSeparator(), SEPARATOR, "domain separator");
         assertEq(account.cowVaultRelayer(), relayer, "vault relayer");
-        assertEq(account.feeRecipient(), feeRecipient, "fee recipient");
         assertEq(account.lastFeePaid(), block.timestamp, "last fee paid");
         assertEq(
             account.appDataHash(address(nvda)),

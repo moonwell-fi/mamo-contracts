@@ -141,6 +141,7 @@ contract DeployStockAccountSystem is MultisigProposal {
             admin: addresses.getAddress(cfg.admin),
             aerodromeRouter: ISwapRouter(addresses.getAddress(cfg.aerodromeRouter)),
             asset: addresses.getAddress(cfg.asset),
+            feeRecipient: addresses.getAddress(cfg.feeRecipient),
             guardian: addresses.getAddress(cfg.guardian),
             managementFeeBps: cfg.managementFeeBps,
             maxBackendSlippageBps: cfg.maxBackendSlippageBps,
@@ -204,8 +205,7 @@ contract DeployStockAccountSystem is MultisigProposal {
             addresses.getAddress(cfg.asset),
             addresses.getAddress(cfg.cowSettlement),
             addresses.getAddress(IMPL_KEY),
-            strategyTypeId,
-            addresses.getAddress(cfg.feeRecipient)
+            strategyTypeId
         );
         vm.stopBroadcast();
 
@@ -247,7 +247,7 @@ contract DeployStockAccountSystem is MultisigProposal {
         );
         assertLt(mamoRegistry.nextStrategyTypeId(), strategyTypeId, "strategy type id is within reach of the counter");
 
-        // The factory constructor rejects a zero fee recipient, so it is a deploy-time blocker.
+        // The registry constructor rejects a zero fee recipient, so it is a deploy-time blocker.
         assertTrue(addresses.getAddress(cfg.feeRecipient) != address(0), "Fee recipient should be set");
 
         // `setPriceChecker` reverts `AlreadySet` on a no-op, so the first action needs a real change.
@@ -473,6 +473,7 @@ contract DeployStockAccountSystem is MultisigProposal {
         );
         assertEq(stockRegistry.asset(), addresses.getAddress(cfg.asset), "Registry asset mismatch");
         assertEq(stockRegistry.orderSigner(), addresses.getAddress(cfg.orderSigner), "Registry orderSigner mismatch");
+        assertEq(stockRegistry.feeRecipient(), addresses.getAddress(cfg.feeRecipient), "Registry feeRecipient mismatch");
         assertEq(stockRegistry.maxPositions(), cfg.maxPositions, "Registry maxPositions mismatch");
         assertEq(stockRegistry.minTargetBps(), cfg.minTargetBps, "Registry minTargetBps mismatch");
         assertEq(stockRegistry.maxDeviationBps(), cfg.maxDeviationBps, "Registry maxDeviationBps mismatch");
@@ -517,7 +518,6 @@ contract DeployStockAccountSystem is MultisigProposal {
             factory.strategyImplementation(), addresses.getAddress(IMPL_KEY), "Factory strategyImplementation mismatch"
         );
         assertEq(factory.strategyTypeId(), strategyTypeId, "Factory strategyTypeId mismatch");
-        assertEq(factory.feeRecipient(), addresses.getAddress(cfg.feeRecipient), "Factory feeRecipient mismatch");
 
         assertTrue(
             factory.hasRole(factory.DEFAULT_ADMIN_ROLE(), addresses.getAddress(cfg.admin)), "Factory admin mismatch"

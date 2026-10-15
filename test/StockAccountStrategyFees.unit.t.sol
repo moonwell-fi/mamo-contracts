@@ -537,47 +537,16 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.feeDue(), 0, "the new funds are not charged for the year");
     }
 
-    function testSetFeeRecipientStoresAndEmits() public {
+    function testTheRegistryRecipientReceivesTheNextFeeOfAnExistingAccount() public {
         address newRecipient = makeAddr("newFeeRecipient");
+        stockRegistry.setFeeRecipient(newRecipient);
 
-        vm.expectEmit(address(strategy));
-        emit IStockAccountStrategy.FeeRecipientUpdated(feeRecipient, newRecipient);
+        vm.warp(startTime + 365 days);
+        uint256 owed = strategy.feeDue();
+        strategy.payFees(address(usdc));
 
-        vm.prank(backend);
-        strategy.setFeeRecipient(newRecipient);
-
-        assertEq(strategy.feeRecipient(), newRecipient, "fee recipient");
-    }
-
-    function testSetFeeRecipientOnlyBackend() public {
-        vm.prank(user);
-        vm.expectRevert(IStockAccountStrategy.NotBackend.selector);
-        strategy.setFeeRecipient(makeAddr("newFeeRecipient"));
-    }
-
-    function testSetFeeRecipientRevertsOnZeroAddress() public {
-        vm.prank(backend);
-        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
-        strategy.setFeeRecipient(address(0));
-    }
-
-    function testAnyBackendRoleMemberCanSetFeeRecipient() public {
-        address secondBackend = makeAddr("secondBackend");
-        bytes32 backendRole = registry.BACKEND_ROLE();
-
-        vm.prank(admin);
-        registry.grantRole(backendRole, secondBackend);
-
-        vm.prank(secondBackend);
-        strategy.setFeeRecipient(makeAddr("newFeeRecipient"));
-        assertEq(strategy.feeRecipient(), makeAddr("newFeeRecipient"), "a member past index 0 is a backend");
-
-        vm.prank(admin);
-        registry.revokeRole(backendRole, secondBackend);
-
-        vm.prank(secondBackend);
-        vm.expectRevert(IStockAccountStrategy.NotBackend.selector);
-        strategy.setFeeRecipient(feeRecipient);
+        assertEq(usdc.balanceOf(newRecipient), owed, "the fee goes to the registry's current recipient");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "the old recipient gets nothing");
     }
 
     function testRecoverERC20SettlesTheFeeBeforeRecovering() public {
@@ -617,14 +586,6 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(nvda.balanceOf(user), 10e18, "the owner is not trapped");
         assertEq(usdc.balanceOf(feeRecipient), 0, "nothing is paid");
         assertEq(strategy.lastFeePaid(), startTime, "the fee stays owed");
-    }
-
-    function testInitializeRevertsOnZeroFeeRecipient() public {
-        StockAccountStrategy.InitParams memory params = _defaultParams();
-        params.feeRecipient = address(0);
-
-        vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
-        _deployProxy(params);
     }
 
     function testAnUnpriceableHoldingCountsAsHaltedForValueDepositsAndWithdrawals() public {

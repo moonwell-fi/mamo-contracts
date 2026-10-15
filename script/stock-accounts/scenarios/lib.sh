@@ -458,7 +458,11 @@ expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint25
 # The fee is valued on the whole account in USDC, then converted to whichever token settles it.
 fee_due() { call "$1" 'feeDue()(uint256)'; }
 fee_due_in() { call "$1" 'feeDueIn(address)(uint256)' "$2"; }
-fee_collector() { call "$1" 'feeRecipient()(address)'; }
+fee_collector() {
+  local registry
+  registry=$(call "$1" 'stockRegistry()(address)') || return
+  call "$registry" 'feeRecipient()(address)'
+}
 # One document, and one hash, per (account, fee token); the fee token is the token an order buys.
 app_data_hash() { call "$1" 'appDataHash(address)(bytes32)' "$2"; }
 nav() { call "$1" 'getNAV()(uint256)'; }

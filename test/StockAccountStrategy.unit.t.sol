@@ -24,7 +24,6 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.owner(), user, "owner");
         assertEq(strategy.cashTargetBps(), 0, "cash target");
         assertEq(strategy.accountSlippageBps(), 0, "account slippage");
-        assertEq(strategy.feeRecipient(), feeRecipient, "fee recipient");
         assertEq(strategy.lastFeePaid(), block.timestamp, "last fee paid");
         assertEq(
             strategy.appDataHash(address(nvda)),

@@ -28,6 +28,7 @@ contract StockAccountRegistryUnitTest is Test {
     address internal guardian = makeAddr("guardian");
     address internal stranger = makeAddr("stranger");
     address internal orderSigner = makeAddr("orderSigner");
+    address internal feeRecipient = makeAddr("feeRecipient");
 
     address internal asset = makeAddr("asset");
     address internal token;
@@ -60,6 +61,7 @@ contract StockAccountRegistryUnitTest is Test {
             admin: admin,
             aerodromeRouter: router,
             asset: asset,
+            feeRecipient: feeRecipient,
             guardian: guardian,
             managementFeeBps: 100,
             maxBackendSlippageBps: 100,
@@ -158,6 +160,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.managementFeeBps(), 100, "management fee mismatch");
         assertEq(registry.maxManagementFeeBps(), 200, "max management fee mismatch");
         assertEq(registry.orderSigner(), orderSigner, "order signer mismatch");
+        assertEq(registry.feeRecipient(), feeRecipient, "fee recipient mismatch");
         assertEq(registry.allTokens().length, 0, "token list should start empty");
     }
 
@@ -228,6 +231,14 @@ contract StockAccountRegistryUnitTest is Test {
     function testConstructorRevertsOnZeroOrderSigner() public {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.orderSigner = address(0);
+
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testConstructorRevertsOnZeroFeeRecipient() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.feeRecipient = address(0);
 
         vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         new StockAccountRegistry(config);
@@ -381,6 +392,11 @@ contract StockAccountRegistryUnitTest is Test {
         emit StockAccountRegistry.OrderSignerUpdated(orderSigner, newSigner);
         registry.setOrderSigner(newSigner);
 
+        address newRecipient = makeAddr("newFeeRecipient");
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit StockAccountRegistry.FeeRecipientUpdated(feeRecipient, newRecipient);
+        registry.setFeeRecipient(newRecipient);
+
         vm.stopPrank();
 
         assertEq(address(registry.aerodromeRouter()), address(newRouter), "router mismatch");
@@ -395,6 +411,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.maxStrategyDeposit(), 500e6, "max deposit mismatch");
         assertEq(registry.managementFeeBps(), 25, "management fee mismatch");
         assertEq(registry.orderSigner(), newSigner, "order signer mismatch");
+        assertEq(registry.feeRecipient(), newRecipient, "fee recipient mismatch");
     }
 
     function testGuardianCannotUpdateScalars() public {
@@ -438,6 +455,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         expectNotAdmin(guardian);
         registry.setOrderSigner(makeAddr("newOrderSigner"));
+
+        expectNotAdmin(guardian);
+        registry.setFeeRecipient(makeAddr("newFeeRecipient"));
 
         vm.stopPrank();
     }
@@ -486,6 +506,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setOrderSigner(orderSigner);
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        registry.setFeeRecipient(feeRecipient);
 
         vm.stopPrank();
     }
@@ -539,6 +562,9 @@ contract StockAccountRegistryUnitTest is Test {
 
         vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         registry.setOrderSigner(address(0));
+
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        registry.setFeeRecipient(address(0));
 
         vm.stopPrank();
     }
@@ -956,6 +982,10 @@ contract StockAccountRegistryUnitTest is Test {
         vm.prank(admin);
         registry.setManagementFeeBps(50);
 
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setFeeRecipient(makeAddr("newFeeRecipient"));
+
         assertEq(registry.maxPositions(), 10, "max positions mismatch");
         assertEq(registry.allTokens().length, 1, "token list length mismatch");
         assertEq(
@@ -1099,6 +1129,7 @@ contract StockAccountRegistryUnitTest is Test {
         mock.setMaxWithdrawSlippageBps(75);
         mock.setManagementFeeBps(150);
         mock.setOrderSigner(orderSigner);
+        mock.setFeeRecipient(feeRecipient);
         mock.setAerodromeRouter(router);
         mock.setPriceChecker(checker);
         mock.setAsset(asset);
@@ -1113,6 +1144,7 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(mock.maxWithdrawSlippageBps(), 75, "withdraw slippage mismatch");
         assertEq(mock.managementFeeBps(), 150, "management fee mismatch");
         assertEq(mock.orderSigner(), orderSigner, "order signer mismatch");
+        assertEq(mock.feeRecipient(), feeRecipient, "fee recipient mismatch");
         assertEq(address(mock.aerodromeRouter()), address(router), "router mismatch");
         assertEq(address(mock.priceChecker()), address(checker), "price checker mismatch");
         assertEq(mock.asset(), asset, "asset mismatch");
@@ -1169,6 +1201,7 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
                 admin: admin,
                 aerodromeRouter: ISwapRouter(address(new Stub())),
                 asset: address(usdc),
+                feeRecipient: makeAddr("feeRecipient"),
                 guardian: guardian,
                 managementFeeBps: 100,
                 maxBackendSlippageBps: 100,

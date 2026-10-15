@@ -31,6 +31,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         address admin;
         ISwapRouter aerodromeRouter;
         address asset;
+        address feeRecipient;
         address guardian;
         uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
@@ -57,6 +58,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public override managementFeeBps;
     uint32 public override twapWindow;
     address public override orderSigner;
+    address public override feeRecipient;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
 
@@ -75,6 +77,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
     event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenPoolUpdated(address indexed token, address indexed oldPool, address indexed newPool);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
@@ -103,6 +106,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         if (config.minStrategyDeposit > config.maxStrategyDeposit) revert InvalidDepositBounds();
         _setOrderSigner(config.orderSigner);
         _setManagementFeeBps(config.managementFeeBps);
+        _setFeeRecipient(config.feeRecipient);
     }
 
     /// @notice Sets the Aerodrome router used by stock accounts
@@ -192,6 +196,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     function setManagementFeeBps(uint16 newFeeBps) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (newFeeBps == managementFeeBps) revert AlreadySet();
         _setManagementFeeBps(newFeeBps);
+    }
+
+    /// @notice Sets the address every stock account pays its management fee to
+    function setFeeRecipient(address newRecipient) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newRecipient == feeRecipient) revert AlreadySet();
+        _setFeeRecipient(newRecipient);
     }
 
     /// @notice Lists a new token as tradeable by stock accounts
@@ -409,5 +419,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         managementFeeBps = newFeeBps;
 
         emit ManagementFeeBpsUpdated(oldValue, newFeeBps);
+    }
+
+    function _setFeeRecipient(address newRecipient) internal {
+        if (newRecipient == address(0)) revert ZeroAddress();
+
+        address oldRecipient = feeRecipient;
+        feeRecipient = newRecipient;
+
+        emit FeeRecipientUpdated(oldRecipient, newRecipient);
     }
 }

@@ -15,11 +15,9 @@ interface IStockAccountStrategy {
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
     event FeesPaid(uint256 credited, address indexed token, uint256 amount);
-    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
     error ZeroAddress();
     error StrategyTypeIdNotSet();
-    error NotBackend();
     error ZeroAmount();
     error TokenNotActive(address token);
     error TokenNotListed(address token);
@@ -70,8 +68,6 @@ interface IStockAccountStrategy {
     function setBasket(BasketEntry[] calldata entries, uint16 cashTargetBps) external;
 
     function setAccountSlippage(uint16 bps) external;
-
-    function setFeeRecipient(address newRecipient) external;
 
     function approveCowRelayer(address token) external;
 

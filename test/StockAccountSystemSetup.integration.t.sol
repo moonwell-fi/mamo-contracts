@@ -381,7 +381,7 @@ contract StockAccountSystemSetupTest is Test {
     ///      past its heartbeat and turn a fee assertion into an oracle-staleness revert.
     function _proveFeeSettlement(StockAccountStrategy account) internal {
         address feeRecipient = addresses.getAddress("F-MAMO");
-        assertEq(account.feeRecipient(), feeRecipient, "the account pays its fee to F-MAMO");
+        assertEq(account.stockRegistry().feeRecipient(), feeRecipient, "the account pays its fee to F-MAMO");
         assertEq(account.feeDue(), 0, "nothing is owed before any time passes");
 
         uint256 nav = account.getNAV();

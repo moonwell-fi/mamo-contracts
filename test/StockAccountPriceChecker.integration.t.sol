@@ -129,6 +129,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 admin: admin,
                 aerodromeRouter: ISwapRouter(AERODROME_CL_ROUTER),
                 asset: USDC,
+                feeRecipient: admin,
                 guardian: admin,
                 managementFeeBps: 100,
                 maxBackendSlippageBps: MAX_BACKEND_SLIPPAGE_BPS,

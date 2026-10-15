@@ -81,6 +81,8 @@ interface IStockAccountRegistry {
 
     function orderSigner() external view returns (address);
 
+    function feeRecipient() external view returns (address);
+
     function aerodromeRouter() external view returns (ISwapRouter);
 
     function priceChecker() external view returns (ISlippagePriceChecker);

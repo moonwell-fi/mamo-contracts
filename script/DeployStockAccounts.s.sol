@@ -97,6 +97,7 @@ contract DeployStockAccounts is Script {
             admin: addresses.getAddress(config.admin),
             aerodromeRouter: ISwapRouter(addresses.getAddress(config.aerodromeRouter)),
             asset: addresses.getAddress(config.asset),
+            feeRecipient: addresses.getAddress(config.feeRecipient),
             guardian: addresses.getAddress(config.guardian),
             managementFeeBps: config.managementFeeBps,
             maxBackendSlippageBps: config.maxBackendSlippageBps,
@@ -221,8 +222,7 @@ contract DeployStockAccounts is Script {
             addresses.getAddress(config.asset),
             addresses.getAddress(config.cowSettlement),
             implementation,
-            strategyTypeId,
-            addresses.getAddress(config.feeRecipient)
+            strategyTypeId
         );
         vm.stopBroadcast();
 

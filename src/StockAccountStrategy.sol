@@ -62,9 +62,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     BasketEntry[] internal _entries;
 
-    /// @notice Address the management fee is paid to
-    address public feeRecipient;
-
     /// @notice Timestamp the fee was last paid at
     uint64 public override lastFeePaid;
 
@@ -76,7 +73,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint16 cashTargetBps;
         address cowSettlement;
         BasketEntry[] entries;
-        address feeRecipient;
         address mamoStrategyRegistry;
         address owner;
         address stockRegistry;
@@ -88,11 +84,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         _disableInitializers();
     }
 
-    modifier onlyBackend() {
-        if (!_isBackend(msg.sender)) revert NotBackend();
-        _;
-    }
-
     /**
      * @notice Initializer that sets all the parameters and the initial basket
      * @dev This is used instead of a constructor since the contract is designed to be used with proxies
@@ -101,7 +92,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     function initialize(InitParams calldata params) external initializer {
         if (params.asset == address(0)) revert ZeroAddress();
         if (params.cowSettlement == address(0)) revert ZeroAddress();
-        if (params.feeRecipient == address(0)) revert ZeroAddress();
         if (params.mamoStrategyRegistry == address(0)) revert ZeroAddress();
         if (params.stockRegistry == address(0)) revert ZeroAddress();
         if (params.strategyTypeId == 0) revert StrategyTypeIdNotSet();
@@ -112,7 +102,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         stockRegistry = IStockAccountRegistry(params.stockRegistry);
         cowDomainSeparator = IGPv2Settlement(params.cowSettlement).domainSeparator();
         cowVaultRelayer = IGPv2Settlement(params.cowSettlement).vaultRelayer();
-        feeRecipient = params.feeRecipient;
         lastFeePaid = uint64(block.timestamp);
 
         _setBasket(params.entries, params.cashTargetBps);
@@ -220,18 +209,6 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         emit SlippageUpdated(accountSlippageBps, bps);
 
         accountSlippageBps = bps;
-    }
-
-    /**
-     * @notice Sets the address the accrued fees are collected to
-     * @param newRecipient The new fee recipient
-     */
-    function setFeeRecipient(address newRecipient) external override onlyBackend {
-        if (newRecipient == address(0)) revert ZeroAddress();
-
-        emit FeeRecipientUpdated(feeRecipient, newRecipient);
-
-        feeRecipient = newRecipient;
     }
 
     /**
@@ -639,7 +616,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         // forge-lint: disable-next-line(unsafe-typecast)
         lastFeePaid = uint64(lastFeePaid + credited);
 
-        IERC20(token).safeTransfer(feeRecipient, amount);
+        IERC20(token).safeTransfer(stockRegistry.feeRecipient(), amount);
 
         emit FeesPaid(credited, token, amount);
     }
