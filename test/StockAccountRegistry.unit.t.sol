@@ -661,6 +661,27 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.tokenConfig(token).chainlinkFeed, feed, "feed mismatch");
     }
 
+    function testListTokenRefusesTheThirtyFirstToken() public {
+        vm.startPrank(admin);
+        for (uint256 i = 0; i < registry.MAX_LISTED_TOKENS(); i++) {
+            address listed = address(new MockERC20Decimals("TOKEN", 8));
+            checker.setRate(listed, asset, 1e18);
+            registry.listToken(
+                listed,
+                IStockAccountRegistry.TokenConfig({
+                    status: IStockAccountRegistry.TokenStatus.Active,
+                    source: IStockAccountRegistry.PriceSource.PoolTwap,
+                    pool: _pairPool(listed),
+                    chainlinkFeed: address(0)
+                })
+            );
+        }
+
+        vm.expectRevert(IStockAccountRegistry.TooManyListedTokens.selector);
+        registry.listToken(token, activeConfig());
+        vm.stopPrank();
+    }
+
     function testListTokenRevertsWhenAlreadyListed() public {
         listDefaultToken();
 

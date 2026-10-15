@@ -27,6 +27,9 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Highest withdrawal slippage cap the admin may set, in basis points
     uint16 public constant override withdrawSlippageCeilingBps = 1_000;
 
+    /// @notice Most tokens the registry may list, bounding the valuation every account runs
+    uint256 public constant MAX_LISTED_TOKENS = 30;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
@@ -221,6 +224,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     ///        whose feeds its own owner configures; this field is not read.
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (token == asset) revert AssetNotListable();
+        if (_tokens.length == MAX_LISTED_TOKENS) revert TooManyListedTokens();
         if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
         if (cfg.status != TokenStatus.Active) revert MustListAsActive();
         if (token.code.length == 0) revert NotAContract(token);

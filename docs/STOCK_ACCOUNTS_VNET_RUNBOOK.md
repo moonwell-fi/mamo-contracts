@@ -393,12 +393,12 @@ is neither unlisted nor Halted, otherwise `FeeTokenNotAllowed(token)`; a zero ba
 Three things call it:
 
 - **The CoW post-hook.** An order's appData declares one post-hook, `payFees(buyToken)` on the account
-  itself, with a 1,000,000 gas limit. So an order buying NVDAc pays its fee in NVDAc and an order
+  itself, with a 2,000,000 gas limit. So an order buying NVDAc pays its fee in NVDAc and an order
   selling NVDAc for USDC pays in USDC — the account never has to sell anything to pay, it just keeps a
   little less of what it is about to receive. CoW runs the hook inside the settlement, after the trade
   legs, so the fee is valued on the post-trade NAV. Every position is one more pool TWAP read in that
   NAV, so the cost grows with the basket: at `maxPositions` of 10, on a registry listing eleven tokens,
-  the vnet measures `payFees` at 667,000 gas, about 1.5x inside the limit the document declares.
+  the vnet measures `payFees` at 667,000 gas, about 3x inside the limit the document declares.
 - **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it.
   `withdraw` and `withdrawAll` pay in USDC, after their sells. `withdrawToken(token)` pays in that
   token; if it is Halted or unlisted the fee falls back to USDC and then to the sellable stocks.
@@ -522,7 +522,7 @@ its row up by address (`weights_index`) instead of taking the first one.
 | `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
 | `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays in NVDAc and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
-| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — those the deploy already listed are left as they are — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 1,000,000 gas the appData post-hook is given. |
+| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — those the deploy already listed are left as they are — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 2,000,000 gas the appData post-hook is given. |
 
 Two things the range rule makes concrete and the scenarios assert. An account sitting on its targets
 can move at most `maxDeviationBps` of its NAV in a single order, so a rebalance larger than that has

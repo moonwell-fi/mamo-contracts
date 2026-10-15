@@ -31,7 +31,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     uint16 internal constant TOTAL_BPS = 10_000;
 
     /// @notice Gas the CoW settlement grants the fee post-hook
-    uint256 public constant HOOK_GAS_LIMIT = 1_000_000;
+    uint256 public constant HOOK_GAS_LIMIT = 2_000_000;
 
     /// @notice Value returned to CoW when this account accepts an order, per EIP-1271
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
