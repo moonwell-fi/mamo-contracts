@@ -26,9 +26,9 @@ import {StockAccountsConfig} from "@script/StockAccountsConfig.sol";
  *           - deploys {DropAutomationV2}, {MamoStakingRegistryV2} (the cbBTC, WETH and USDC pools and
  *             the stock routes to MAMO), the {MamoStakingStrategyV2} implementation and a staking factory for it;
  *           - as the multisig: whitelists the staking implementation under the existing staking type id so
- *             live accounts can upgrade, moves BACKEND_ROLE from the old staking factory to the new one, points the
- *             V2 stock registry's fee recipient at DropAutomationV2, and configures the USDC, cbBTC and WETH -> MAMO
- *             pairs on the Chainlink checker.
+ *             live accounts can upgrade, moves BACKEND_ROLE from the old staking factory to the new one and revokes
+ *             the deprecated factory's, points the V2 stock registry's fee recipient at DropAutomationV2, and
+ *             configures the USDC, cbBTC and WETH -> MAMO pairs on the Chainlink checker.
  * @dev Runs after mamo-multisig/019, which redeploys the stock accounts system this reads. F-MAMO owns MultiRewards,
  *      DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO proposal (f-mamo/006), and the
  *      in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
@@ -80,7 +80,7 @@ contract DeployStockDrop is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
+        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory from the old and deprecated ones, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
     }
 
     // ─── deploy ──────────────────────────────────────────────────────────────────────────────────
@@ -200,6 +200,12 @@ contract DeployStockDrop is MultisigProposal {
             addresses.getAddress("MAMO_STAKING_STRATEGY"),
             "Staking type id should point at the live staking implementation"
         );
+        assertTrue(
+            mamoRegistry.hasRole(
+                mamoRegistry.BACKEND_ROLE(), addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED")
+            ),
+            "Deprecated staking factory should still hold BACKEND_ROLE"
+        );
 
         // setStakingRegistry's admin arm needs the same admin on both registries
         MamoStakingRegistryV2 registry = MamoStakingRegistryV2(addresses.getAddress(STAKING_REGISTRY_KEY));
@@ -228,6 +234,7 @@ contract DeployStockDrop is MultisigProposal {
         // 2. New staking accounts come only from the new factory
         mamoRegistry.grantRole(backendRole, addresses.getAddress(STAKING_FACTORY_KEY));
         mamoRegistry.revokeRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"));
+        mamoRegistry.revokeRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED"));
 
         // 3. Stock account fees fund the drop
         StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).setFeeRecipient(addresses.getAddress(DROP_KEY));
@@ -297,6 +304,10 @@ contract DeployStockDrop is MultisigProposal {
         assertFalse(
             mamoRegistry.hasRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY")),
             "Old staking factory should lose BACKEND_ROLE"
+        );
+        assertFalse(
+            mamoRegistry.hasRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED")),
+            "Deprecated staking factory should lose BACKEND_ROLE"
         );
         assertEq(
             StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).feeRecipient(),

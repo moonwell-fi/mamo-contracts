@@ -80,8 +80,8 @@ contract StockDropSetupTest is Test {
 
         // 019: 4 wiring actions, 12 listings, 2 v1 retirements
         _run(redeployProposal, 18);
-        // 017: whitelist, grant, revoke, fee recipient, 3 pairs
-        _run(deployProposal, 7);
+        // 017: whitelist, grant, 2 revokes, fee recipient, 3 pairs
+        _run(deployProposal, 8);
         // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module
         _run(cutoverProposal, 10);
         // 007: addReward and addRewardToken for WETH, USDC and each stock
