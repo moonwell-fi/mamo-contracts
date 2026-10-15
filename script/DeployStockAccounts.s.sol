@@ -74,7 +74,7 @@ contract DeployStockAccounts is Script {
         _setPriceChecker(stockRegistry, priceChecker);
         address implementation = _deployImplementation();
         uint256 strategyTypeId = _whitelistImplementation(mamoRegistry, implementation);
-        address factory = _deployFactory(stockRegistry, implementation, strategyTypeId);
+        address factory = _deployFactory(stockRegistry, strategyTypeId);
         _grantBackendRole(mamoRegistry, factory);
         _listTokens(stockRegistry);
 
@@ -209,10 +209,7 @@ contract DeployStockAccounts is Script {
     }
 
     /// @notice Deploys the StockAccountStrategyFactory, or returns the one already recorded in addresses
-    function _deployFactory(address stockRegistry, address implementation, uint256 strategyTypeId)
-        internal
-        returns (address)
-    {
+    function _deployFactory(address stockRegistry, uint256 strategyTypeId) internal returns (address) {
         if (addresses.isAddressSet(FACTORY_NAME)) {
             address existing = addresses.getAddress(FACTORY_NAME);
             console.log("step 6 skipped, %s already deployed at %s", FACTORY_NAME, existing);
@@ -227,7 +224,6 @@ contract DeployStockAccounts is Script {
             stockRegistry,
             addresses.getAddress(config.asset),
             addresses.getAddress(config.cowSettlement),
-            implementation,
             strategyTypeId
         );
         vm.stopBroadcast();

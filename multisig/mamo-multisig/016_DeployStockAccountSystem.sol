@@ -210,7 +210,6 @@ contract DeployStockAccountSystem is MultisigProposal {
             addresses.getAddress(REGISTRY_KEY),
             addresses.getAddress(cfg.asset),
             addresses.getAddress(cfg.cowSettlement),
-            addresses.getAddress(IMPL_KEY),
             strategyTypeId
         );
         vm.stopBroadcast();
