@@ -288,7 +288,14 @@ contract StockAccountPriceCheckerUnitTest is Test {
         assertEq(checker.maxTimePriceValid(address(feedToken)), FEED_MAX_TIME_PRICE_VALID);
         assertEq(checker.maxTimePriceValid(address(stock)), WINDOW);
         assertEq(checker.maxTimePriceValid(address(usdc)), WINDOW);
-        assertEq(checker.maxTimePriceValid(makeAddr("unlisted")), WINDOW);
+    }
+
+    function test_maxTimePriceValid_zeroForUnlistedToken() public {
+        assertEq(checker.maxTimePriceValid(makeAddr("unlisted")), 0);
+        IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(address(feedToken));
+        cfg.status = IStockAccountRegistry.TokenStatus.None;
+        registry.setTokenConfig(address(feedToken), cfg);
+        assertEq(checker.maxTimePriceValid(address(feedToken)), 0);
     }
 
     function test_isTokenPairConfigured_followsExistingCheckerForChainlink() public {

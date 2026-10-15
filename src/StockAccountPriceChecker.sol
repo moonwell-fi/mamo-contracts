@@ -90,15 +90,13 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     }
 
     /// @inheritdoc ISlippagePriceChecker
-    /// @dev A Chainlink token inherits the existing checker's feed-based bound; everything else is
-    ///      bounded by the TWAP window, the only time-validity notion this checker has of its own.
+    /// @dev Zero for an unlisted token. A Chainlink token inherits the existing checker's feed-based
+    ///      bound; everything else is bounded by the TWAP window.
     function maxTimePriceValid(address token) external view override returns (uint256) {
         if (token != quoteAsset) {
             IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
-            if (
-                cfg.status != IStockAccountRegistry.TokenStatus.None
-                    && cfg.source == IStockAccountRegistry.PriceSource.Chainlink
-            ) {
+            if (cfg.status == IStockAccountRegistry.TokenStatus.None) return 0;
+            if (cfg.source == IStockAccountRegistry.PriceSource.Chainlink) {
                 return existingChecker.maxTimePriceValid(token);
             }
         }
