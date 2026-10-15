@@ -11,6 +11,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {MockERC20} from "./MockERC20.sol";
 import {MockFailingERC20} from "./MockFailingERC20.sol";
+import {MockGPv2Settlement} from "./mocks/MockGPv2Settlement.sol";
 import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase.sol";
 
 contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
@@ -53,6 +54,18 @@ contract StockAccountStrategyUnitTest is StockAccountStrategyTestBase {
         params.cowSettlement = address(0);
 
         vm.expectRevert(IStockAccountStrategy.ZeroAddress.selector);
+        _deployProxy(params);
+    }
+
+    function testInitializeRevertsOnASettlementWithoutADomainSeparatorOrRelayer() public {
+        StockAccountStrategy.InitParams memory params = _defaultParams();
+
+        params.cowSettlement = address(new MockGPv2Settlement(bytes32(0), relayer));
+        vm.expectRevert(IStockAccountStrategy.InvalidCowSettlement.selector);
+        _deployProxy(params);
+
+        params.cowSettlement = address(new MockGPv2Settlement(SEPARATOR, address(0)));
+        vm.expectRevert(IStockAccountStrategy.InvalidCowSettlement.selector);
         _deployProxy(params);
     }
 

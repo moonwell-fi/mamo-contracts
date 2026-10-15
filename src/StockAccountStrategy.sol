@@ -108,6 +108,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         stockRegistry = IStockAccountRegistry(params.stockRegistry);
         cowDomainSeparator = IGPv2Settlement(params.cowSettlement).domainSeparator();
         cowVaultRelayer = IGPv2Settlement(params.cowSettlement).vaultRelayer();
+        if (cowDomainSeparator == bytes32(0) || cowVaultRelayer == address(0)) revert InvalidCowSettlement();
         lastFeePaid = uint64(block.timestamp);
 
         _setBasket(params.entries, params.cashTargetBps);

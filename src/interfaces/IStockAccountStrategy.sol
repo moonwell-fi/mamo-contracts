@@ -19,6 +19,7 @@ interface IStockAccountStrategy {
 
     error ZeroAddress();
     error StrategyTypeIdNotSet();
+    error InvalidCowSettlement();
     error ZeroAmount();
     error NotSelf();
     error TokenNotActive(address token);
