@@ -44,18 +44,21 @@ account's NAV after that (see below). The whole rerun is a no-op.
 
 ## What it deploys, in order
 
-1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
+`DeployStockAccounts` records under the `_V2` keys proposal 019 writes; the unsuffixed
+`STOCK_ACCOUNT_*` keys are the paused v1 system, which no script acts on any more.
+
+1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY_V2`,
    deployed with the placeholder price checker (see Configuration)
 2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker, sequencerUptimeFeed, 3600)` —
-   recorded as `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker`
+   recorded as `STOCK_ACCOUNT_PRICE_CHECKER_V2`; the third argument is the audited `SlippagePriceChecker`
    that every `PriceSource.Chainlink` token is priced against (see Configuration); the last two gate
    every PoolTwap quote on the Base sequencer being up for at least an hour
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
-4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
+4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL_V2`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the
    deploy config (ids 1-5 are taken on Base and 6 is reserved for the leveraged-Aero account; both
    deploy configs now say **7**, the id proposal 019 redeploys under)
-6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
+6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY_V2`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
 8. every entry of `config/stock-accounts/8453.json`, in two parts:
    - **8a**, only for a `Chainlink` entry: admin calls on `existingPriceChecker` —
@@ -376,7 +379,7 @@ Run the check again afterwards; only that read says what is on chain.
 The target is `twapWindow / 2 x 2`, capped at `type(uint16).max`: Base produces a block about every two
 seconds, so a 180-second window needs about 90 observations, and the ring is sized at twice that for
 headroom — **180 for the configured 180-second window**. `twapWindow` is read from the deployed
-registry when `STOCK_ACCOUNT_REGISTRY` is in the address book, and from the deploy config before that.
+registry when `STOCK_ACCOUNT_REGISTRY_V2` is in the address book, and from the deploy config before that.
 
 The grow step only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
 is below the target, so a second grow run sends nothing. All twelve pools already sit above it (2048 on
@@ -449,7 +452,7 @@ Tenderly vnet, where the node serves the precompile, and not in `forge test`.
 
 `StockAccountsSmoke` therefore creates an all-cash account (empty basket, `cashTargetBps = 10000`),
 deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is involved. It also asserts
-the registry points at `STOCK_ACCOUNT_PRICE_CHECKER`.
+the registry points at `STOCK_ACCOUNT_PRICE_CHECKER_V2`.
 
 `getNAV` still reads a balance for **every** listed token before it prices anything, so the smoke has
 to run before the B20 listings — which is exactly where `vnet-up.sh` puts it. After them, that
@@ -533,7 +536,8 @@ so an order cannot settle unless its hook takes the fee in the token that order 
 
 `script/stock-accounts/vnet-manifest.json` (gitignored) is written by the smoke script and is what the
 backend or a follow-up script reads to pick the vnet up: the admin `rpc`, `chainId`, every
-`STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address, the `strategyTypeId`, the test user with the
+`STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address (unsuffixed: a vnet holds only the system this tree
+deployed, read from the book's `_V2` keys), the `strategyTypeId`, the test user with the
 account created for them, and that account's USDC document as `appDataHashUsdc` and
 `appDataDocumentUsdc` — the cash leg, since documents are per buy token and the smoke account is all
 cash. Forge writes the document inlined as JSON rather than as a string, so `jq -c` is what reproduces

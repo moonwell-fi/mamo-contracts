@@ -22,7 +22,7 @@ import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
  *      GROW (default 0; non-zero sends the grow, only meaningful under --broadcast)
  */
 contract StockAccountsPoolReadiness is Script {
-    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
+    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY_V2";
 
     /// @notice Seconds per Base block, the rate at which a pool writes observations
     uint256 internal constant BLOCK_SECONDS = 2;

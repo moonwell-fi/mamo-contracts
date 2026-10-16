@@ -70,12 +70,12 @@ forge script script/DeployStockAccounts.s.sol:DeployStockAccounts \
 # The B20 stock tokens are node precompiles, which revm refuses to execute, so the deploy prints those
 # listings instead of sending them and they go straight to the node here. They go last: an account's
 # getNAV scans every listed token, so no forge script can touch an account once they are listed.
-REGISTRY=$(jq -r '.[] | select(.name == "STOCK_ACCOUNT_REGISTRY") | .addr' "$ADDRESSES_DIR/8453.json")
+REGISTRY=$(jq -r '.[] | select(.name == "STOCK_ACCOUNT_REGISTRY_V2") | .addr' "$ADDRESSES_DIR/8453.json")
 ZERO=0x0000000000000000000000000000000000000000
 TOKEN_LIST=$(jq -r '.tokens[] | select(.source == "PoolTwap") | "\(.token) \(.pool)"' config/stock-accounts/8453.json)
 
 [ -n "$REGISTRY" ] && [ "$REGISTRY" != "null" ] ||
-  { echo "no STOCK_ACCOUNT_REGISTRY in $ADDRESSES_DIR/8453.json; the deploy did not record one" >&2; exit 1; }
+  { echo "no STOCK_ACCOUNT_REGISTRY_V2 in $ADDRESSES_DIR/8453.json; the deploy did not record one" >&2; exit 1; }
 [ -n "$TOKEN_LIST" ] ||
   { echo "no PoolTwap entries in config/stock-accounts/8453.json; nothing to list" >&2; exit 1; }
 
