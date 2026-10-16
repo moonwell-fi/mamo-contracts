@@ -15,11 +15,6 @@
     "isContract": true
   },
   {
-    "addr": "0xfBb21d0380beE3312B33c4353c8936a0F13EF26C",
-    "name": "MOONWELL_COMPTROLLER",
-    "isContract": true
-  },
-  {
     "addr": "0x26c158A4CD56d148c554190A95A921d90F00C160",
     "name": "MAMO_MULTISIG",
     "isContract": true
@@ -142,16 +137,6 @@
   {
     "addr": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
     "name": "CHAINLINK_BTC_USD",
-    "isContract": true
-  },
-  {
-    "addr": "0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94",
-    "name": "CHAINLINK_MAMO_USD",
-    "isContract": true
-  },
-  {
-    "addr": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0",
-    "name": "CHAINLINK_AERO_USD",
     "isContract": true
   },
   {
@@ -410,6 +395,46 @@
     "isContract": true
   },
   {
+    "addr": "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef",
+    "name": "AERODROME_STOCKS_CL_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F",
+    "name": "AERODROME_STOCKS_SWAP_ROUTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x514c8B5f54112481E28028F1166Bd78501089259",
+    "name": "AERODROME_STOCKS_QUOTER",
+    "isContract": true
+  },
+  {
+    "addr": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+    "name": "COWSWAP_SETTLEMENT",
+    "isContract": true
+  },
+  {
+    "addr": "0x515158f52eA06feF9985083882b7893D95d5f58f",
+    "name": "STOCK_ORDER_SIGNER",
+    "isContract": false
+  },
+  {
+    "addr": "0xfBb21d0380beE3312B33c4353c8936a0F13EF26C",
+    "name": "MOONWELL_COMPTROLLER",
+    "isContract": true
+  },
+  {
+    "addr": "0xeF7541b388a77C1709a3d44BfBfC5c1ED3F0Ac94",
+    "name": "CHAINLINK_MAMO_USD",
+    "isContract": true
+  },
+  {
+    "addr": "0x4EC5970fC728C5f65ba413992CD5fF6FD70fcfF0",
+    "name": "CHAINLINK_AERO_USD",
+    "isContract": true
+  },
+  {
     "addr": "0x42d4a22CaD0F5a49681a5715cE994Af73A43B76b",
     "name": "WETH_CBBTC_CL_POOL",
     "isContract": true
@@ -440,7 +465,7 @@
     "isContract": true
   },
   {
-    "addr": "0xA0510b5323E127346A6D8Bbd6556032A8Ca59a37",
+    "addr": "0xa0510b5323E127346a6d8Bbd6556032a8cA59A37",
     "name": "MAMO_REBALANCER",
     "isContract": false
   },
@@ -507,6 +532,26 @@
   {
     "addr": "0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC",
     "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0xb0e62191C30256790Ae62e71138707483a9B6EAA",
+    "name": "STOCK_ACCOUNT_REGISTRY",
+    "isContract": true
+  },
+  {
+    "addr": "0xb309cFC028965300b76Fa3909ba0c7B98Dc74035",
+    "name": "STOCK_ACCOUNT_PRICE_CHECKER",
+    "isContract": true
+  },
+  {
+    "addr": "0x17Fff4d4E628fc17C4e01B1E781A368Bc33444e5",
+    "name": "STOCK_ACCOUNT_STRATEGY_IMPL",
+    "isContract": true
+  },
+  {
+    "addr": "0xad0fFd91D25e132116a2fBe3d16BFBfc7B840528",
+    "name": "STOCK_ACCOUNT_STRATEGY_FACTORY",
     "isContract": true
   }
 ]

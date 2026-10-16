@@ -1,0 +1,503 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
+
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
+import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
+
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+import {MockERC20} from "./MockERC20.sol";
+import {MockCLPool} from "./mocks/MockCLPool.sol";
+import {MockConfigurableSwapRouter} from "./mocks/MockConfigurableSwapRouter.sol";
+import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
+import {StockAccountStrategyTestBase} from "./utils/StockAccountStrategyTestBase.sol";
+
+contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
+    MockSwapRouter public router;
+    MockCLPool public pool;
+
+    function setUp() public override {
+        super.setUp();
+
+        router = new MockSwapRouter();
+        router.setRate(address(nvda), address(usdc), 200e18);
+        router.setRate(address(aapl), address(usdc), 100e18);
+        usdc.mint(address(router), 1_000_000e18);
+
+        pool = new MockCLPool(address(0), address(0), 100);
+        _listWithPool(address(nvda));
+        _listWithPool(address(aapl));
+
+        stockRegistry.setAerodromeRouter(router);
+        stockRegistry.setMaxWithdrawSlippageBps(500);
+
+        _fundUsdc(funder, 500e18);
+        vm.prank(funder);
+        strategy.deposit(500e18);
+
+        _fundToken(nvda, funder, 10e18);
+        vm.prank(funder);
+        strategy.depositToken(address(nvda), 10e18);
+
+        _fundToken(aapl, funder, 20e18);
+        vm.prank(funder);
+        strategy.depositToken(address(aapl), 20e18);
+    }
+
+    function testWithdrawPaysFromIdleWithoutSelling() public {
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.Withdraw(300e18, 0);
+
+        _withdraw(300e18, 100);
+
+        assertEq(usdc.balanceOf(user), 300e18, "user asset");
+        assertEq(usdc.balanceOf(address(strategy)), 200e18, "remaining idle");
+        assertEq(nvda.balanceOf(address(strategy)), 10e18, "nvda untouched");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18, "aapl untouched");
+    }
+
+    function testWithdrawSellsProRataAboveIdle() public {
+        (,, uint256 referenceValue,) = strategy.previewWithdraw(1_500e18, 100);
+        // Every other assertion here measures the sale against itself
+        assertApproxEqAbs(referenceValue, (uint256(1_000e18) * 10_000) / 9_900, 1e3, "grossed up by the cap");
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.Withdraw(1_500e18, referenceValue);
+
+        _withdraw(1_500e18, 100);
+
+        uint256 nvdaSold = 10e18 - nvda.balanceOf(address(strategy));
+        uint256 aaplSold = 20e18 - aapl.balanceOf(address(strategy));
+
+        assertApproxEqAbs(nvdaSold * 200, aaplSold * 100, 1e3, "pro rata split");
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+        assertEq(usdc.balanceOf(address(strategy)), 500e18 + referenceValue - 1_500e18, "leftover idle");
+    }
+
+    function testWithdrawRevertsOnZeroAmount() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.ZeroAmount.selector);
+        strategy.withdraw(0, 100, new address[](0), new uint256[](0), block.timestamp);
+    }
+
+    function testWithdrawRevertsWhenSlippageAboveCap() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        strategy.withdraw(1_500e18, 501, new address[](0), new uint256[](0), block.timestamp);
+    }
+
+    /// @dev A cap of 10_000 used to divide by zero in the gross up, taking every withdrawal down with it
+    function testWithdrawSucceedsAtTheHighestAcceptedSlippageCap() public {
+        stockRegistry.setMaxWithdrawSlippageBps(9_999);
+
+        _withdraw(1_500e18, 9_999);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    function testWithdrawRevertsWhenValueIsInsufficient() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.InsufficientBalance.selector);
+        strategy.withdraw(5_000e18, 100, new address[](0), new uint256[](0), block.timestamp);
+    }
+
+    function testWithdrawRevertsWhenRouterPaysBelowFloor() public {
+        router.setRate(address(nvda), address(usdc), 180e18);
+        router.setRate(address(aapl), address(usdc), 90e18);
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+
+        vm.prank(user);
+        vm.expectRevert("Too little received");
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testWithdrawSucceedsWhenRouterPaysInsideFloor() public {
+        router.setRate(address(nvda), address(usdc), 199e18);
+        router.setRate(address(aapl), address(usdc), 99.5e18);
+
+        _withdraw(1_500e18, 100);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    function testWithdrawSkipsHaltedToken() public {
+        _halt(address(aapl));
+
+        _withdraw(1_500e18, 100);
+
+        assertEq(aapl.balanceOf(address(strategy)), 20e18, "halted token untouched");
+        assertLt(nvda.balanceOf(address(strategy)), 10e18, "nvda sold");
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    function testWithdrawAllSellsEverythingSellable() public {
+        _halt(address(aapl));
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.Withdraw(2_500e18, 2_000e18);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 2_500e18, "user asset");
+        assertEq(usdc.balanceOf(address(strategy)), 0, "idle drained");
+        assertEq(nvda.balanceOf(address(strategy)), 0, "nvda sold");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18, "halted token stays");
+    }
+
+    function testWithdrawAllKeepsThePrincipalOfAHaltedHoldingItLeavesBehind() public {
+        StockAccountStrategy fresh = _freshAccount(10_000e18, 20e18);
+        _halt(address(nvda));
+
+        vm.prank(user);
+        fresh.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 10_000e18, "the cash is shipped");
+        assertEq(nvda.balanceOf(address(fresh)), 20e18, "the halted holding stays");
+        assertEq(fresh.principal(), 4_000e18, "only what was shipped leaves principal");
+
+        usdc.mint(funder, 21_000e18 + 1);
+        vm.startPrank(funder);
+        usdc.approve(address(fresh), 21_000e18 + 1);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.DepositCapExceeded.selector, CAP + 1));
+        fresh.deposit(21_000e18 + 1);
+        fresh.deposit(21_000e18);
+        vm.stopPrank();
+
+        assertEq(fresh.principal(), CAP, "the cap counts the holding left behind");
+    }
+
+    /// @dev Nothing is skipped and the router pays the reference price, so the proceeds equal principal
+    function testWithdrawAllThatSellsEverythingLeavesNoPrincipal() public {
+        StockAccountStrategy fresh = _freshAccount(10_000e18, 20e18);
+
+        vm.prank(user);
+        fresh.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 14_000e18, "user asset");
+        assertEq(nvda.balanceOf(address(fresh)), 0, "nvda sold");
+        assertEq(fresh.principal(), 0, "principal");
+    }
+
+    function testWithdrawAllRevertsWhenEmpty() public {
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.EmptyBalance.selector);
+        strategy.withdrawAll(100, 0, block.timestamp);
+    }
+
+    function testWithdrawAllRevertsWhenSlippageAboveCap() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.SlippageExceedsMaximum.selector);
+        strategy.withdrawAll(501, 0, block.timestamp);
+    }
+
+    function testPreviewWithdrawReturnsEmptyWhenIdleCovers() public view {
+        (address[] memory tokens, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds) =
+            strategy.previewWithdraw(300e18, 100);
+
+        assertEq(tokens.length, 0, "tokens length");
+        assertEq(amounts.length, 0, "amounts length");
+        assertEq(referenceValue, 0, "reference value");
+        assertEq(minProceeds, 0, "min proceeds");
+    }
+
+    function testPreviewWithdrawMatchesExecutedSells() public {
+        (address[] memory tokens, uint256[] memory amounts, uint256 referenceValue, uint256 minProceeds) =
+            strategy.previewWithdraw(1_500e18, 100);
+
+        assertEq(tokens.length, 2, "tokens length");
+        assertEq(tokens[0], address(nvda), "token 0");
+        assertEq(tokens[1], address(aapl), "token 1");
+        assertApproxEqAbs(minProceeds, (referenceValue * 99) / 100, 2, "min proceeds");
+
+        _withdraw(1_500e18, 100);
+
+        assertEq(nvda.balanceOf(address(strategy)), 10e18 - amounts[0], "nvda sold");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18 - amounts[1], "aapl sold");
+    }
+
+    function testWithdrawRevertsAfterTheDeadline() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.DeadlineExpired.selector);
+        strategy.withdraw(300e18, 100, new address[](0), new uint256[](0), block.timestamp - 1);
+    }
+
+    function testWithdrawAllRevertsAfterTheDeadline() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.DeadlineExpired.selector);
+        strategy.withdrawAll(100, 0, block.timestamp - 1);
+    }
+
+    function testWithdrawAllRevertsBelowTheCallerMinimumAndPaysAtIt() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.InsufficientProceeds.selector);
+        strategy.withdrawAll(100, 4_500e18 + 1, block.timestamp);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 4_500e18, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 4_500e18, "user asset");
+    }
+
+    function testWithdrawRevertsWhenACapIsBelowThePlannedAmount() public {
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        amounts[1] -= 1;
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellExceedsCap.selector, address(aapl)));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testWithdrawRevertsWhenAPlannedTokenIsNotCapped() public {
+        (address[] memory planned, uint256[] memory plannedAmounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        address[] memory tokens = new address[](1);
+        uint256[] memory amounts = new uint256[](1);
+        tokens[0] = planned[0];
+        amounts[0] = plannedAmounts[0];
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellExceedsCap.selector, address(aapl)));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testWithdrawMatchesCapsByTokenInAnyOrderAndIgnoresUnplannedOnes() public {
+        (address[] memory planned, uint256[] memory plannedAmounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        address[] memory tokens = new address[](3);
+        uint256[] memory amounts = new uint256[](3);
+        (tokens[0], amounts[0]) = (makeAddr("unplanned"), 0);
+        (tokens[1], amounts[1]) = (planned[1], plannedAmounts[1]);
+        (tokens[2], amounts[2]) = (planned[0], plannedAmounts[0]);
+
+        vm.prank(user);
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    /// @dev The fee accrues every second, so the legs a block-old preview planned no longer cover the
+    ///      shortfall; caps copied unchanged revert, caps with headroom go through
+    function testCapsCopiedFromAStalePreviewRevertAndCapsWithHeadroomPass() public {
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+        vm.warp(block.timestamp + 1);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.SellExceedsCap.selector, tokens[0]));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+
+        for (uint256 i = 0; i < amounts.length; i++) {
+            amounts[i] = (amounts[i] * 101) / 100;
+        }
+
+        vm.prank(user);
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 1_500e18, "user asset");
+    }
+
+    function testWithdrawRevertsWhenTheCapListsDifferInLength() public {
+        vm.prank(user);
+        vm.expectRevert(IStockAccountStrategy.LengthMismatch.selector);
+        strategy.withdraw(1_500e18, 100, new address[](1), new uint256[](0), block.timestamp);
+    }
+
+    function testAHaltedTokenWhoseBalanceReadRevertsIsSkipped() public {
+        _halt(address(new RevertingBalanceToken()));
+
+        assertEq(strategy.getNAV(), 4_500e18, "valued without reading the halted balance");
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 4_500e18, "user asset");
+
+        // The emptied account still answers the fee clock and the in-kind sweep without reading it
+        vm.warp(block.timestamp + 1);
+        strategy.payFees(address(usdc));
+        assertEq(strategy.lastFeePaid(), block.timestamp, "an empty account advances the clock");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+    }
+
+    function testAnActiveTokenWhoseBalanceReadRevertsDoesNotBlockTheExits() public {
+        _listWithPool(address(new RevertingBalanceToken()));
+
+        assertEq(strategy.getNAV(), 4_500e18, "valued without the unreadable holding");
+        assertEq(strategy.heldTokens().length, 2, "held tokens still listed");
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+        assertEq(strategy.principal(), 0, "the in-kind exit completes");
+    }
+
+    function testAListedAddressWithNoCodeDoesNotBlockTheExits() public {
+        _listWithPool(makeAddr("codeless"));
+
+        assertEq(strategy.getNAV(), 4_500e18, "valued without the codeless listing");
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+        assertEq(usdc.balanceOf(user), 4_500e18, "user asset");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+    }
+
+    function testATinyShortfallSellsOnlyTheLargestLegAtTheMinimumValue() public {
+        _withdraw(500e18 + 1, 100);
+
+        assertEq(nvda.balanceOf(address(strategy)), 10e18 - 5_000, "one USDC of the largest leg");
+        assertEq(aapl.balanceOf(address(strategy)), 20e18, "the other leg is not touched");
+        assertEq(usdc.balanceOf(user), 500e18 + 1, "user asset");
+        assertEq(usdc.balanceOf(address(strategy)), 1e6 - 1, "the extra proceeds stay idle");
+    }
+
+    /// @dev Three legs worth 1.5 USDC each against a 2.5 USDC shortfall: every share is under the
+    ///      minimum, but the largest leg cannot absorb them, so they stay planned pro rata
+    function testSmallLegsAreOnlyFoldedWhileTheLargestLegCanAbsorbThem() public {
+        MockERC20 msft = new MockERC20("MSFT Coin", "MSFTc");
+        priceChecker.setRate(address(msft), address(usdc), 100e18);
+        router.setRate(address(msft), address(usdc), 100e18);
+        _listWithPool(address(msft));
+
+        StockAccountStrategy small = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+        nvda.mint(address(small), 7_500);
+        aapl.mint(address(small), 15_000);
+        msft.mint(address(small), 15_000);
+
+        address[] memory tokens = new address[](3);
+        (tokens[0], tokens[1], tokens[2]) = (address(nvda), address(aapl), address(msft));
+        uint256[] memory caps = new uint256[](3);
+        (caps[0], caps[1], caps[2]) = (7_500, 15_000, 15_000);
+
+        vm.prank(user);
+        small.withdraw(2.5e6, 50, tokens, caps, block.timestamp);
+
+        // The largest leg is lifted to the minimum sale, the others sell their rounded-up pro rata share
+        assertEq(usdc.balanceOf(user), 2.5e6, "user asset");
+        assertEq(nvda.balanceOf(address(small)), 2_500, "nvda sells the minimum value");
+        assertEq(aapl.balanceOf(address(small)), 6_624, "aapl sells its own share");
+        assertEq(msft.balanceOf(address(small)), 6_624, "msft sells its own share");
+        assertEq(usdc.balanceOf(address(small)), 175_200, "the extra proceeds stay idle");
+    }
+
+    function testWithdrawAllLeavesDustInAnotherTokenForTheInKindExit() public {
+        vm.prank(user);
+        strategy.withdrawToken(address(aapl), 20e18);
+        aapl.mint(address(strategy), 1_000);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(nvda.balanceOf(address(strategy)), 0, "nvda sold");
+        assertEq(aapl.balanceOf(address(strategy)), 1_000, "the dust stays");
+        assertEq(usdc.balanceOf(user), 2_500e18, "user asset");
+    }
+
+    /// @dev One raw unit of a cbBTC-like token is worth 1e15 here, so flooring that leg used to drop
+    ///      nearly a unit and, filled exactly at the floor, came in under the request
+    function testAFloorFilledHighUnitValueLegStillCoversTheRequest() public {
+        MockERC20 wbtc = new MockERC20("WBTC Coin", "WBTCc");
+        priceChecker.setRate(address(wbtc), address(usdc), 1e33);
+        router.setRate(address(wbtc), address(usdc), 1e33);
+        _listWithPool(address(wbtc));
+        wbtc.mint(address(strategy), 1e6);
+
+        _withdraw(1_500e18 + 4.9e15, 0);
+
+        assertEq(usdc.balanceOf(user), 1_500e18 + 4.9e15, "user asset");
+    }
+
+    function testARouterThatMovesLessThanTheFloorIsRefusedWhateverItReports() public {
+        MockConfigurableSwapRouter liar = _installConfigurableRouter();
+        liar.setDeliverShortBy(1);
+        liar.setOverReportBy(1);
+        (address[] memory tokens, uint256[] memory amounts,,) = strategy.previewWithdraw(1_500e18, 100);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.RouterUnderpaid.selector, address(nvda)));
+        strategy.withdraw(1_500e18, 100, tokens, amounts, block.timestamp);
+    }
+
+    function testTheSaleIsWhatTheAccountReceivedNotWhatTheRouterReports() public {
+        MockConfigurableSwapRouter liar = _installConfigurableRouter();
+        liar.setOverReportBy(1e18);
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.Withdraw(4_460e18, 3_960e18);
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+    }
+
+    function testWithdrawOnlyOwner() public {
+        vm.prank(funder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
+        strategy.withdraw(1_500e18, 100, new address[](0), new uint256[](0), block.timestamp);
+    }
+
+    function testWithdrawAllOnlyOwner() public {
+        vm.prank(funder);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
+        strategy.withdrawAll(100, 0, block.timestamp);
+    }
+
+    function _freshAccount(uint256 cash, uint256 nvdaAmount) internal returns (StockAccountStrategy fresh) {
+        fresh = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+
+        usdc.mint(funder, cash);
+        nvda.mint(funder, nvdaAmount);
+        vm.startPrank(funder);
+        usdc.approve(address(fresh), cash);
+        nvda.approve(address(fresh), nvdaAmount);
+        fresh.deposit(cash);
+        fresh.depositToken(address(nvda), nvdaAmount);
+        vm.stopPrank();
+
+        assertEq(fresh.principal(), cash + nvdaAmount * 200, "principal");
+    }
+
+    function _installConfigurableRouter() internal returns (MockConfigurableSwapRouter configurable) {
+        configurable = new MockConfigurableSwapRouter();
+        usdc.mint(address(configurable), 1_000_000e18);
+        stockRegistry.setAerodromeRouter(configurable);
+    }
+
+    function _listWithPool(address token) internal {
+        stockRegistry.setTokenConfig(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: IStockAccountRegistry.TokenStatus.Active,
+                source: IStockAccountRegistry.PriceSource.PoolTwap,
+                pool: address(pool),
+                chainlinkFeed: address(0)
+            })
+        );
+    }
+
+    function _halt(address token) internal {
+        stockRegistry.setTokenConfig(
+            token,
+            IStockAccountRegistry.TokenConfig({
+                status: IStockAccountRegistry.TokenStatus.Halted,
+                source: IStockAccountRegistry.PriceSource.PoolTwap,
+                pool: address(pool),
+                chainlinkFeed: address(0)
+            })
+        );
+    }
+}
+
+contract RevertingBalanceToken {
+    function balanceOf(address) external pure returns (uint256) {
+        revert("balanceOf");
+    }
+}
