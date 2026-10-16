@@ -100,6 +100,21 @@ contract StockDropSetupTest is Test {
         _proveStockAccountPaysDropAutomation();
     }
 
+    /// @dev 017 before 013: FPS runs build() live as the multisig, so action 1 reverts there and no batch is produced
+    function test_stockDrop_cannotBuildBefore013() public {
+        address checker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
+        (bool guarded,) = checker.staticcall(abi.encodeWithSignature("sequencerUptimeFeed()"));
+        assertFalse(guarded, "pinned checker should predate 013");
+
+        _run(redeployProposal, 18);
+        deployProposal.setPrimaryForkId(vm.activeFork());
+        deployProposal.deploy();
+
+        // Empty returndata: the pre-013 implementation has no setSequencerUptimeFeed selector
+        vm.expectRevert(bytes(""));
+        deployProposal.build();
+    }
+
     // ─── stages ──────────────────────────────────────────────────────────────────────────────────
 
     /// @dev An account made by the live factory before the proposals, i.e. on the V1 implementation and registry
