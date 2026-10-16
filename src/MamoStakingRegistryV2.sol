@@ -221,6 +221,13 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         address tokenIn = token;
         for (uint256 i = 0; i < route.length; i++) {
             tokenIn = hopTokenOut(route[i].pool, tokenIn);
+            // A hop's own router and checker get the same probes as the global ones (H48)
+            if (address(route[i].router) != address(0)) {
+                require(address(route[i].router).code.length > 0, "Router must be a contract");
+            }
+            if (address(route[i].checker) != address(0)) {
+                _requireSlippagePriceChecker(address(route[i].checker));
+            }
             routes[token].push(route[i]);
         }
         require(route.length == 0 || tokenIn == mamoToken, "Route must end in MAMO");

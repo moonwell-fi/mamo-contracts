@@ -677,6 +677,57 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         registry.setSlippagePriceChecker(ISlippagePriceChecker(pool1));
     }
 
+    function testSetRouteRevertsWhenHopCheckerLacksSurface() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken2, rewardToken1));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(tokenUsdcPool, ISwapRouter(address(0)), ISlippagePriceChecker(pool1));
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(admin);
+        vm.expectRevert("Not a slippage price checker");
+        registry.setRoute(rewardToken2, route);
+    }
+
+    function testSetRouteRevertsWhenHopRouterIsNotAContract() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken2, rewardToken1));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+        address eoaRouter = makeAddr("eoaRouter");
+        vm.etch(eoaRouter, ""); // the label's address carries delegated code on a Base fork
+
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(tokenUsdcPool, ISwapRouter(eoaRouter), ISlippagePriceChecker(address(0)));
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(admin);
+        vm.expectRevert("Router must be a contract");
+        registry.setRoute(rewardToken2, route);
+    }
+
+    function testSetRouteAcceptsAHopNamingTheGlobalChecker() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken2, rewardToken1));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(
+            tokenUsdcPool,
+            ISwapRouter(address(registry.dexRouter())),
+            ISlippagePriceChecker(address(registry.slippagePriceChecker()))
+        );
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(admin);
+        registry.setRoute(rewardToken2, route);
+        assertEq(registry.getRoute(rewardToken2).length, 2, "route stored");
+    }
+
     // ========== RECOVERY FUNCTION TESTS ==========
 
     function testRecoverERC20() public {
