@@ -232,7 +232,10 @@ contract DropAutomationV2 is Ownable {
     function removeGauge(address gauge) external onlyOwner {
         if (!isGauge[gauge]) revert NotFound(gauge);
 
-        try IAerodromeGauge(gauge).getReward(address(this)) {} catch {}
+        // try/catch does not catch the extcodesize check, so a codeless gauge would be stuck
+        if (gauge.code.length != 0) {
+            try IAerodromeGauge(gauge).getReward(address(this)) {} catch {}
+        }
         _remove(gauges, gauge);
         isGauge[gauge] = false;
 

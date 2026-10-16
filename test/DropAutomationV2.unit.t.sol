@@ -249,6 +249,19 @@ contract DropAutomationV2UnitTest is Test {
         assertEq(drop.getGauges().length, 0, "a reverting gauge is still removed");
     }
 
+    function test_removeGauge_codelessGauge() public {
+        MockGauge gauge = new MockGauge(new MockERC20Decimals("LP", 18));
+
+        vm.prank(owner);
+        drop.addGauge(address(gauge));
+        vm.etch(address(gauge), "");
+
+        vm.prank(owner);
+        drop.removeGauge(address(gauge));
+        assertEq(drop.getGauges().length, 0);
+        assertFalse(drop.isGauge(address(gauge)));
+    }
+
     function test_withdrawGauge_sendsWhatTheGaugeReturned() public {
         MockERC20Decimals lp = new MockERC20Decimals("LP", 18);
         MockGauge gauge = new MockGauge(lp);
