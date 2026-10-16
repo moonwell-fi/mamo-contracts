@@ -408,7 +408,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Compound all available rewards by converting them to MAMO and restaking
+     * @notice Compound all available rewards by swapping them to MAMO and staking it. A reward whose route fails
+     *         is held (CompoundRewardTokenHeld), and the MAMO is held while MultiRewards is paused (MamoHeld)
      * @dev Claims rewards and then compounds them. Can be called independently.
      * @param deadline Unix timestamp after which the swaps must no longer execute. Taken from the
      *        caller because `block.timestamp + N` computed inside the transaction is tautological:
