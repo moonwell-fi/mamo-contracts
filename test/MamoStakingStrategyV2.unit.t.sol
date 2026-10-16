@@ -340,6 +340,23 @@ contract MamoStakingStrategyV2UnitTest is Test {
         assertEq(stock.balanceOf(address(strategy)), 1e8, "held");
     }
 
+    function test_compound_checksThePoolOfAChainlinkPricedStock() public {
+        stock.mint(address(strategy), 1e8);
+        IStockAccountRegistry.PriceSource chainlink = IStockAccountRegistry.PriceSource.Chainlink;
+        address otherPool = address(new MockHopPool(address(usdc), address(stock)));
+        _listStock(IStockAccountRegistry.TokenStatus.Active, otherPool, chainlink);
+
+        vm.prank(address(strategy));
+        vm.expectRevert("Stock pool mismatch");
+        strategy.compoundRewardToken(address(stock), address(stockUsdc), 1e8, block.timestamp);
+
+        _listStock(IStockAccountRegistry.TokenStatus.Active, address(stockUsdc), chainlink);
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+        assertEq(stock.balanceOf(address(strategy)), 0, "sold on the matching pool");
+        assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 2_000e18);
+    }
+
     function test_setRoute_validatesTheRoute() public {
         MamoStakingRegistryV2.Hop[] memory route = new MamoStakingRegistryV2.Hop[](1);
         route[0] = MamoStakingRegistryV2.Hop(address(stockUsdc), stockRouter, stockChecker);
@@ -365,10 +382,16 @@ contract MamoStakingStrategyV2UnitTest is Test {
     }
 
     function _listStock(IStockAccountRegistry.TokenStatus status, address pool) internal {
-        stockRegistry.setTokenConfig(
-            address(stock),
-            IStockAccountRegistry.TokenConfig(status, IStockAccountRegistry.PriceSource.PoolTwap, pool, address(0))
-        );
+        _listStock(status, pool, IStockAccountRegistry.PriceSource.PoolTwap);
+    }
+
+    function _listStock(
+        IStockAccountRegistry.TokenStatus status,
+        address pool,
+        IStockAccountRegistry.PriceSource source
+    ) internal {
+        address feed = source == IStockAccountRegistry.PriceSource.Chainlink ? makeAddr("stockFeed") : address(0);
+        stockRegistry.setTokenConfig(address(stock), IStockAccountRegistry.TokenConfig(status, source, pool, feed));
     }
 
     function _setRate(MockSwapRouter r, MockPriceChecker c, address tokenIn, address tokenOut, uint256 rate) internal {
