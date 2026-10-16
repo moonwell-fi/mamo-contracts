@@ -206,6 +206,8 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         vm.expectEmit(address(strategy));
         emit MamoStakingStrategyV2.ReinvestRewardTokenHeld(address(stock), 1e8);
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.Reinvested(5e18);
         vm.prank(backend);
         strategy.reinvest(_destinations(address(0), address(stockAccount)));
 
