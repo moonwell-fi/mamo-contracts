@@ -552,17 +552,33 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(usdc.balanceOf(feeRecipient), 0, "the old recipient gets nothing");
     }
 
-    function testRecoverERC20OfTheCashStillPaysTheFeeInCashFirst() public {
+    function testAnInKindExitOfTheCashPaysTheFeeFromTheStock() public {
+        StockAccountStrategy bare = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+        usdc.mint(address(bare), 10e18);
+        nvda.mint(address(bare), 100e18);
+
         vm.warp(startTime + 365 days);
-        uint256 owed = strategy.feeDue();
+        uint256 owedInNvda = bare.feeDueIn(address(nvda));
+        assertEq(bare.feeDue(), 200.1e18, "the fee is worth twenty times the cash");
 
         vm.prank(user);
-        strategy.recoverERC20(address(usdc), user, 100e18);
+        bare.withdrawToken(address(usdc), 10e18);
 
-        assertEq(usdc.balanceOf(feeRecipient), owed, "the fee is paid in the asset even when the asset is leaving");
-        assertEq(nvda.balanceOf(feeRecipient), 0, "no stock is sold for the fee");
-        assertEq(strategy.lastFeePaid(), startTime + 365 days, "the period is settled");
-        assertEq(usdc.balanceOf(user), 100e18, "the owner gets the amount asked for");
+        assertEq(usdc.balanceOf(user), 10e18, "the owner gets the whole cash");
+        assertEq(nvda.balanceOf(feeRecipient), owedInNvda, "the stock pays the fee");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "the leaving cash pays nothing");
+        assertEq(bare.lastFeePaid(), startTime + 365 days, "the period is settled");
+    }
+
+    function testPayFeesFromAnyPaysFromTheAssetFirst() public {
+        vm.warp(startTime + 30 days);
+        uint256 owed = strategy.feeDue();
+
+        strategy.payFeesFromAny();
+
+        assertEq(usdc.balanceOf(feeRecipient), owed, "the asset pays");
+        assertEq(nvda.balanceOf(feeRecipient), 0, "no stock is taken");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
     }
 
     function testRecoverERC20OfAnUnlistedTokenPaysTheFeeFromTheBalances() public {

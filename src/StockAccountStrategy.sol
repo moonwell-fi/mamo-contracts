@@ -718,7 +718,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _payFeesFromAny(address skip) internal {
-        if (asset.balanceOf(address(this)) > 0) {
+        if (skip != address(asset) && asset.balanceOf(address(this)) > 0) {
             _payFees(address(asset));
         }
 
