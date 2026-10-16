@@ -443,6 +443,21 @@ pool-TWAP listing costs about 107k gas and one Chainlink listing about 113k.
 - **Mid-settlement fee.** The post-hook values the fee on a NAV read inside the settlement; only the
   settling solver can act on that, and it can only under-collect part of one fee period.
 
+## A listed token stops pricing
+
+A listed token that stops pricing (a broken or drained pool) makes the valuation of every account that
+holds it incomplete. Those accounts refuse every order and defer their fee (see
+[The management fee](#the-management-fee)) until the guardian halts the token with
+`setTokenStatus(token, Halted)`. The halt takes it out of every valuation at once, which restores
+orders and fee collection for every holder in one call; holders keep the token and can still withdraw
+it in kind. Raising it back to `Active` re-probes the price, so that waits until it quotes again.
+
+Holding it is not opt-in: 1 raw unit sent by a third party is enough to put an account in this state.
+That is why the response is the halt rather than anything per account.
+
+Monitoring: alert when `getExpectedOut(10**decimals, token, USDC)` on the registry's price checker
+reverts for any `Active` listing.
+
 ## Why the smoke test only deposits USDC
 
 B20 stock tokens are node-native precompiles on Base: their code is the single byte `0xef`, which revm
@@ -478,6 +493,16 @@ is neither unlisted nor Halted, otherwise `FeeTokenNotAllowed(token)`; a zero ba
 `NoBalanceForFee(token)` and the clock does not move. `feeDue()` is the USDC value owed right now,
 `feeDueIn(token)` the same fee expressed in that token.
 
+**When the clock catches up without a payment.** Only when nothing is owed: a zero rate, or an account
+that holds no asset and no listed token that is not Halted. A Halted-only account is therefore
+fee-free for the halted window, on purpose: Halted holdings are outside the value the fee is charged
+on. That puts a status flip within the admin's existing trust, since the same admin sets the fee rate.
+
+**While a holding cannot be priced, the fee is deferred.** If any held token that is not Halted fails
+to price (the sequencer is down or in its grace hour, or a pool broke), no fee is paid, the clock does
+not move, and orders are refused with `ValuationIncomplete`. The whole period settles once everything
+prices again. See [A listed token stops pricing](#a-listed-token-stops-pricing).
+
 Three things call it:
 
 - **The CoW post-hook.** An order's appData declares one post-hook, `payFees(buyToken)` on the account
@@ -487,13 +512,13 @@ Three things call it:
   legs, so the fee is valued on the post-trade NAV. Every position is one more pool TWAP read in that
   NAV, so the cost grows with the basket: at `maxPositions` of 10, on a registry listing eleven tokens,
   the vnet measures `payFees` at 667,000 gas, about 3x inside the limit the document declares.
-- **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it.
-  `withdraw` and `withdrawAll` pay in USDC, after their sells. `withdrawToken(token)` pays from USDC
-  and then the other priced stocks, and out of `token` itself only for what they leave.
-  `withdrawAllInKind` pays from USDC and then walks the listed tokens, stopping as soon as the period
-  is settled, because the account is empty when it returns and anything left uncollected there is
-  uncollectable forever. It only moves the clock outright when the account holds no balance at all,
-  which is the one case where nothing is owed.
+- **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it. The cash
+  exits, `withdraw` and `withdrawAll`, pay in USDC after their sells. The in-kind exits,
+  `withdrawToken(token)`, `recoverERC20(token, ...)` and `withdrawAllInKind`, pay from every holding
+  other than the token leaving, the asset included, and out of the leaving token only for what the
+  others leave. So a USDC in-kind exit pays its fee in stock. `withdrawAllInKind` stops as soon as the
+  period is settled, because the account is empty when it returns and anything left uncollected there
+  is uncollectable forever.
 - **A poke.** An account that neither trades nor withdraws just keeps owing more; the backend calls
   `payFees(token)` on it directly, naming whichever balance it wants the fee taken out of.
 
