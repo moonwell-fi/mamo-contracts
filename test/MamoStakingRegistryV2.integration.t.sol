@@ -6,13 +6,23 @@ import {console} from "@forge-std/console.sol";
 
 import {MockPool} from "./mocks/MockPool.sol";
 import {MockPriceChecker} from "./mocks/MockPriceChecker.sol";
+import {MockStockAccountRegistry} from "./mocks/MockStockAccountRegistry.sol";
 import {MamoStakingRegistryV2 as MamoStakingRegistry} from "@contracts/MamoStakingRegistryV2.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+contract MockStockHopChecker is MockPriceChecker {
+    address public registry;
+
+    constructor(address registry_) {
+        registry = registry_;
+    }
+}
 
 contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     MamoStakingRegistry public stakingRegistry;
@@ -746,6 +756,50 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         vm.prank(admin);
         registry.setRoute(rewardToken2, route);
         assertEq(registry.getRoute(rewardToken2).length, 2, "route stored");
+    }
+
+    /// @dev Stock rewardToken2 sells into USDC (rewardToken1) on its own checker, then USDC into MAMO through pool1
+    function _stockRouteSetup()
+        internal
+        returns (MamoStakingRegistry registry, MamoStakingRegistry.Hop[] memory route)
+    {
+        registry = _freshRegistry();
+        address stockPool = address(new MockPool(rewardToken2, rewardToken1));
+        MockStockAccountRegistry stockRegistry = new MockStockAccountRegistry();
+        stockRegistry.setTokenConfig(
+            rewardToken2,
+            IStockAccountRegistry.TokenConfig(
+                IStockAccountRegistry.TokenStatus.Active,
+                IStockAccountRegistry.PriceSource.PoolTwap,
+                stockPool,
+                address(0)
+            )
+        );
+        ISlippagePriceChecker stockChecker =
+            ISlippagePriceChecker(address(new MockStockHopChecker(address(stockRegistry))));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, stockPool);
+
+        route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(stockPool, ISwapRouter(address(0)), stockChecker);
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), stockChecker);
+    }
+
+    function testSetRouteRevertsWhenAStockCheckerPricesAnUnlistedToken() public {
+        (MamoStakingRegistry registry, MamoStakingRegistry.Hop[] memory route) = _stockRouteSetup();
+
+        vm.prank(admin);
+        vm.expectRevert("Stock hop token not listed");
+        registry.setRoute(rewardToken2, route);
+    }
+
+    function testSetRouteAcceptsAStockHopThenTheGlobalChecker() public {
+        (MamoStakingRegistry registry, MamoStakingRegistry.Hop[] memory route) = _stockRouteSetup();
+        route[1].checker = ISlippagePriceChecker(address(0));
+
+        vm.prank(admin);
+        registry.setRoute(rewardToken2, route);
+        assertEq(address(registry.getRoute(rewardToken2)[0].checker), address(route[0].checker), "stock hop stored");
     }
 
     // ========== RECOVERY FUNCTION TESTS ==========

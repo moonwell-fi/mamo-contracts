@@ -9,6 +9,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 /**
@@ -220,13 +221,15 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         delete routes[token];
         address tokenIn = token;
         for (uint256 i = 0; i < route.length; i++) {
-            tokenIn = hopTokenOut(route[i].pool, tokenIn);
+            address hopIn = tokenIn;
+            tokenIn = hopTokenOut(route[i].pool, hopIn);
             // A hop's own router and checker get the same probes as the global ones (H48)
             if (address(route[i].router) != address(0)) {
                 require(address(route[i].router).code.length > 0, "Router must be a contract");
             }
             if (address(route[i].checker) != address(0)) {
                 _requireSlippagePriceChecker(address(route[i].checker));
+                _requireListedStockIfStockChecker(address(route[i].checker), hopIn);
             }
             routes[token].push(route[i]);
         }
@@ -380,6 +383,17 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         (bool ok, bytes memory ret) =
             checker.staticcall(abi.encodeCall(ISlippagePriceChecker.maxTimePriceValid, (address(0))));
         require(ok && ret.length == 32, "Not a slippage price checker");
+    }
+
+    /// @dev The strategy treats a checker answering registry() as a stock checker and holds any token it does not list
+    function _requireListedStockIfStockChecker(address checker, address tokenIn) private view {
+        (bool ok, bytes memory ret) = checker.staticcall(abi.encodeWithSignature("registry()"));
+        if (!ok || ret.length != 32) return;
+        require(
+            IStockAccountRegistry(abi.decode(ret, (address))).tokenConfig(tokenIn).status
+                != IStockAccountRegistry.TokenStatus.None,
+            "Stock hop token not listed"
+        );
     }
 
     // ==================== RECOVERY FUNCTIONS ====================
