@@ -61,7 +61,7 @@ export TEST_USER
 export FOUNDRY_OUT=${FOUNDRY_OUT:-out}
 export FOUNDRY_CACHE_PATH=${FOUNDRY_CACHE_PATH:-cache}
 
-forge script script/StockAccountsPoolReadiness.s.sol:StockAccountsPoolReadiness \
+GROW=1 forge script script/StockAccountsPoolReadiness.s.sol:StockAccountsPoolReadiness \
   --rpc-url "$RPC" --broadcast --unlocked --sender "$DEPLOYER" --slow -vv
 
 forge script script/DeployStockAccounts.s.sol:DeployStockAccounts \

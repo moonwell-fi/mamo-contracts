@@ -260,7 +260,8 @@ TWAP moves and the legs round up. Anyone sending the account 1 USDC or more of a
 `tokens` also makes that withdrawal revert; the owner previews again, or exits through `withdrawAll`
 or `withdrawAllInKind`. See `docs/STOCK_ACCOUNT_PRICE_CHECKER.md`.
 
-Re-run `make stock-pool-readiness` before signing (see [Pool readiness](#pool-readiness)). The
+Before signing, run `make stock-pool-readiness`, and if it names any pool as short, run
+`make stock-pool-grow` and then the check again (see [Pool readiness](#pool-readiness)). The
 fork rehearsal is `test/StockAccountRedeploy.integration.t.sol` (`make stock-accounts-redeploy`):
 019 hook by hook, a v2 account lifecycle, and a v1 account exiting after the pause.
 
@@ -343,8 +344,9 @@ entries by exact address and counting the pool-priced ones.
 factory. The registry probes every listing and every raise back to `Active` through it, so a token
 the checker cannot quote at all — no pool against `asset`, or a pool whose history is shorter than
 `twapWindow` — is refused. The probe only checks for a non-zero quote, in both directions; it does
-not check the pool's liquidity or observation history, so `make stock-pool-readiness` is a
-mandatory step before every listing (see below). Lowering a token to `SellOnly` or `Halted` never
+not check the pool's liquidity or observation history, so `make stock-pool-readiness` (and
+`make stock-pool-grow` for any pool it reports as short) is a mandatory step before every listing (see
+below). Lowering a token to `SellOnly` or `Halted` never
 probes. Never list `asset` itself; the registry refuses it with `AssetNotListable`.
 
 The registry puts floors under the caps: `maxWithdrawSlippageBps` at least 50, `maxBackendSlippageBps`
@@ -357,21 +359,27 @@ depeg does not show in its price. The depeg procedure is the guardian halt.
 ### Pool readiness
 
 A `PoolTwap` token is only listable once its pool can serve a `twapWindow`-long `observe`, which needs
-enough observation slots in the pool's ring. `script/StockAccountsPoolReadiness.s.sol` reports and, when
-short, grows them:
+enough observation slots in the pool's ring. `script/StockAccountsPoolReadiness.s.sol` does this in two
+named steps:
 
 ```bash
-make stock-pool-readiness                                  # every PoolTwap pool in the token list
+make stock-pool-readiness                                  # 1. check, read-only: every PoolTwap pool
 POOLS=0x3F53aFD15909bF5B1c5963b5C0D28123668ce174 make stock-pool-readiness
+make stock-pool-grow                                       # 2. grow the short ones (broadcasts)
 ```
+
+The check simulates against a Base fork and sends nothing; for a short pool it prints
+`needs growing to N, run make stock-pool-grow`. `stock-pool-grow` runs the same script with `GROW=1`
+and `--broadcast --account mamo-test`, sending `increaseObservationCardinalityNext` from the deployer.
+Run the check again afterwards; only that read says what is on chain.
 
 The target is `twapWindow / 2 x 2`, capped at `type(uint16).max`: Base produces a block about every two
 seconds, so a 180-second window needs about 90 observations, and the ring is sized at twice that for
 headroom — **180 for the configured 180-second window**. `twapWindow` is read from the deployed
 registry when `STOCK_ACCOUNT_REGISTRY` is in the address book, and from the deploy config before that.
 
-The script only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
-is below the target, so a second run sends nothing. All twelve pools already sit above it (2048 on
+The grow step only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
+is below the target, so a second grow run sends nothing. All twelve pools already sit above it (2048 on
 most, 1000 on the MUc and PLTRc pools, 8000 on NVDAc) and are untouched:
 
 ```
@@ -382,10 +390,15 @@ AAPLc  0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0  2048/2048 required 180
 
 `POOLS` overrides the token list with a comma-separated pool list, which is how the grow path is
 demonstrated without touching a launch pool. The cbBTC/USDC pool at
-`0x3F53aFD15909bF5B1c5963b5C0D28123668ce174` is still at cardinality 1:
+`0x3F53aFD15909bF5B1c5963b5C0D28123668ce174` is still at cardinality 1; the check reports it, and the
+grow (here against a fork) grows it:
 
 ```
 POOLS  0x3F53aFD15909bF5B1c5963b5C0D28123668ce174  1/1 required 180
+  needs growing to 180, run make stock-pool-grow
+  serves window: yes
+
+POOLS  0x3F53aFD15909bF5B1c5963b5C0D28123668ce174  1/1 required 180      (GROW=1)
   grown to 1/180
   serves window: yes
 ```
@@ -397,8 +410,8 @@ The `serves window` line is **information, never a gate**. `observe` can succeed
 filled yet (a pool with one stale observation extrapolates), and it fails on a freshly grown ring that
 has not accumulated blocks. Only `listToken` decides, through the registry's own probe.
 
-`vnet-up.sh` runs the readiness script against the vnet just before the deploy, so a fresh fork has its
-pools grown before step 8 probes them.
+`vnet-up.sh` runs the readiness script with `GROW=1` against the vnet just before the deploy, so a
+fresh fork has its pools grown before step 8 probes them.
 
 `setPriceChecker` and `setTwapWindow` change what "priceable" means for every listing at once, so both
 apply the new value first and then re-probe every token that is not `Halted`, reverting the whole call

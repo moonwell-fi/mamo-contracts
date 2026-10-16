@@ -12,12 +12,14 @@ import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 
 /**
  * @title StockAccountsPoolReadiness
- * @notice Grows the observation ring of every PoolTwap pool in the token list so its TWAP window fits
+ * @notice Checks the observation ring of every PoolTwap pool in the token list against its TWAP window,
+ *         and with GROW=1 grows the short ones
  * @dev Base blocks are about two seconds, so a window needs about window / 2 observations; the ring is
  *      sized at twice that for headroom. A pool already at or above the target is left alone, which
- *      makes a second run send nothing
+ *      makes a second grow run send nothing
  * @dev Env: DEPLOY_ENV (default 8453_TESTING), ADDRESSES_PATH (default ./addresses),
- *      POOLS (optional comma-separated pool list, used instead of the token list)
+ *      POOLS (optional comma-separated pool list, used instead of the token list),
+ *      GROW (default 0; non-zero sends the grow, only meaningful under --broadcast)
  */
 contract StockAccountsPoolReadiness is Script {
     string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
@@ -40,6 +42,7 @@ contract StockAccountsPoolReadiness is Script {
         addresses = new Addresses(addressesPath, chainIds);
         configLoader = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json"));
 
+        bool grow = vm.envOr("GROW", uint256(0)) != 0;
         uint32 twapWindow = _twapWindow();
         uint16 required = _requiredCardinality(twapWindow);
 
@@ -53,7 +56,7 @@ contract StockAccountsPoolReadiness is Script {
         require(pools.length != 0, "Pool readiness: no pools to check");
 
         for (uint256 i = 0; i < pools.length; i++) {
-            _check(symbols[i], ICLPool(pools[i]), twapWindow, required);
+            _check(symbols[i], ICLPool(pools[i]), twapWindow, required, grow);
         }
     }
 
@@ -105,10 +108,11 @@ contract StockAccountsPoolReadiness is Script {
         }
     }
 
-    /// @notice Reports one pool's ring, grows it when it is short, then reports whether it serves the window
+    /// @notice Reports one pool's ring, grows it when it is short and `grow` is set, then reports whether it
+    ///         serves the window
     /// @dev The observe result is information only: a freshly grown ring still has to fill with blocks,
     ///      so a "no" right after a grow is expected rather than a failure
-    function _check(string memory symbol, ICLPool pool, uint32 twapWindow, uint16 required) internal {
+    function _check(string memory symbol, ICLPool pool, uint32 twapWindow, uint16 required, bool grow) internal {
         (,,, uint16 cardinality, uint16 next,) = pool.slot0();
 
         console.log(
@@ -124,7 +128,9 @@ contract StockAccountsPoolReadiness is Script {
             )
         );
 
-        if (next < required) {
+        if (next < required && !grow) {
+            console.log("  needs growing to %s, run make stock-pool-grow", vm.toString(uint256(required)));
+        } else if (next < required) {
             vm.broadcast();
             pool.increaseObservationCardinalityNext(required);
 
