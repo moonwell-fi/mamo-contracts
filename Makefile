@@ -4,7 +4,7 @@ ADDRESSES_PATH ?= ./script/stock-accounts/addresses-dryrun
 # The excluded suites self-fork at a PINNED block in setUp: a CLI --fork-url on top of that panics
 # on the Isthmus L1Block and doubles the RPC load. Each has its own target (and CI job) below.
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountStrategyInvariantsUnitTest|ERC20StrategyV2Test|StockAccountRouterSwapIntegrationTest|StockAccountSystemSetupTest|StockAccountUniverseListingTest|StockAccountRedeployTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountStrategyInvariantsUnitTest|ERC20StrategyV2Test|StockAccountRouterSwapIntegrationTest|StockAccountSystemSetupTest|StockAccountUniverseListingTest|StockAccountRedeployTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest|StockAccountFeeHookGasTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
@@ -90,6 +90,11 @@ stock-universe-listing:
 # reason as above (no --fork-url), and needs BASE_RPC_URL.
 stock-accounts-redeploy:
 	forge test --ffi --match-contract StockAccountRedeployTest -vvv
+
+# What payFees costs in the CoW post-hook against the real checker and the twelve 019 pools, cold, per held
+# and per listed token. Self-forks at a PINNED block in setUp, same op-revm reason as above (no --fork-url).
+stock-fee-hook-gas:
+	forge test --ffi --match-contract StockAccountFeeHookGasTest -vv
 
 deploy-stock-accounts:
 	rm -rf script/stock-accounts/addresses-dryrun && mkdir -p script/stock-accounts/addresses-dryrun && cp addresses/*.json script/stock-accounts/addresses-dryrun/
@@ -235,6 +240,6 @@ tenderly-leveraged-aero-withdraw:
 	./script/tenderly/run-harness.sh leveraged-aero-withdraw
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker stock-router-swap stock-accounts-setup stock-universe-listing stock-accounts-redeploy lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter stock-price-checker stock-router-swap stock-accounts-setup stock-universe-listing stock-accounts-redeploy stock-fee-hook-gas lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
 
-.PHONY:shell-lint stock-price-checker stock-accounts-setup stock-universe-listing stock-accounts-redeploy deploy-stock-accounts stock-pool-readiness stock-pool-grow tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all stock-router-swap lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
+.PHONY:shell-lint stock-price-checker stock-accounts-setup stock-universe-listing stock-accounts-redeploy stock-fee-hook-gas deploy-stock-accounts stock-pool-readiness stock-pool-grow tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking test-all stock-router-swap lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
