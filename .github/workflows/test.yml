@@ -10,6 +10,9 @@ env:
   FOUNDRY_PROFILE: ci
   BASE_RPC_URL: ${{secrets.BASE_RPC_URL}}
   BASESCAN_API_KEY: ${{secrets.BASESCAN_API_KEY}}
+  # Fork RPC transport drops ("error sending request for url") fail a few of the parallel fork jobs per run
+  FOUNDRY_FORK_RETRIES: "5"
+  FOUNDRY_FORK_RETRY_BACKOFF: "2000"
 
 jobs:
   setup:
