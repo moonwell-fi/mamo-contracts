@@ -766,20 +766,19 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         vm.warp(startTime + 30 days);
         _cannotPrice(address(msft));
-        uint256 due = _feeValue(5_000e18, 30 days);
 
         vm.prank(user);
         strategy.withdrawAllInKind();
 
-        assertEq(usdc.balanceOf(feeRecipient), due, "the fee on the priced holdings is paid");
-        assertEq(usdc.balanceOf(user), 1_000e18 - due, "user asset");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "no fee is charged on a partial valuation");
+        assertEq(usdc.balanceOf(user), 1_000e18, "user asset");
         assertEq(nvda.balanceOf(user), 10e18, "user nvda");
         assertEq(aapl.balanceOf(user), 20e18, "user aapl");
         assertEq(msft.balanceOf(user), 100e18, "user msft");
-        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
+        assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
     }
 
-    function testWithdrawTokenOfAnUnpriceableHoldingPaysTheFeeOnThePricedOnesFromTheCash() public {
+    function testWithdrawTokenOfAnUnpriceableHoldingDefersTheFeeAndTheRestPaysItLater() public {
         _fundToken(msft, funder, 100e18);
         vm.prank(funder);
         strategy.depositToken(address(msft), 100e18);
@@ -791,7 +790,37 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         strategy.withdrawToken(address(msft), 100e18);
 
         assertEq(msft.balanceOf(user), 100e18, "user msft");
-        assertEq(usdc.balanceOf(feeRecipient), _feeValue(5_000e18, 30 days), "the fee on what can be priced");
+        assertEq(usdc.balanceOf(feeRecipient), 0, "nothing is charged on a partial valuation");
+        assertEq(strategy.lastFeePaid(), startTime, "the fee stays owed");
+
+        strategy.payFees(address(usdc));
+        assertEq(usdc.balanceOf(feeRecipient), _feeValue(5_000e18, 30 days), "the holdings left pay the period");
+        assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
+    }
+
+    function testAPartialValuationDefersTheFeeUntilEverythingPrices() public {
+        _fundToken(msft, funder, 100e18);
+        vm.prank(funder);
+        strategy.depositToken(address(msft), 100e18);
+
+        vm.warp(startTime + 30 days);
+        _cannotPrice(address(msft));
+
+        strategy.payFees(address(usdc));
+        strategy.payFeesFromAny();
+        assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
+        assertEq(usdc.balanceOf(feeRecipient) + nvda.balanceOf(feeRecipient), 0, "nothing is paid");
+        assertEq(usdc.balanceOf(address(strategy)), 1_000e18, "the cash is untouched");
+
+        _withdraw(100e18, 100);
+        assertEq(usdc.balanceOf(user), 100e18, "a withdrawal from idle cash still works");
+        assertEq(strategy.lastFeePaid(), startTime, "and leaves the fee owed");
+
+        priceChecker.setRate(address(msft), address(usdc), 50e18);
+        priceChecker.setRate(address(usdc), address(msft), 2e16);
+
+        strategy.payFees(address(usdc));
+        assertEq(usdc.balanceOf(feeRecipient), _feeValue(9_900e18, 30 days), "the whole period on the whole account");
         assertEq(strategy.lastFeePaid(), startTime + 30 days, "the period is settled");
     }
 

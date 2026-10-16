@@ -552,7 +552,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice The fee value this account owes right now, in asset units
     function feeDue() public view override returns (uint256) {
-        return _feeDue(block.timestamp - lastFeePaid);
+        return _feeDue(getNAV(), block.timestamp - lastFeePaid);
     }
 
     /// @notice The amount of a token that settles the fee owed right now
@@ -639,7 +639,11 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         if (!_isFeeToken(token)) revert FeeTokenNotAllowed(token);
 
-        uint256 due = _feeDue(elapsed);
+        // A partial valuation defers the fee, so the period is never credited against part of the account
+        (,, uint256 nav, bool complete) = _valuation();
+        if (!complete) return;
+
+        uint256 due = _feeDue(nav, elapsed);
         if (due == 0) {
             // Only a zero rate or an empty account owes nothing, a due that merely rounds down stays owed
             if (stockRegistry.managementFeeBps() == 0 || _holdsNothing()) lastFeePaid = uint64(block.timestamp);
@@ -724,7 +728,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         if (_feeSettled()) return;
 
-        (address[] memory tokens, uint256[] memory values,,) = _valuation();
+        (address[] memory tokens, uint256[] memory values,, bool complete) = _valuation();
+        if (!complete) return;
 
         for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
             if (values[i] > 0 && tokens[i] != skip) {
@@ -777,8 +782,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return lastFeePaid >= block.timestamp;
     }
 
-    function _feeDue(uint256 elapsed) internal view returns (uint256) {
-        return (getNAV() * stockRegistry.managementFeeBps() * elapsed) / (uint256(TOTAL_BPS) * 365 days);
+    function _feeDue(uint256 nav, uint256 elapsed) internal view returns (uint256) {
+        return (nav * stockRegistry.managementFeeBps() * elapsed) / (uint256(TOTAL_BPS) * 365 days);
     }
 
     function _feeAmount(address token, uint256 due) internal view returns (uint256) {
