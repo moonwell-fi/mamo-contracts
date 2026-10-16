@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {Test} from "@forge-std/Test.sol";
 
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {StockAccountStrategy} from "@contracts/StockAccountStrategy.sol";
 import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactory.sol";
@@ -33,7 +34,6 @@ contract StockAccountStrategyFactoryUnitTest is Test {
     address public relayer = makeAddr("relayer");
     address public user = makeAddr("user");
     address public stranger = makeAddr("stranger");
-    address public feeRecipient = makeAddr("feeRecipient");
 
     uint256 public strategyTypeId;
 
@@ -51,6 +51,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         stockRegistry = new MockStockAccountRegistry();
         stockRegistry.setMaxPositions(10);
         stockRegistry.setMinTargetBps(100);
+        stockRegistry.setAsset(address(usdc));
         _listActive(address(nvda));
         _listActive(address(aapl));
 
@@ -66,9 +67,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(stockRegistry),
             address(usdc),
             address(settlement),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
 
         bytes32 backendRole = registry.BACKEND_ROLE();
@@ -106,7 +105,6 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(factory.cowSettlement(), address(settlement), "settlement");
         assertEq(factory.strategyImplementation(), address(implementation), "implementation");
         assertEq(factory.strategyTypeId(), strategyTypeId, "strategy type id");
-        assertEq(factory.feeRecipient(), feeRecipient, "fee recipient");
     }
 
     function testConstructorGrantsRoles() public view {
@@ -124,9 +122,7 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(stockRegistry),
             address(usdc),
             address(settlement),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
@@ -139,114 +135,55 @@ contract StockAccountStrategyFactoryUnitTest is Test {
             address(stockRegistry),
             address(usdc),
             address(settlement),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
+            strategyTypeId
         );
     }
 
     function testConstructorRevertsWithZeroMamoStrategyRegistry() public {
         vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(0),
-            address(stockRegistry),
-            address(usdc),
-            address(settlement),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
+            admin, backend, address(0), address(stockRegistry), address(usdc), address(settlement), strategyTypeId
         );
     }
 
     function testConstructorRevertsWithZeroStockRegistry() public {
         vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(registry),
-            address(0),
-            address(usdc),
-            address(settlement),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
+            admin, backend, address(registry), address(0), address(usdc), address(settlement), strategyTypeId
         );
     }
 
     function testConstructorRevertsWithZeroAsset() public {
         vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(registry),
-            address(stockRegistry),
-            address(0),
-            address(settlement),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
+            admin, backend, address(registry), address(stockRegistry), address(0), address(settlement), strategyTypeId
         );
     }
 
     function testConstructorRevertsWithZeroSettlement() public {
         vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
         new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(registry),
-            address(stockRegistry),
-            address(usdc),
-            address(0),
-            address(implementation),
-            strategyTypeId,
-            feeRecipient
-        );
-    }
-
-    function testConstructorRevertsWithZeroImplementation() public {
-        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
-        new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(registry),
-            address(stockRegistry),
-            address(usdc),
-            address(settlement),
-            address(0),
-            strategyTypeId,
-            feeRecipient
+            admin, backend, address(registry), address(stockRegistry), address(usdc), address(0), strategyTypeId
         );
     }
 
     function testConstructorRevertsWithZeroStrategyTypeId() public {
         vm.expectRevert(StockAccountStrategyFactory.StrategyTypeIdNotSet.selector);
         new StockAccountStrategyFactory(
-            admin,
-            backend,
-            address(registry),
-            address(stockRegistry),
-            address(usdc),
-            address(settlement),
-            address(implementation),
-            0,
-            feeRecipient
+            admin, backend, address(registry), address(stockRegistry), address(usdc), address(settlement), 0
         );
     }
 
-    function testConstructorRevertsWithZeroFeeRecipient() public {
-        vm.expectRevert(StockAccountStrategyFactory.ZeroAddress.selector);
+    function testConstructorRevertsWhenTheAssetDiffersFromTheRegistry() public {
+        vm.expectRevert(StockAccountStrategyFactory.AssetMismatch.selector);
         new StockAccountStrategyFactory(
             admin,
             backend,
             address(registry),
             address(stockRegistry),
-            address(usdc),
+            address(nvda),
             address(settlement),
-            address(implementation),
-            strategyTypeId,
-            address(0)
+            strategyTypeId
         );
     }
 
@@ -280,7 +217,6 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         assertEq(account.strategyTypeId(), strategyTypeId, "strategy type id");
         assertEq(account.cowDomainSeparator(), SEPARATOR, "domain separator");
         assertEq(account.cowVaultRelayer(), relayer, "vault relayer");
-        assertEq(account.feeRecipient(), feeRecipient, "fee recipient");
         assertEq(account.lastFeePaid(), block.timestamp, "last fee paid");
         assertEq(
             account.appDataHash(address(nvda)),
@@ -335,5 +271,86 @@ contract StockAccountStrategyFactoryUnitTest is Test {
         vm.prank(backend);
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.WeightsMustTotal.selector, 9000));
         factory.createStrategyForUser(user, _entries(5000, 4000), 0);
+    }
+
+    function testCreationRevertsBeforeAnImplementationIsWhitelisted() public {
+        StockAccountStrategyFactory unwhitelisted = _factoryFor(strategyTypeId + 1);
+
+        vm.prank(backend);
+        vm.expectRevert(StockAccountStrategyFactory.ImplementationNotWhitelisted.selector);
+        unwhitelisted.createStrategyForUser(user, _entries(5000, 5000), 0);
+    }
+
+    function testCreationUsesTheLatestImplementation() public {
+        vm.prank(backend);
+        address oldAccount = factory.createStrategyForUser(stranger, _entries(5000, 5000), 0);
+
+        address predictedBefore = factory.computeStrategyAddress(user);
+        StockAccountStrategy newer = new StockAccountStrategy();
+        vm.prank(admin);
+        registry.whitelistImplementation(address(newer), strategyTypeId);
+
+        assertEq(factory.strategyImplementation(), address(newer), "factory follows the registry");
+        assertTrue(factory.computeStrategyAddress(user) != predictedBefore, "prediction tracks the implementation");
+
+        vm.prank(backend);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        assertEq(account, factory.computeStrategyAddress(user), "deployed at computed address");
+        assertEq(ERC1967Proxy(payable(account)).getImplementation(), address(newer), "runs the newer code");
+        assertEq(registry.implementationToId(address(newer)), strategyTypeId, "same type id");
+        assertEq(ERC1967Proxy(payable(oldAccount)).getImplementation(), address(implementation), "old account kept");
+        assertTrue(registry.isUserStrategy(user, account), "registered for user");
+    }
+
+    function testTransferredAccountBlocksASecondAccountForTheNewOwner() public {
+        vm.prank(user);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+        vm.prank(user);
+        StockAccountStrategy(payable(account)).transferOwnership(stranger);
+
+        assertTrue(factory.computeStrategyAddress(stranger) != account, "new owner's slot is still empty");
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(StockAccountStrategyFactory.StrategyAlreadyExists.selector, account));
+        factory.createStrategyForUser(stranger, _entries(5000, 5000), 0);
+    }
+
+    function testExistingAccountOnAnOlderImplementationBlocksASecondAccount() public {
+        vm.prank(backend);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        address newer = address(new StockAccountStrategy());
+        vm.prank(admin);
+        registry.whitelistImplementation(newer, strategyTypeId);
+
+        vm.prank(backend);
+        vm.expectRevert(abi.encodeWithSelector(StockAccountStrategyFactory.StrategyAlreadyExists.selector, account));
+        factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+    }
+
+    function testAStrategyOfAnotherTypeDoesNotBlockCreation() public {
+        address otherImplementation = address(new StockAccountStrategy());
+        vm.prank(admin);
+        uint256 otherTypeId = registry.whitelistImplementation(otherImplementation, 0);
+        StockAccountStrategyFactory otherFactory = _factoryFor(otherTypeId);
+
+        vm.prank(backend);
+        address other = otherFactory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        vm.prank(backend);
+        address account = factory.createStrategyForUser(user, _entries(5000, 5000), 0);
+
+        assertTrue(registry.isUserStrategy(user, other), "other type kept");
+        assertTrue(registry.isUserStrategy(user, account), "stock account registered");
+    }
+
+    function _factoryFor(uint256 typeId) internal returns (StockAccountStrategyFactory f) {
+        f = new StockAccountStrategyFactory(
+            admin, backend, address(registry), address(stockRegistry), address(usdc), address(settlement), typeId
+        );
+        bytes32 backendRole = registry.BACKEND_ROLE();
+        vm.prank(admin);
+        registry.grantRole(backendRole, address(f));
     }
 }

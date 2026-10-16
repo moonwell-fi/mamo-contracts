@@ -4,6 +4,9 @@ pragma solidity 0.8.28;
 /// @title Router token swapping functionality
 /// @notice Functions for swapping tokens via CL
 interface ISwapRouter {
+    /// @notice The CL factory whose pools the router swaps through
+    function factory() external view returns (address);
+
     struct ExactInputSingleParams {
         address tokenIn;
         address tokenOut;

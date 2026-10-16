@@ -11,6 +11,7 @@ import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactor
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
@@ -28,10 +29,11 @@ import {IERC5313} from "@openzeppelin/contracts/interfaces/IERC5313.sol";
  *      ADMIN_MODE (impersonate | calldata)
  */
 contract DeployStockAccounts is Script {
-    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
-    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER";
-    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
-    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
+    /// @dev The keys proposal 019 writes; the unsuffixed ones are the paused v1 system
+    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY_V2";
+    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
+    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL_V2";
+    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
 
     /// @notice Staleness bound of the USDC/USD hop every Chainlink entry is quoted through
     /// @dev Deliberately above the feed's nominal 86,400 heartbeat. Walking the live Base aggregator
@@ -41,6 +43,9 @@ contract DeployStockAccounts is Script {
     ///      each day, taking account value, weights, deposits, withdrawals and order validation with
     ///      it. Do not tighten this back to the nominal heartbeat
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
+
+    /// @notice Price checker's sequencer grace period, same as proposal 013
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
 
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
@@ -55,9 +60,8 @@ contract DeployStockAccounts is Script {
         calldataMode = keccak256(bytes(adminMode)) == keccak256(bytes("calldata"));
         require(calldataMode || keccak256(bytes(adminMode)) == keccak256(bytes("impersonate")), "Unknown ADMIN_MODE");
 
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesPath, chainIds);
+        // Clears the deployer's EIP-7702 delegation, which FPS reads as a contract, in simulation only
+        addresses = PinnedAddresses.load(addressesPath);
         configLoader = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json"));
         config = configLoader.getConfig();
 
@@ -71,17 +75,17 @@ contract DeployStockAccounts is Script {
         _setPriceChecker(stockRegistry, priceChecker);
         address implementation = _deployImplementation();
         uint256 strategyTypeId = _whitelistImplementation(mamoRegistry, implementation);
-        address factory = _deployFactory(stockRegistry, implementation, strategyTypeId);
+        address factory = _deployFactory(stockRegistry, strategyTypeId);
         _grantBackendRole(mamoRegistry, factory);
         _listTokens(stockRegistry);
 
         addresses.updateJson();
         addresses.printJSONChanges();
 
-        console.log("STOCK_ACCOUNT_REGISTRY: %s", stockRegistry);
-        console.log("STOCK_ACCOUNT_PRICE_CHECKER: %s", priceChecker);
-        console.log("STOCK_ACCOUNT_STRATEGY_IMPL: %s", implementation);
-        console.log("STOCK_ACCOUNT_STRATEGY_FACTORY: %s", factory);
+        console.log("%s: %s", REGISTRY_NAME, stockRegistry);
+        console.log("%s: %s", PRICE_CHECKER_NAME, priceChecker);
+        console.log("%s: %s", IMPL_NAME, implementation);
+        console.log("%s: %s", FACTORY_NAME, factory);
         console.log("strategyTypeId: %s", strategyTypeId);
     }
 
@@ -93,23 +97,25 @@ contract DeployStockAccounts is Script {
             return existing;
         }
 
-        StockAccountRegistry.Config memory registryConfig = StockAccountRegistry.Config({
-            admin: addresses.getAddress(config.admin),
-            aerodromeRouter: ISwapRouter(addresses.getAddress(config.aerodromeRouter)),
-            asset: addresses.getAddress(config.asset),
-            guardian: addresses.getAddress(config.guardian),
-            managementFeeBps: config.managementFeeBps,
-            maxBackendSlippageBps: config.maxBackendSlippageBps,
-            maxDeviationBps: config.maxDeviationBps,
-            maxPositions: config.maxPositions,
-            maxStrategyDeposit: config.maxStrategyDeposit,
-            maxWithdrawSlippageBps: config.maxWithdrawSlippageBps,
-            minStrategyDeposit: config.minStrategyDeposit,
-            minTargetBps: config.minTargetBps,
-            orderSigner: addresses.getAddress(config.orderSigner),
-            priceChecker: ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker)),
-            twapWindow: config.twapWindow
-        });
+        // Field by field: as a 17-field literal it is too deep for the stack in this script
+        StockAccountRegistry.Config memory registryConfig;
+        registryConfig.admin = addresses.getAddress(config.admin);
+        registryConfig.aerodromeRouter = ISwapRouter(addresses.getAddress(config.aerodromeRouter));
+        registryConfig.asset = addresses.getAddress(config.asset);
+        registryConfig.feeRecipient = addresses.getAddress(config.feeRecipient);
+        registryConfig.guardian = addresses.getAddress(config.guardian);
+        registryConfig.managementFeeBps = config.managementFeeBps;
+        registryConfig.maxBackendSlippageBps = config.maxBackendSlippageBps;
+        registryConfig.maxDeviationBps = config.maxDeviationBps;
+        registryConfig.maxOrderValue = config.maxOrderValue;
+        registryConfig.maxPositions = config.maxPositions;
+        registryConfig.maxStrategyDeposit = config.maxStrategyDeposit;
+        registryConfig.maxWithdrawSlippageBps = config.maxWithdrawSlippageBps;
+        registryConfig.minStrategyDeposit = config.minStrategyDeposit;
+        registryConfig.minTargetBps = config.minTargetBps;
+        registryConfig.orderSigner = addresses.getAddress(config.orderSigner);
+        registryConfig.priceChecker = ISlippagePriceChecker(addresses.getAddress(config.placeholderPriceChecker));
+        registryConfig.twapWindow = config.twapWindow;
 
         vm.startBroadcast();
         StockAccountRegistry registry = new StockAccountRegistry(registryConfig);
@@ -133,7 +139,9 @@ contract DeployStockAccounts is Script {
         StockAccountPriceChecker priceChecker = new StockAccountPriceChecker(
             IStockAccountRegistry(stockRegistry),
             addresses.getAddress(config.asset),
-            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker))
+            ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker)),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            SEQUENCER_GRACE_PERIOD
         );
         vm.stopBroadcast();
 
@@ -202,10 +210,7 @@ contract DeployStockAccounts is Script {
     }
 
     /// @notice Deploys the StockAccountStrategyFactory, or returns the one already recorded in addresses
-    function _deployFactory(address stockRegistry, address implementation, uint256 strategyTypeId)
-        internal
-        returns (address)
-    {
+    function _deployFactory(address stockRegistry, uint256 strategyTypeId) internal returns (address) {
         if (addresses.isAddressSet(FACTORY_NAME)) {
             address existing = addresses.getAddress(FACTORY_NAME);
             console.log("step 6 skipped, %s already deployed at %s", FACTORY_NAME, existing);
@@ -220,9 +225,7 @@ contract DeployStockAccounts is Script {
             stockRegistry,
             addresses.getAddress(config.asset),
             addresses.getAddress(config.cowSettlement),
-            implementation,
-            strategyTypeId,
-            addresses.getAddress(config.feeRecipient)
+            strategyTypeId
         );
         vm.stopBroadcast();
 

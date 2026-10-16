@@ -358,6 +358,7 @@ contract ForceEther {
 }
 
 contract MockCLPoolV2 is ICLPool {
+    address public factory;
     uint160 public sqrtPX96;
     int24 public currentTick;
     int56 public tickCumulative0;

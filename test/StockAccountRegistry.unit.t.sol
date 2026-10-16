@@ -14,9 +14,19 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 import {MockCLPoolObserve} from "@test/mocks/MockCLPoolObserve.sol";
 import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "@test/mocks/MockPriceChecker.sol";
+import {MockSequencerUptimeFeed} from "@test/mocks/MockSequencerUptimeFeed.sol";
 import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol";
+import {MockSwapRouter} from "@test/mocks/MockSwapRouter.sol";
 
 contract Stub {}
+
+contract QuoteAssetStub {
+    address public quoteAsset;
+
+    constructor(address quoteAsset_) {
+        quoteAsset = quoteAsset_;
+    }
+}
 
 contract StockAccountRegistryUnitTest is Test {
     StockAccountRegistry internal registry;
@@ -28,20 +38,26 @@ contract StockAccountRegistryUnitTest is Test {
     address internal guardian = makeAddr("guardian");
     address internal stranger = makeAddr("stranger");
     address internal orderSigner = makeAddr("orderSigner");
+    address internal feeRecipient = makeAddr("feeRecipient");
+    address internal clFactory = makeAddr("clFactory");
 
-    address internal asset = makeAddr("asset");
+    address internal asset;
     address internal token;
     address internal pool;
     address internal feed;
 
     function setUp() public {
-        router = ISwapRouter(_stub());
+        asset = address(new MockERC20Decimals("USDC", 6));
+        MockSwapRouter mockRouter = new MockSwapRouter();
+        mockRouter.setFactory(clFactory);
+        router = mockRouter;
         checker = new MockPriceChecker();
         token = address(new MockERC20Decimals("TOKEN", 8));
         pool = _pairPool(token);
         feed = _stub();
 
         checker.setRate(token, asset, 1e18);
+        checker.setRate(asset, token, 1e18);
 
         registry = new StockAccountRegistry(defaultConfig());
     }
@@ -52,7 +68,9 @@ contract StockAccountRegistryUnitTest is Test {
 
     /// @dev A pool that pairs `forToken` with the asset, which listing and repointing now require
     function _pairPool(address forToken) internal returns (address) {
-        return address(new MockCLPoolObserve(forToken, asset));
+        MockCLPoolObserve paired = new MockCLPoolObserve(forToken, asset);
+        paired.setFactory(clFactory);
+        return address(paired);
     }
 
     function defaultConfig() internal view returns (StockAccountRegistry.Config memory config) {
@@ -60,10 +78,12 @@ contract StockAccountRegistryUnitTest is Test {
             admin: admin,
             aerodromeRouter: router,
             asset: asset,
+            feeRecipient: feeRecipient,
             guardian: guardian,
             managementFeeBps: 100,
             maxBackendSlippageBps: 100,
             maxDeviationBps: 500,
+            maxOrderValue: 25_000e6,
             maxPositions: 10,
             maxStrategyDeposit: 1_000_000e6,
             maxWithdrawSlippageBps: 200,
@@ -104,6 +124,29 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotAgainstAsset.selector, cfg.pool));
         vm.prank(admin);
         registry.listToken(token, cfg);
+    }
+
+    function testListingAndRepointingRefuseAPoolFromAnotherFactory() public {
+        IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
+        MockCLPoolObserve(cfg.pool).setFactory(makeAddr("otherFactory"));
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotFromRouterFactory.selector, cfg.pool));
+        vm.prank(admin);
+        registry.listToken(token, cfg);
+
+        MockCLPoolObserve(cfg.pool).setFactory(clFactory);
+        listAndHaltDefaultToken();
+
+        address foreignPool = _pairPool(token);
+        MockCLPoolObserve(foreignPool).setFactory(makeAddr("otherFactory"));
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PoolNotFromRouterFactory.selector, foreignPool));
+        vm.prank(admin);
+        registry.setTokenPool(token, foreignPool);
+
+        MockCLPoolObserve(foreignPool).setFactory(clFactory);
+        vm.prank(admin);
+        registry.setTokenPool(token, foreignPool);
+        assertEq(registry.tokenConfig(token).pool, foreignPool, "matching pool refused");
     }
 
     function testDepositBoundsCannotCross() public {
@@ -155,9 +198,11 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 1800, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 1_000_000e6, "max deposit mismatch");
+        assertEq(registry.maxOrderValue(), 25_000e6, "max order value mismatch");
         assertEq(registry.managementFeeBps(), 100, "management fee mismatch");
         assertEq(registry.maxManagementFeeBps(), 200, "max management fee mismatch");
         assertEq(registry.orderSigner(), orderSigner, "order signer mismatch");
+        assertEq(registry.feeRecipient(), feeRecipient, "fee recipient mismatch");
         assertEq(registry.allTokens().length, 0, "token list should start empty");
     }
 
@@ -230,6 +275,22 @@ contract StockAccountRegistryUnitTest is Test {
         config.orderSigner = address(0);
 
         vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testConstructorRevertsOnZeroFeeRecipient() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.feeRecipient = address(0);
+
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testConstructorRevertsOnZeroMaxOrderValue() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxOrderValue = 0;
+
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxOrderValue.selector);
         new StockAccountRegistry(config);
     }
 
@@ -318,10 +379,17 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(created.maxWithdrawSlippageBps(), 500, "withdraw slippage mismatch");
     }
 
-    function testConstructorRevertsOnZeroTwapWindow() public {
+    function testConstructorRevertsOnTwapWindowOutsideItsBounds() public {
         StockAccountRegistry.Config memory config = defaultConfig();
         config.twapWindow = 0;
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        new StockAccountRegistry(config);
 
+        config.twapWindow = 59;
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        new StockAccountRegistry(config);
+
+        config.twapWindow = 3601;
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         new StockAccountRegistry(config);
     }
@@ -373,6 +441,10 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(500e6);
 
         vm.expectEmit(address(registry));
+        emit StockAccountRegistry.MaxOrderValueUpdated(25_000e6, 10_000e6);
+        registry.setMaxOrderValue(10_000e6);
+
+        vm.expectEmit(address(registry));
         emit StockAccountRegistry.ManagementFeeBpsUpdated(100, 25);
         registry.setManagementFeeBps(25);
 
@@ -380,6 +452,11 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectEmit(true, true, false, true, address(registry));
         emit StockAccountRegistry.OrderSignerUpdated(orderSigner, newSigner);
         registry.setOrderSigner(newSigner);
+
+        address newRecipient = makeAddr("newFeeRecipient");
+        vm.expectEmit(true, true, false, true, address(registry));
+        emit StockAccountRegistry.FeeRecipientUpdated(feeRecipient, newRecipient);
+        registry.setFeeRecipient(newRecipient);
 
         vm.stopPrank();
 
@@ -393,8 +470,10 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.twapWindow(), 600, "twap window mismatch");
         assertEq(registry.minStrategyDeposit(), 250e6, "min deposit mismatch");
         assertEq(registry.maxStrategyDeposit(), 500e6, "max deposit mismatch");
+        assertEq(registry.maxOrderValue(), 10_000e6, "max order value mismatch");
         assertEq(registry.managementFeeBps(), 25, "management fee mismatch");
         assertEq(registry.orderSigner(), newSigner, "order signer mismatch");
+        assertEq(registry.feeRecipient(), newRecipient, "fee recipient mismatch");
     }
 
     function testGuardianCannotUpdateScalars() public {
@@ -434,10 +513,16 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(500e6);
 
         expectNotAdmin(guardian);
+        registry.setMaxOrderValue(10_000e6);
+
+        expectNotAdmin(guardian);
         registry.setManagementFeeBps(25);
 
         expectNotAdmin(guardian);
         registry.setOrderSigner(makeAddr("newOrderSigner"));
+
+        expectNotAdmin(guardian);
+        registry.setFeeRecipient(makeAddr("newFeeRecipient"));
 
         vm.stopPrank();
     }
@@ -482,10 +567,16 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxStrategyDeposit(1_000_000e6);
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        registry.setMaxOrderValue(25_000e6);
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setManagementFeeBps(100);
 
         vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
         registry.setOrderSigner(orderSigner);
+
+        vm.expectRevert(IStockAccountRegistry.AlreadySet.selector);
+        registry.setFeeRecipient(feeRecipient);
 
         vm.stopPrank();
     }
@@ -519,6 +610,9 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
         registry.setMaxDeviationBps(10_001);
 
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
+        registry.setMaxDeviationBps(99);
+
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxBackendSlippageBps(501);
 
@@ -526,19 +620,37 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setMaxBackendSlippageBps(10_000);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        registry.setMaxBackendSlippageBps(9);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(1_001);
 
         vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
         registry.setMaxWithdrawSlippageBps(10_000);
 
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        registry.setMaxWithdrawSlippageBps(49);
+
         vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         registry.setTwapWindow(0);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        registry.setTwapWindow(59);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
+        registry.setTwapWindow(3601);
+
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxOrderValue.selector);
+        registry.setMaxOrderValue(0);
 
         vm.expectRevert(IStockAccountRegistry.InvalidManagementFee.selector);
         registry.setManagementFeeBps(201);
 
         vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
         registry.setOrderSigner(address(0));
+
+        vm.expectRevert(IStockAccountRegistry.ZeroAddress.selector);
+        registry.setFeeRecipient(address(0));
 
         vm.stopPrank();
     }
@@ -573,6 +685,58 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(registry.maxWithdrawSlippageBps(), 1_000, "withdraw slippage mismatch");
     }
 
+    function testCapSettersAcceptTheirFloors() public {
+        vm.startPrank(admin);
+        registry.setMaxDeviationBps(100);
+        registry.setMaxBackendSlippageBps(10);
+        registry.setMaxWithdrawSlippageBps(50);
+        vm.stopPrank();
+
+        assertEq(registry.maxDeviationBps(), 100, "max deviation mismatch");
+        assertEq(registry.maxBackendSlippageBps(), 10, "backend slippage mismatch");
+        assertEq(registry.maxWithdrawSlippageBps(), 50, "withdraw slippage mismatch");
+    }
+
+    function testTwapWindowAcceptsItsBounds() public {
+        vm.startPrank(admin);
+        registry.setTwapWindow(registry.MIN_TWAP_WINDOW());
+        assertEq(registry.twapWindow(), 60, "min window mismatch");
+
+        registry.setTwapWindow(registry.MAX_TWAP_WINDOW());
+        assertEq(registry.twapWindow(), 3600, "max window mismatch");
+        vm.stopPrank();
+    }
+
+    function testConstructorRefusesCapsBelowTheirFloors() public {
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.maxDeviationBps = 99;
+        vm.expectRevert(IStockAccountRegistry.InvalidMaxDeviation.selector);
+        new StockAccountRegistry(config);
+
+        config = defaultConfig();
+        config.maxBackendSlippageBps = 9;
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        new StockAccountRegistry(config);
+
+        config = defaultConfig();
+        config.maxWithdrawSlippageBps = 49;
+        vm.expectRevert(IStockAccountRegistry.InvalidSlippageCap.selector);
+        new StockAccountRegistry(config);
+    }
+
+    function testDeployConfigsClearTheCapFloors() public {
+        string[2] memory files = ["deploy/stock-accounts/8453_PROD.json", "deploy/stock-accounts/8453_TESTING.json"];
+        for (uint256 i = 0; i < files.length; i++) {
+            string memory json = vm.readFile(files[i]);
+            StockAccountRegistry.Config memory config = defaultConfig();
+            config.maxDeviationBps = uint16(vm.parseJsonUint(json, ".maxDeviationBps"));
+            config.maxBackendSlippageBps = uint16(vm.parseJsonUint(json, ".maxBackendSlippageBps"));
+            config.maxWithdrawSlippageBps = uint16(vm.parseJsonUint(json, ".maxWithdrawSlippageBps"));
+            config.twapWindow = uint32(vm.parseJsonUint(json, ".twapWindow"));
+            new StockAccountRegistry(config);
+        }
+    }
+
     function testListTokenStoresConfigAndEmits() public {
         IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
 
@@ -601,6 +765,28 @@ contract StockAccountRegistryUnitTest is Test {
         registry.listToken(token, cfg);
 
         assertEq(registry.tokenConfig(token).chainlinkFeed, feed, "feed mismatch");
+    }
+
+    function testListTokenRefusesTheThirtyFirstToken() public {
+        vm.startPrank(admin);
+        for (uint256 i = 0; i < registry.MAX_LISTED_TOKENS(); i++) {
+            address listed = address(new MockERC20Decimals("TOKEN", 8));
+            checker.setRate(listed, asset, 1e18);
+            checker.setRate(asset, listed, 1e18);
+            registry.listToken(
+                listed,
+                IStockAccountRegistry.TokenConfig({
+                    status: IStockAccountRegistry.TokenStatus.Active,
+                    source: IStockAccountRegistry.PriceSource.PoolTwap,
+                    pool: _pairPool(listed),
+                    chainlinkFeed: address(0)
+                })
+            );
+        }
+
+        vm.expectRevert(IStockAccountRegistry.TooManyListedTokens.selector);
+        registry.listToken(token, activeConfig());
+        vm.stopPrank();
     }
 
     function testListTokenRevertsWhenAlreadyListed() public {
@@ -678,6 +864,22 @@ contract StockAccountRegistryUnitTest is Test {
             uint256(IStockAccountRegistry.TokenStatus.None),
             "token should stay unlisted"
         );
+    }
+
+    function testListTokenRefusesACheckerThatPricesOnlyTokenToAsset() public {
+        checker.setRate(asset, token, 0);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, token));
+        vm.prank(admin);
+        registry.listToken(token, activeConfig());
+
+        checker.setRate(asset, token, 1);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, token));
+        vm.prank(admin);
+        registry.listToken(token, activeConfig());
+
+        checker.setRate(asset, token, 1e18);
+        listDefaultToken();
+        assertEq(registry.allTokens().length, 1, "two-way checker refused");
     }
 
     function testListTokenRevertsWhenQuoteIsZero() public {
@@ -829,6 +1031,80 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.Active);
     }
 
+    function _listFreshToken() internal returns (address listed) {
+        listed = address(new MockERC20Decimals("TOKEN", 8));
+        checker.setRate(listed, asset, 1e18);
+        checker.setRate(asset, listed, 1e18);
+        IStockAccountRegistry.TokenConfig memory cfg = activeConfig();
+        cfg.pool = _pairPool(listed);
+        vm.prank(admin);
+        registry.listToken(listed, cfg);
+    }
+
+    function testDelistTokenRemovesAHaltedTokenAndKeepsTheOthers() public {
+        address first = _listFreshToken();
+        listAndHaltDefaultToken();
+        address last = _listFreshToken();
+
+        vm.expectEmit(true, false, false, true, address(registry));
+        emit StockAccountRegistry.TokenDelisted(token);
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        address[] memory tokens = registry.allTokens();
+        assertEq(tokens.length, 2, "token list length mismatch");
+        assertEq(tokens[0], first, "first entry moved");
+        assertEq(tokens[1], last, "last entry not swapped into the gap");
+
+        IStockAccountRegistry.TokenConfig memory cleared = registry.tokenConfig(token);
+        assertEq(uint256(cleared.status), uint256(IStockAccountRegistry.TokenStatus.None), "status not cleared");
+        assertEq(cleared.pool, address(0), "pool not cleared");
+
+        listDefaultToken();
+        assertEq(registry.allTokens().length, 3, "token not listable again");
+    }
+
+    function testDelistTokenRemovesTheLastEntry() public {
+        address first = _listFreshToken();
+        listAndHaltDefaultToken();
+
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        address[] memory tokens = registry.allTokens();
+        assertEq(tokens.length, 1, "token list length mismatch");
+        assertEq(tokens[0], first, "remaining entry mismatch");
+    }
+
+    function testDelistTokenRefusesATokenThatIsNotHalted() public {
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotListed.selector, token));
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        listDefaultToken();
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
+        vm.prank(admin);
+        registry.delistToken(token);
+
+        vm.prank(guardian);
+        registry.setTokenStatus(token, IStockAccountRegistry.TokenStatus.SellOnly);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotHalted.selector, token));
+        vm.prank(admin);
+        registry.delistToken(token);
+    }
+
+    function testDelistTokenRevertsForNonAdmin() public {
+        listAndHaltDefaultToken();
+
+        expectNotAdmin(guardian);
+        vm.prank(guardian);
+        registry.delistToken(token);
+
+        expectNotAdmin(stranger);
+        vm.prank(stranger);
+        registry.delistToken(token);
+    }
+
     function testSetTokenPoolRepointsHaltedTokenAndEmits() public {
         listAndHaltDefaultToken();
         address newPool = _pairPool(token);
@@ -955,6 +1231,14 @@ contract StockAccountRegistryUnitTest is Test {
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(admin);
         registry.setManagementFeeBps(50);
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.setFeeRecipient(makeAddr("newFeeRecipient"));
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(admin);
+        registry.delistToken(token);
 
         assertEq(registry.maxPositions(), 10, "max positions mismatch");
         assertEq(registry.allTokens().length, 1, "token list length mismatch");
@@ -1094,11 +1378,13 @@ contract StockAccountRegistryUnitTest is Test {
         mock.setMaxDeviationBps(400);
         mock.setMinStrategyDeposit(100e6);
         mock.setMaxStrategyDeposit(500e6);
+        mock.setMaxOrderValue(10_000e6);
         mock.setTwapWindow(600);
         mock.setMaxBackendSlippageBps(50);
         mock.setMaxWithdrawSlippageBps(75);
         mock.setManagementFeeBps(150);
         mock.setOrderSigner(orderSigner);
+        mock.setFeeRecipient(feeRecipient);
         mock.setAerodromeRouter(router);
         mock.setPriceChecker(checker);
         mock.setAsset(asset);
@@ -1108,14 +1394,39 @@ contract StockAccountRegistryUnitTest is Test {
         assertEq(mock.maxDeviationBps(), 400, "max deviation mismatch");
         assertEq(mock.minStrategyDeposit(), 100e6, "min deposit mismatch");
         assertEq(mock.maxStrategyDeposit(), 500e6, "max deposit mismatch");
+        assertEq(mock.maxOrderValue(), 10_000e6, "max order value mismatch");
         assertEq(mock.twapWindow(), 600, "twap window mismatch");
         assertEq(mock.maxBackendSlippageBps(), 50, "backend slippage mismatch");
         assertEq(mock.maxWithdrawSlippageBps(), 75, "withdraw slippage mismatch");
         assertEq(mock.managementFeeBps(), 150, "management fee mismatch");
         assertEq(mock.orderSigner(), orderSigner, "order signer mismatch");
+        assertEq(mock.feeRecipient(), feeRecipient, "fee recipient mismatch");
         assertEq(address(mock.aerodromeRouter()), address(router), "router mismatch");
         assertEq(address(mock.priceChecker()), address(checker), "price checker mismatch");
         assertEq(mock.asset(), asset, "asset mismatch");
+    }
+
+    function testSetPriceCheckerRefusesACheckerQuotingAnotherAsset() public {
+        address other = address(new QuoteAssetStub(makeAddr("otherAsset")));
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PriceCheckerAssetMismatch.selector, other));
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(other));
+
+        StockAccountRegistry.Config memory config = defaultConfig();
+        config.priceChecker = ISlippagePriceChecker(other);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.PriceCheckerAssetMismatch.selector, other));
+        new StockAccountRegistry(config);
+
+        address matching = address(new QuoteAssetStub(asset));
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(matching));
+        assertEq(address(registry.priceChecker()), matching, "a checker quoting the asset is accepted");
+
+        address silent = _stub();
+        vm.prank(admin);
+        registry.setPriceChecker(ISlippagePriceChecker(silent));
+        assertEq(address(registry.priceChecker()), silent, "a checker without quoteAsset is accepted");
     }
 
     function testSetPriceCheckerRevertsWhenAListedTokenCannotBeQuoted() public {
@@ -1128,6 +1439,7 @@ contract StockAccountRegistryUnitTest is Test {
         registry.setPriceChecker(other);
 
         other.setRate(token, asset, 1e18);
+        other.setRate(asset, token, 1e18);
 
         vm.prank(admin);
         registry.setPriceChecker(other);
@@ -1167,12 +1479,14 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
         registry = new StockAccountRegistry(
             StockAccountRegistry.Config({
                 admin: admin,
-                aerodromeRouter: ISwapRouter(address(new Stub())),
+                aerodromeRouter: new MockSwapRouter(),
                 asset: address(usdc),
+                feeRecipient: makeAddr("feeRecipient"),
                 guardian: guardian,
                 managementFeeBps: 100,
                 maxBackendSlippageBps: 100,
                 maxDeviationBps: 500,
+                maxOrderValue: 25_000e6,
                 maxPositions: 10,
                 maxStrategyDeposit: 1_000_000e6,
                 maxWithdrawSlippageBps: 200,
@@ -1184,7 +1498,14 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
             })
         );
 
-        checker = new StockAccountPriceChecker(IStockAccountRegistry(address(registry)), address(usdc), existingChecker);
+        vm.warp(1 days);
+        checker = new StockAccountPriceChecker(
+            IStockAccountRegistry(address(registry)),
+            address(usdc),
+            existingChecker,
+            address(new MockSequencerUptimeFeed(0, 1)),
+            3600
+        );
         vm.prank(admin);
         registry.setPriceChecker(ISlippagePriceChecker(address(checker)));
 

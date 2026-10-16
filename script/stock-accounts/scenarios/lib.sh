@@ -175,6 +175,10 @@ set_usdc() { rpc tenderly_setErc20Balance "[\"$USDC\",\"$1\",\"$(cast to-hex "$2
 # shellcheck disable=SC2312 # same: malformed params come back as an rpc error, not as a silent no-op
 increase_time() { rpc evm_increaseTime "[\"$(cast to-hex "$1")\"]" >/dev/null; }
 now_ts() { cast block latest --field timestamp --rpc-url "$VNET" 2>>"$LOG"; }
+# The exit calls take a deadline; fifteen minutes out, like the order validity the scenarios use.
+# shellcheck disable=SC2312 # a failed read leaves `bn` an incomplete expression, which python refuses
+deadline() { bn "$(now_ts) + 900"; }
+WITHDRAW_SIG='withdraw(uint256,uint16,address[],uint256[],uint256)'
 
 # ---------------------------------------------------------------- results
 
@@ -458,7 +462,11 @@ expected_out() { call "$CHECKER" 'getExpectedOut(uint256,address,address)(uint25
 # The fee is valued on the whole account in USDC, then converted to whichever token settles it.
 fee_due() { call "$1" 'feeDue()(uint256)'; }
 fee_due_in() { call "$1" 'feeDueIn(address)(uint256)' "$2"; }
-fee_collector() { call "$1" 'feeRecipient()(address)'; }
+fee_collector() {
+  local registry
+  registry=$(call "$1" 'stockRegistry()(address)') || return
+  call "$registry" 'feeRecipient()(address)'
+}
 # One document, and one hash, per (account, fee token); the fee token is the token an order buys.
 app_data_hash() { call "$1" 'appDataHash(address)(bytes32)' "$2"; }
 nav() { call "$1" 'getNAV()(uint256)'; }

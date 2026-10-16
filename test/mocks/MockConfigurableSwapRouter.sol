@@ -31,6 +31,9 @@ contract MockConfigurableSwapRouter is ISwapRouter {
     /// @notice Amount ADDED to the return value beyond what was really delivered
     uint256 public overReportBy;
 
+    /// @notice Amount withheld from `amountOutMinimum + deliverExtra`, so the router underpays its own floor
+    uint256 public deliverShortBy;
+
     /// @notice The deadline field of the last `exactInputSingle` call
     uint256 public lastDeadline;
 
@@ -52,6 +55,13 @@ contract MockConfigurableSwapRouter is ISwapRouter {
     /// @notice Number of `exactInputSingle` calls served
     uint256 public callCount;
 
+    /// @notice The factory reported by `factory()`
+    address public factory;
+
+    function setFactory(address factory_) external {
+        factory = factory_;
+    }
+
     function setPullBps(uint256 bps) external {
         require(bps <= 10_000, "pullBps > 100%");
         pullBps = bps;
@@ -63,6 +73,10 @@ contract MockConfigurableSwapRouter is ISwapRouter {
 
     function setOverReportBy(uint256 amount) external {
         overReportBy = amount;
+    }
+
+    function setDeliverShortBy(uint256 amount) external {
+        deliverShortBy = amount;
     }
 
     function exactInputSingle(ExactInputSingleParams calldata params)
@@ -86,7 +100,7 @@ contract MockConfigurableSwapRouter is ISwapRouter {
         }
         lastPulled = pull;
 
-        uint256 deliver = params.amountOutMinimum + deliverExtra;
+        uint256 deliver = params.amountOutMinimum + deliverExtra - deliverShortBy;
         if (deliver > 0) {
             IERC20(params.tokenOut).transfer(params.recipient, deliver);
         }

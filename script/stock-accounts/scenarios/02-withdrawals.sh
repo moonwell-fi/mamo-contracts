@@ -28,7 +28,7 @@ deposit_usdc "$USER_D" "$ACCT" "$IDLE"
 
 # Idle cash covers it, and `withdraw` pays its fee in USDC, so the position is not touched at all.
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
-RECEIPT=$(send "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' "$SMALL_WITHDRAW" "$SLIPPAGE")
+RECEIPT=$(send "$USER_D" "$ACCT" "$WITHDRAW_SIG" "$SMALL_WITHDRAW" "$SLIPPAGE" '[]' '[]' "$(deadline)")
 
 assert_eq "cash-only withdrawal sells no NVDAc" \
   "$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")" "$NVDA_BEFORE"
@@ -49,7 +49,8 @@ assert_eq "preview floors the proceeds at the reference less the slippage" \
 
 NVDA_BEFORE=$(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")
 OWNER_BEFORE=$(call "$USDC" 'balanceOf(address)(uint256)' "$USER_D")
-send "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' "$BIG_WITHDRAW" "$SLIPPAGE" >/dev/null
+# The preview's plan is also the cap the owner signs off on.
+send "$USER_D" "$ACCT" "$WITHDRAW_SIG" "$BIG_WITHDRAW" "$SLIPPAGE" "[$PREVIEW_TOKEN]" "[$PREVIEW_AMOUNT]" "$(deadline)" >/dev/null
 
 assert_approx "sold amount matches the preview" \
   "$(bn "$NVDA_BEFORE - $(call "$NVDA" 'balanceOf(address)(uint256)' "$ACCT")")" "$PREVIEW_AMOUNT" 10
@@ -70,8 +71,12 @@ SPOT=$(quote_out "$NVDA" "$USDC" 10 100000000)
 assert_gt "reference sits above spot by more than the slippage cap" \
   "$(bn "($REFERENCE - $SPOT) * 10000 // $SPOT")" "$SLIPPAGE"
 
+# Capped at the preview, so the router floor is what refuses the sale, not the cap.
+GAP_PREVIEW=$(callraw "$ACCT" 'previewWithdraw(uint256,uint16)(address[],uint256[],uint256,uint256)' 100000000 "$SLIPPAGE")
+GAP_TOKEN=$(list_at "$(printf '%s' "$GAP_PREVIEW" | sed -n 1p)" 0)
+GAP_AMOUNT=$(list_at "$(printf '%s' "$GAP_PREVIEW" | sed -n 2p)" 0)
 expect_revert "withdrawal refuses to sell below the TWAP floor" 'Too little received' \
-  "$USER_D" "$ACCT" 'withdraw(uint256,uint16)' 100000000 "$SLIPPAGE"
+  "$USER_D" "$ACCT" "$WITHDRAW_SIG" 100000000 "$SLIPPAGE" "[$GAP_TOKEN]" "[$GAP_AMOUNT]" "$(deadline)"
 
 setup_note accountD "$ACCT"
 finish

@@ -44,16 +44,21 @@ account's NAV after that (see below). The whole rerun is a no-op.
 
 ## What it deploys, in order
 
-1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
+`DeployStockAccounts` records under the `_V2` keys proposal 019 writes; the unsuffixed
+`STOCK_ACCOUNT_*` keys are the paused v1 system, which no script acts on any more.
+
+1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY_V2`,
    deployed with the placeholder price checker (see Configuration)
-2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker)` — recorded as
-   `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker` that
-   every `PriceSource.Chainlink` token is priced against (see Configuration)
+2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker, sequencerUptimeFeed, 3600)` —
+   recorded as `STOCK_ACCOUNT_PRICE_CHECKER_V2`; the third argument is the audited `SlippagePriceChecker`
+   that every `PriceSource.Chainlink` token is priced against (see Configuration); the last two gate
+   every PoolTwap quote on the Base sequencer being up for at least an hour
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
-4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
+4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL_V2`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the
-   deploy config (ids 1-4 are all taken on Base; the stock account implementation takes **5**)
-6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
+   deploy config (ids 1-5 are taken on Base and 6 is reserved for the leveraged-Aero account; both
+   deploy configs now say **7**, the id proposal 019 redeploys under)
+6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY_V2`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
 8. every entry of `config/stock-accounts/8453.json`, in two parts:
    - **8a**, only for a `Chainlink` entry: admin calls on `existingPriceChecker` —
@@ -63,7 +68,8 @@ account's NAV after that (see below). The whole rerun is a no-op.
      registry admin is an EOA. Both are skipped when the pair is already configured.
    - **8b**: admin `StockAccountRegistry.listToken(...)`, one per entry. Each listing is probed
      against the registry's current price checker and refused with `TokenNotPriceable` unless one
-     whole token quotes into `asset`, so step 3 has to land first — and, for a `Chainlink` token, so
+     whole token quotes into `asset` and one whole `asset` quotes into the token, so step 3 has to
+     land first — and, for a `Chainlink` token, so
      does 8a: the probe routes straight through `existingPriceChecker`, which quotes nothing for an
      unconfigured pair.
 
@@ -156,8 +162,8 @@ Both environments now run all the way through: `STOCK_ORDER_SIGNER` and `F-MAMO`
 
 `multisig/mamo-multisig/016_DeployStockAccountSystem.sol` is the mainnet deployment. It is an FPS
 `MultisigProposal`, so it deploys, assembles the Safe batch, simulates it through a Safe and asserts
-the end state, all from the committed `deploy/stock-accounts/8453_PROD.json` and
-`config/stock-accounts/8453.json`.
+the end state, all from `deploy/stock-accounts/8453_PROD-016.json` and
+`config/stock-accounts/8453-016.json`, the config and token list it executed with, frozen.
 
 **One Safe is what makes one batch possible.** On PROD the stock registry admin, the
 `MamoStrategyRegistry` `DEFAULT_ADMIN_ROLE` holder and `CHAINLINK_SWAP_CHECKER_PROXY`'s `owner()` are
@@ -177,7 +183,7 @@ The batch, in order — the order is load-bearing for the same two reasons as th
 Run it against a Base fork:
 
 ```bash
-# DEPLOY_ENV is not read here: the proposal is pinned to deploy/stock-accounts/8453_PROD.json
+# DEPLOY_ENV is not read here: the proposal is pinned to deploy/stock-accounts/8453_PROD-016.json
 forge script multisig/mamo-multisig/016_DeployStockAccountSystem.sol:DeployStockAccountSystem \
   --fork-url base --ffi -vvv
 ```
@@ -219,6 +225,50 @@ The fork rehearsal of all of this is `test/StockAccountSystemSetup.integration.t
 (`make stock-accounts-setup`): it drives 016 hook by hook at a pinned block, checks the ten recorded
 actions, then runs a real cbBTC account through create, deposit, valuation, withdrawal and a fee
 settlement.
+
+## Mainnet: proposal 019
+
+`multisig/mamo-multisig/019_RedeployStockAccountSystem.sol` redeploys the whole system with the
+external-audit fixes under strategy type id **7** and retires v1. v1 accounts are not upgraded. It
+reads `deploy/stock-accounts/8453_PROD.json` and `config/stock-accounts/8453.json` (the twelve
+PoolTwap stocks) and records four new keys: `STOCK_ACCOUNT_REGISTRY_V2`,
+`STOCK_ACCOUNT_PRICE_CHECKER_V2`, `STOCK_ACCOUNT_STRATEGY_IMPL_V2` and
+`STOCK_ACCOUNT_STRATEGY_FACTORY_V2`. The v1 keys stay, since the batch acts on v1 too.
+
+The batch, all from `MAMO_MULTISIG`, in order:
+
+1. `STOCK_ACCOUNT_REGISTRY_V2.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER_V2)`
+2. `MAMO_STRATEGY_REGISTRY.whitelistImplementation(STOCK_ACCOUNT_STRATEGY_IMPL_V2, 7)`
+3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY_V2)`
+4. `MAMO_STRATEGY_REGISTRY.revokeRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY)` (the v1 factory)
+5-16. `STOCK_ACCOUNT_REGISTRY_V2.listToken(...)` for the twelve stocks
+17. `STOCK_ACCOUNT_REGISTRY.setOrderSigner(0x000000000000000000000000000000000000dEaD)`
+18. `STOCK_ACCOUNT_REGISTRY.pause()` (`GUARDIAN_ROLE`, which `MAMO_MULTISIG` holds on PROD)
+
+After it, no v1 order can validate (the signer is dead and the registry is paused) and the v1
+factory can no longer register an account, but every v1 exit keeps working. Before the batch, the
+owners of the v1 accounts close them with `withdrawAllInKind`; any left open can still exit after it.
+
+**019 executes before the stock drop's 017.** PR #113 prices stock rewards through the stock checker
+and the stock pools, so 017 against the v1 keys would price every staking compound through the
+paused system. #113 reads the V2 keys.
+
+**v2 changes both cash exits.** `withdrawAll` reduces principal by what it ships rather than zeroing
+it, so a sweep that sells below the reference price can leave residual principal on an empty account;
+`withdrawAllInKind` on the empty account clears it. They are `withdrawAll(maxSlippageBps, minUsdcOut, deadline)` and
+`withdraw(usdcAmount, maxSlippageBps, tokens, maxAmounts, deadline)`. The frontend sizes `minUsdcOut`
+and `maxAmounts` from an independent quote, the Chainlink equity feed in market hours, plus the
+slippage tolerance. Off-hours it falls back to `previewWithdraw`, and then adds headroom of at least
+the slippage tolerance on every leg: caps copied verbatim from the preview revert with
+`SellExceedsCap` once the transaction lands a block later, because the fee accrues every second, the
+TWAP moves and the legs round up. Anyone sending the account 1 USDC or more of an Active stock not in
+`tokens` also makes that withdrawal revert; the owner previews again, or exits through `withdrawAll`
+or `withdrawAllInKind`. See `docs/STOCK_ACCOUNT_PRICE_CHECKER.md`.
+
+Before signing, run `make stock-pool-readiness`, and if it names any pool as short, run
+`make stock-pool-grow` and then the check again (see [Pool readiness](#pool-readiness)). The
+fork rehearsal is `test/StockAccountRedeploy.integration.t.sol` (`make stock-accounts-redeploy`):
+019 hook by hook, a v2 account lifecycle, and a v1 account exiting after the pause.
 
 ## Configuration
 
@@ -297,28 +347,44 @@ entries by exact address and counting the pool-priced ones.
 
 `asset` (USDC) is the quote asset: it goes to the registry constructor, the price checker and the
 factory. The registry probes every listing and every raise back to `Active` through it, so a token
-the checker cannot quote — no pool against `asset`, or a pool whose history is shorter than
-`twapWindow` — is refused at listing instead of breaking `getNAV` for every holder. Lowering a
-token to `SellOnly` or `Halted` never probes.
+the checker cannot quote at all — no pool against `asset`, or a pool whose history is shorter than
+`twapWindow` — is refused. The probe only checks for a non-zero quote, in both directions; it does
+not check the pool's liquidity or observation history, so `make stock-pool-readiness` (and
+`make stock-pool-grow` for any pool it reports as short) is a mandatory step before every listing (see
+below). Lowering a token to `SellOnly` or `Halted` never
+probes. Never list `asset` itself; the registry refuses it with `AssetNotListable`.
+
+The registry puts floors under the caps: `maxWithdrawSlippageBps` at least 50, `maxBackendSlippageBps`
+at least 10 and `maxDeviationBps` at least 100, and the `twapWindow` must sit between 60 and 3600
+seconds. A value outside those bounds is refused, in the constructor and in every setter.
+
+cbBTC, if it is ever listed again, is priced as BTC: its Chainlink route has no cbBTC/BTC leg, so a
+depeg does not show in its price. The depeg procedure is the guardian halt.
 
 ### Pool readiness
 
 A `PoolTwap` token is only listable once its pool can serve a `twapWindow`-long `observe`, which needs
-enough observation slots in the pool's ring. `script/StockAccountsPoolReadiness.s.sol` reports and, when
-short, grows them:
+enough observation slots in the pool's ring. `script/StockAccountsPoolReadiness.s.sol` does this in two
+named steps:
 
 ```bash
-make stock-pool-readiness                                  # every PoolTwap pool in the token list
+make stock-pool-readiness                                  # 1. check, read-only: every PoolTwap pool
 POOLS=0x3F53aFD15909bF5B1c5963b5C0D28123668ce174 make stock-pool-readiness
+make stock-pool-grow                                       # 2. grow the short ones (broadcasts)
 ```
+
+The check simulates against a Base fork and sends nothing; for a short pool it prints
+`needs growing to N, run make stock-pool-grow`. `stock-pool-grow` runs the same script with `GROW=1`
+and `--broadcast --account mamo-test`, sending `increaseObservationCardinalityNext` from the deployer.
+Run the check again afterwards; only that read says what is on chain.
 
 The target is `twapWindow / 2 x 2`, capped at `type(uint16).max`: Base produces a block about every two
 seconds, so a 180-second window needs about 90 observations, and the ring is sized at twice that for
 headroom — **180 for the configured 180-second window**. `twapWindow` is read from the deployed
-registry when `STOCK_ACCOUNT_REGISTRY` is in the address book, and from the deploy config before that.
+registry when `STOCK_ACCOUNT_REGISTRY_V2` is in the address book, and from the deploy config before that.
 
-The script only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
-is below the target, so a second run sends nothing. All twelve pools already sit above it (2048 on
+The grow step only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
+is below the target, so a second grow run sends nothing. All twelve pools already sit above it (2048 on
 most, 1000 on the MUc and PLTRc pools, 8000 on NVDAc) and are untouched:
 
 ```
@@ -329,10 +395,15 @@ AAPLc  0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0  2048/2048 required 180
 
 `POOLS` overrides the token list with a comma-separated pool list, which is how the grow path is
 demonstrated without touching a launch pool. The cbBTC/USDC pool at
-`0x3F53aFD15909bF5B1c5963b5C0D28123668ce174` is still at cardinality 1:
+`0x3F53aFD15909bF5B1c5963b5C0D28123668ce174` is still at cardinality 1; the check reports it, and the
+grow (here against a fork) grows it:
 
 ```
 POOLS  0x3F53aFD15909bF5B1c5963b5C0D28123668ce174  1/1 required 180
+  needs growing to 180, run make stock-pool-grow
+  serves window: yes
+
+POOLS  0x3F53aFD15909bF5B1c5963b5C0D28123668ce174  1/1 required 180      (GROW=1)
   grown to 1/180
   serves window: yes
 ```
@@ -344,16 +415,50 @@ The `serves window` line is **information, never a gate**. `observe` can succeed
 filled yet (a pool with one stale observation extrapolates), and it fails on a freshly grown ring that
 has not accumulated blocks. Only `listToken` decides, through the registry's own probe.
 
-`vnet-up.sh` runs the readiness script against the vnet just before the deploy, so a fresh fork has its
-pools grown before step 8 probes them.
+`vnet-up.sh` runs the readiness script with `GROW=1` against the vnet just before the deploy, so a
+fresh fork has its pools grown before step 8 probes them.
 
 `setPriceChecker` and `setTwapWindow` change what "priceable" means for every listing at once, so both
 apply the new value first and then re-probe every token that is not `Halted`, reverting the whole call
 with `TokenNotPriceable(token)` if any of them stops quoting. A window no pool can serve is therefore
-refused rather than silently bricking every holder's valuation. One broken pool blocks both calls until
+refused rather than silently bricking every holder's valuation. The `setPriceChecker` probe quotes
+token to `asset` and `asset` to token only; it never quotes token to token, so a replacement checker
+has to be reviewed for that path by hand. One broken pool blocks both calls until
 that token is halted, which is deliberate: auto-halting would change account value as a side effect of
 an unrelated admin action. Both calls probe on-chain, so they are not cheap — on a Base fork one
 pool-TWAP listing costs about 107k gas and one Chainlink listing about 113k.
+
+## Behaviour the audit accepted
+
+- **Onboarding.** The backend creates the account with the basket the user chose in the app; the
+  user does not sign that basket. The account holds nothing at creation, and `setBasket` is
+  owner-only.
+- **One order per account per auction.** Orders in the same batch are each checked against the
+  pre-trade state, so the planner never sends an account two orders in one auction.
+- **A blocked fee recipient.** If USDC blocks the registry's `feeRecipient`, `deposit`,
+  `depositToken`, `withdraw` and `withdrawAll` revert; `withdrawToken` and `withdrawAllInKind` still
+  work, and the registry admin can set a new recipient.
+- **The fee token.** Anyone calling `payFees(token)` chooses the token the fee is taken in, valued at
+  the reference price. Fees arrive as stocks by design.
+- **Solver surplus.** The range check values the buy leg at the larger of the signed amount and the
+  reference, so only surplus above the reference, a few basis points, can push past the band.
+- **Mid-settlement fee.** The post-hook values the fee on a NAV read inside the settlement; only the
+  settling solver can act on that, and it can only under-collect part of one fee period.
+
+## A listed token stops pricing
+
+A listed token that stops pricing (a broken or drained pool) makes the valuation of every account that
+holds it incomplete. Those accounts refuse every order and defer their fee (see
+[The management fee](#the-management-fee)) until the guardian halts the token with
+`setTokenStatus(token, Halted)`. The halt takes it out of every valuation at once, which restores
+orders and fee collection for every holder in one call; holders keep the token and can still withdraw
+it in kind. Raising it back to `Active` re-probes the price, so that waits until it quotes again.
+
+Holding it is not opt-in: 1 raw unit sent by a third party is enough to put an account in this state.
+That is why the response is the halt rather than anything per account.
+
+Monitoring: alert when `getExpectedOut(10**decimals, token, USDC)` on the registry's price checker
+reverts for any `Active` listing.
 
 ## Why the smoke test only deposits USDC
 
@@ -364,7 +469,7 @@ Tenderly vnet, where the node serves the precompile, and not in `forge test`.
 
 `StockAccountsSmoke` therefore creates an all-cash account (empty basket, `cashTargetBps = 10000`),
 deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is involved. It also asserts
-the registry points at `STOCK_ACCOUNT_PRICE_CHECKER`.
+the registry points at `STOCK_ACCOUNT_PRICE_CHECKER_V2`.
 
 `getNAV` still reads a balance for **every** listed token before it prices anything, so the smoke has
 to run before the B20 listings — which is exactly where `vnet-up.sh` puts it. After them, that
@@ -375,7 +480,7 @@ account can only be read with `cast`.
 Every account charges the registry's `managementFeeBps` — 100 bps a year in both deploy configs — on
 its whole NAV. Nothing is accrued in storage: `payFees(token)` values the fee as
 `NAV x rate x elapsed / (10000 x 365 days)` in USDC, converts that to `token` at the price checker's
-reference, sends it to the fee recipient and emits `FeesPaid(credited, token, amount)` with `token`
+reference, sends it to the registry's `feeRecipient` and emits `FeesPaid(credited, token, amount)` with `token`
 indexed. It is permissionless.
 
 **A payment the balance cuts short only settles the part of the period it covers.** The clock moves
@@ -390,22 +495,37 @@ is neither unlisted nor Halted, otherwise `FeeTokenNotAllowed(token)`; a zero ba
 `NoBalanceForFee(token)` and the clock does not move. `feeDue()` is the USDC value owed right now,
 `feeDueIn(token)` the same fee expressed in that token.
 
+**When the clock catches up without a payment.** Only when nothing is owed: a zero rate, or an account
+that holds no asset and no listed token that is not Halted. A Halted-only account is therefore
+fee-free for the halted window, on purpose: Halted holdings are outside the value the fee is charged
+on. That puts a status flip within the admin's existing trust, since the same admin sets the fee rate.
+
+**While a holding cannot be priced, the fee is deferred.** If any held token that is not Halted fails
+to price (the sequencer is down or in its grace hour, or a pool broke), no fee is paid, the clock does
+not move, and orders are refused with `ValuationIncomplete`. The whole period settles once everything
+prices again. An owner who empties the account in kind before then forgoes the fee accrued since the
+last payment (about 0.003% of the account per day at 1%): the next payment finds an empty account and
+lets the clock catch up. See [A listed token stops pricing](#a-listed-token-stops-pricing).
+
 Three things call it:
 
 - **The CoW post-hook.** An order's appData declares one post-hook, `payFees(buyToken)` on the account
-  itself, with a 1,000,000 gas limit. So an order buying NVDAc pays its fee in NVDAc and an order
+  itself, with a 4,200,000 gas limit. So an order buying NVDAc pays its fee in NVDAc and an order
   selling NVDAc for USDC pays in USDC — the account never has to sell anything to pay, it just keeps a
   little less of what it is about to receive. CoW runs the hook inside the settlement, after the trade
   legs, so the fee is valued on the post-trade NAV. Every position is one more pool TWAP read in that
-  NAV, so the cost grows with the basket: at `maxPositions` of 10, on a registry listing eleven tokens,
-  the vnet measures `payFees` at 667,000 gas, about 1.5x inside the limit the document declares.
-- **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it.
-  `withdraw` and `withdrawAll` pay in USDC, after their sells. `withdrawToken(token)` pays in that
-  token; if it is Halted or unlisted the fee falls back to USDC and then to the sellable stocks.
-  `withdrawAllInKind` pays from USDC and then walks the listed tokens, stopping as soon as the period
-  is settled, because the account is empty when it returns and anything left uncollected there is
-  uncollectable forever. It only moves the clock outright when the NAV is zero, which is the one case
-  where nothing is owed.
+  NAV, and anyone can send an account one raw unit of every listed token, so the worst case is every
+  listed token held. Measured cold on a Base fork (`make stock-fee-hook-gas`) it costs 275k, plus 93k
+  per held token and 14k per listed token: 1.39M with 019's twelve listings all held and 3.32M at the
+  30-token cap, inside 80% of the limit. A quiet vnet or a warped fork reads much lower, because every pool's newest
+  observation is then older than the TWAP window and `observe` takes its cheap branch.
+- **Withdrawals.** They pay the fee before they pay the owner, so nobody leaves ahead of it. The cash
+  exits, `withdraw` and `withdrawAll`, pay in USDC after their sells. The in-kind exits,
+  `withdrawToken(token)`, `recoverERC20(token, ...)` and `withdrawAllInKind`, pay from every holding
+  other than the token leaving, the asset included, and out of the leaving token only for what the
+  others leave. So a USDC in-kind exit pays its fee in stock. `withdrawAllInKind` stops as soon as the
+  period is settled, because the account is empty when it returns and anything left uncollected there
+  is uncollectable forever.
 - **A poke.** An account that neither trades nor withdraws just keeps owing more; the backend calls
   `payFees(token)` on it directly, naming whichever balance it wants the fee taken out of.
 
@@ -448,7 +568,8 @@ so an order cannot settle unless its hook takes the fee in the token that order 
 
 `script/stock-accounts/vnet-manifest.json` (gitignored) is written by the smoke script and is what the
 backend or a follow-up script reads to pick the vnet up: the admin `rpc`, `chainId`, every
-`STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address, the `strategyTypeId`, the test user with the
+`STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address (unsuffixed: a vnet holds only the system this tree
+deployed, read from the book's `_V2` keys), the `strategyTypeId`, the test user with the
 account created for them, and that account's USDC document as `appDataHashUsdc` and
 `appDataDocumentUsdc` — the cash leg, since documents are per buy token and the smoke account is all
 cash. Forge writes the document inlined as JSON rather than as a string, so `jq -c` is what reproduces
@@ -519,10 +640,10 @@ its row up by address (`weights_index`) instead of taking the first one.
 | Scenario | Proves |
 | --- | --- |
 | `01-settlement.sh` | An order priced inside the account slippage cap is accepted by `isValidSignature` and settles; the appData post-hook pays a day of fee in the token the order buys — NVDAc for the buy-in, the collector's USDC untouched; the same order carrying the document for the sell token is refused with `InvalidAppData`; NAV and weights survive the trade; the same trade sized past the band is refused by the account and therefore by the settlement; a solver-authored order with no backend signature is refused both ways and accepted once signed; two accounts on opposite sides of NVDAc/USDC net in one `settle` with no venue, the buyer paying its fee in NVDAc and the seller in USDC. |
-| `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
+| `02-withdrawals.sh` | Idle cash is paid out without touching a pool; a shortfall sells exactly what `previewWithdraw` planned (passed back as the owner's per-token caps, with a deadline) and pays the owner the exact amount asked; when spot falls below the 180s average the router floor derived from that average blocks the sale instead of realising the gap. |
 | `03-spike.sh` | After a 3x move the average has absorbed, the account reads far overweight, selling into the spike is accepted and settles, buying more is refused by the range rule, and unwinding the spike restores both the reference and the buy side. |
-| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays in NVDAc and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
-| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — those the deploy already listed are left as they are — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 1,000,000 gas the appData post-hook is given. |
+| `04-lifecycle.sh` | `computeStrategyAddress` predicts the created account; buy-in, `setBasket`, and a cash withdrawal behave; a month of management fee is paid in USDC by the next `withdraw` before the owner is paid; `withdrawToken(NVDAc)` pays its fee out of the cash, not the token it sends, and a `payFees(NVDAc)` poke settles an idle account out of its position; a Halted token leaves the NAV while remaining held and withdrawable in kind, can no longer settle the fee (`FeeTokenNotAllowed`), and the withdrawal that sends it pays out of the cash instead. |
+| `05-gas.sh` | Discovers the B20/USDC pools on the stocks factory, lists up to ten of them — those the deploy already listed are left as they are — measures `isValidSignature` gas for accounts holding 2, 4 and 10 positions, and checks `payFees` on the widest of them fits the 4,200,000 gas the appData post-hook is given. |
 
 Two things the range rule makes concrete and the scenarios assert. An account sitting on its targets
 can move at most `maxDeviationBps` of its NAV in a single order, so a rebalance larger than that has

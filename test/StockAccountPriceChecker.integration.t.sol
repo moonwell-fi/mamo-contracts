@@ -57,11 +57,13 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     address internal constant NVDAC_USDC_POOL = 0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9; // tick spacing 10
     address internal constant AAPLC = 0xb200000000000000000000C2e324d24d7eEcd1fb; // 8 dec, pool token1
     address internal constant AAPLC_USDC_POOL = 0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0; // tick spacing 10
-    address internal constant AERODROME_CL_ROUTER = 0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5;
+    address internal constant AERODROME_STOCKS_SWAP_ROUTER = 0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F;
     address internal constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf; // 8 dec
     address internal constant CBBTC_USDC_POOL = 0x3F53aFD15909bF5B1c5963b5C0D28123668ce174; // cardinality 1 at the pin
     address internal constant CHAINLINK_BTC_USD = 0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F;
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
+    address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
     address internal constant STRANGER = 0x000000000000000000000000000000000000dEaD;
 
     /// @dev Swap inputs large enough to run the pool to the sqrt-price limit the helpers set; the
@@ -98,7 +100,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         // The checker takes the registry as an immutable, so the registry is built first against a
         // code-bearing stand-in (this test contract) and repointed once the real checker exists.
         registry = _deployRegistry();
-        checker = new StockAccountPriceChecker(registry, USDC, existingChecker);
+        checker = new StockAccountPriceChecker(
+            registry, USDC, existingChecker, CHAINLINK_L2_SEQUENCER_UPTIME_FEED, SEQUENCER_GRACE_PERIOD
+        );
         vm.prank(admin);
         registry.setPriceChecker(checker);
         assertEq(address(registry.priceChecker()), address(checker));
@@ -111,6 +115,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         // `listToken` requires a code-bearing trade venue for every token; the checker never reads it
         // for a Chainlink token, so a stand-in keeps this test from asserting anything about cbBTC pools.
         cbbtcVenue = address(new MockCLPoolObserve(USDC, CBBTC));
+        MockCLPoolObserve(cbbtcVenue).setFactory(registry.aerodromeRouter().factory());
         vm.prank(admin);
         registry.listToken(
             CBBTC,
@@ -127,12 +132,14 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         return new StockAccountRegistry(
             StockAccountRegistry.Config({
                 admin: admin,
-                aerodromeRouter: ISwapRouter(AERODROME_CL_ROUTER),
+                aerodromeRouter: ISwapRouter(AERODROME_STOCKS_SWAP_ROUTER),
                 asset: USDC,
+                feeRecipient: admin,
                 guardian: admin,
                 managementFeeBps: 100,
                 maxBackendSlippageBps: MAX_BACKEND_SLIPPAGE_BPS,
                 maxDeviationBps: 1000,
+                maxOrderValue: MAX_STRATEGY_DEPOSIT,
                 maxPositions: 10,
                 maxStrategyDeposit: MAX_STRATEGY_DEPOSIT,
                 maxWithdrawSlippageBps: 500,
@@ -209,19 +216,15 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertFalse(checker.checkPrice(amountIn, NVDAC, USDC, floor - 1, 100));
     }
 
-    /// @dev The registry refuses a window the live pool cannot serve, so the token is halted first to
-    ///      reach the checker's own behaviour behind that guard.
+    /// @dev The live pools serve the registry's longest window, so the window is mocked past their history
     function test_fork_windowLongerThanHistoryReverts() public {
-        vm.expectRevert(abi.encodeWithSelector(IStockAccountRegistry.TokenNotPriceable.selector, NVDAC));
+        vm.expectRevert(IStockAccountRegistry.InvalidTwapWindow.selector);
         vm.prank(admin);
         registry.setTwapWindow(type(uint32).max);
 
-        vm.startPrank(admin);
-        registry.setTokenStatus(NVDAC, IStockAccountRegistry.TokenStatus.Halted);
-        registry.setTokenStatus(AAPLC, IStockAccountRegistry.TokenStatus.Halted);
-        registry.setTwapWindow(type(uint32).max);
-        vm.stopPrank();
-
+        vm.mockCall(
+            address(registry), abi.encodeCall(IStockAccountRegistry.twapWindow, ()), abi.encode(type(uint32).max)
+        );
         vm.expectRevert(
             abi.encodeWithSelector(
                 StockAccountPriceChecker.InsufficientObservations.selector, NVDAC_USDC_POOL, type(uint32).max
@@ -961,7 +964,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(cardinality, 1, "vacuous: the pool already keeps history");
 
         StockAccountRegistry poolRegistry = _deployRegistry();
-        StockAccountPriceChecker poolChecker = new StockAccountPriceChecker(poolRegistry, USDC, existingChecker);
+        StockAccountPriceChecker poolChecker = new StockAccountPriceChecker(
+            poolRegistry, USDC, existingChecker, CHAINLINK_L2_SEQUENCER_UPTIME_FEED, SEQUENCER_GRACE_PERIOD
+        );
         vm.startPrank(admin);
         poolRegistry.setPriceChecker(poolChecker);
         poolRegistry.listToken(CBBTC, _poolTwapConfig(CBBTC_USDC_POOL));

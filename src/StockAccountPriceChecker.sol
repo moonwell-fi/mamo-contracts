@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {ICLPool} from "@interfaces/ICLPool.sol";
+import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {TickMath} from "@libraries/uniswap/TickMath.sol";
@@ -18,14 +19,24 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 contract StockAccountPriceChecker is ISlippagePriceChecker {
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant INTERNAL_DECIMALS = 36;
+    /// @dev The longest order lifetime (`MAX_ORDER_VALIDITY` in the strategy).
+    uint256 internal constant MIN_SEQUENCER_GRACE_PERIOD = 30 minutes;
 
     IStockAccountRegistry public immutable registry;
     address public immutable quoteAsset;
     /// @dev Prices every `PriceSource.Chainlink` token against `quoteAsset`; only `token -> quoteAsset`
     ///      needs configuring there, the reverse direction is derived here.
     ISlippagePriceChecker public immutable existingChecker;
+    /// @dev Gates PoolTwap quotes only; Chainlink tokens rely on the existing checker's own guard.
+    address public immutable sequencerUptimeFeed;
+    uint256 public immutable sequencerGracePeriod;
 
     error ZeroAddress();
+    error ZeroGracePeriod();
+    error GracePeriodTooShort();
+    error SequencerDown();
+    error SequencerRoundIncomplete();
+    error SequencerGracePeriodNotOver();
     error TokenNotListed(address token);
     error UnsupportedPriceSource(address token);
     error PoolNotAgainstQuoteAsset(address pool);
@@ -33,13 +44,26 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     error InvalidSlippage(uint256 slippageBps);
     error NotSupported();
 
-    constructor(IStockAccountRegistry registry_, address quoteAsset_, ISlippagePriceChecker existingChecker_) {
-        if (address(registry_) == address(0) || quoteAsset_ == address(0) || address(existingChecker_) == address(0)) {
+    constructor(
+        IStockAccountRegistry registry_,
+        address quoteAsset_,
+        ISlippagePriceChecker existingChecker_,
+        address sequencerUptimeFeed_,
+        uint256 sequencerGracePeriod_
+    ) {
+        if (
+            address(registry_) == address(0) || quoteAsset_ == address(0) || address(existingChecker_) == address(0)
+                || sequencerUptimeFeed_ == address(0)
+        ) {
             revert ZeroAddress();
         }
+        if (sequencerGracePeriod_ == 0) revert ZeroGracePeriod();
+        if (sequencerGracePeriod_ < MIN_SEQUENCER_GRACE_PERIOD) revert GracePeriodTooShort();
         registry = registry_;
         quoteAsset = quoteAsset_;
         existingChecker = existingChecker_;
+        sequencerUptimeFeed = sequencerUptimeFeed_;
+        sequencerGracePeriod = sequencerGracePeriod_;
     }
 
     /// @inheritdoc ISlippagePriceChecker
@@ -90,15 +114,13 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     }
 
     /// @inheritdoc ISlippagePriceChecker
-    /// @dev A Chainlink token inherits the existing checker's feed-based bound; everything else is
-    ///      bounded by the TWAP window, the only time-validity notion this checker has of its own.
+    /// @dev Zero for an unlisted token. A Chainlink token inherits the existing checker's feed-based
+    ///      bound; everything else is bounded by the TWAP window.
     function maxTimePriceValid(address token) external view override returns (uint256) {
         if (token != quoteAsset) {
             IStockAccountRegistry.TokenConfig memory cfg = registry.tokenConfig(token);
-            if (
-                cfg.status != IStockAccountRegistry.TokenStatus.None
-                    && cfg.source == IStockAccountRegistry.PriceSource.Chainlink
-            ) {
+            if (cfg.status == IStockAccountRegistry.TokenStatus.None) return 0;
+            if (cfg.source == IStockAccountRegistry.PriceSource.Chainlink) {
                 return existingChecker.maxTimePriceValid(token);
             }
         }
@@ -170,6 +192,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         view
         returns (uint256)
     {
+        _requireSequencerUp();
         ICLPool pool = ICLPool(cfg.pool);
         address token0 = pool.token0();
         address token1 = pool.token1();
@@ -212,6 +235,14 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         } catch {
             revert InsufficientObservations(address(pool), window);
         }
+    }
+
+    /// @dev A Chainlink uptime feed answers 0 while the sequencer is up; startedAt is when that status began.
+    function _requireSequencerUp() internal view {
+        (, int256 answer, uint256 startedAt,,) = IPriceFeed(sequencerUptimeFeed).latestRoundData();
+        if (answer != 0) revert SequencerDown();
+        if (startedAt == 0) revert SequencerRoundIncomplete();
+        if (block.timestamp < startedAt + sequencerGracePeriod) revert SequencerGracePeriodNotOver();
     }
 
     function _isPriceable(address token) internal view returns (bool) {

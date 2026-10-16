@@ -7,6 +7,7 @@ import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockERC20} from "./MockERC20.sol";
@@ -37,6 +38,22 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 4000), 2000);
 
         assertTrue(_check(_order(address(usdc), address(nvda), 400e18, 2e18)) == MAGIC_VALUE, "magic value");
+    }
+
+    function testOrderAboveTheMaxOrderValueIsRefusedAndOneAtItIsAccepted() public {
+        usdc.mint(address(strategy), 1000e18);
+
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 4000), 2000);
+
+        GPv2Order.Data memory order = _order(address(usdc), address(nvda), 400e18, 2e18);
+
+        stockRegistry.setMaxOrderValue(400e18 - 1);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.OrderValueExceedsMaximum.selector, 400e18));
+        _check(order);
+
+        stockRegistry.setMaxOrderValue(400e18);
+        assertTrue(_check(order) == MAGIC_VALUE, "an order at the bound is accepted");
     }
 
     function testRevertsWhenDigestDoesNotMatch() public {
@@ -74,6 +91,30 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
 
         vm.expectRevert(IStockAccountStrategy.InvalidBackendSignature.selector);
         strategy.isValidSignature(digest, abi.encode(order, signature));
+    }
+
+    function testTheOwnerCanStopAndResumeOrders() public {
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+        assertTrue(_check(order) == MAGIC_VALUE, "accepted before");
+
+        vm.expectEmit(address(strategy));
+        emit IStockAccountStrategy.OrdersDisabledUpdated(true);
+        vm.prank(user);
+        strategy.setOrdersDisabled(true);
+        assertTrue(strategy.ordersDisabled(), "flag set");
+
+        vm.expectRevert(IStockAccountStrategy.OrdersDisabled.selector);
+        _check(order);
+
+        vm.prank(user);
+        strategy.setOrdersDisabled(false);
+        assertTrue(_check(order) == MAGIC_VALUE, "accepted again once cleared");
+    }
+
+    function testOnlyTheOwnerCanStopOrders() public {
+        vm.prank(backend);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, backend));
+        strategy.setOrdersDisabled(true);
     }
 
     function testRevertsOnBuyOrder() public {
@@ -137,10 +178,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
             ),
             "document carries the payFees call for the fee token"
         );
-        assertTrue(
-            vm.contains(document, string.concat('"gasLimit":"', vm.toString(strategy.HOOK_GAS_LIMIT()), '"')),
-            "document carries the hook gas limit"
-        );
+        assertTrue(vm.contains(document, '"gasLimit":"4200000"'), "document carries the hook gas limit");
     }
 
     function testAppDataDocumentDiffersPerFeeToken() public view {
@@ -162,14 +200,6 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         order.appData = strategy.appDataHash(address(nvda));
 
         vm.expectRevert(IStockAccountStrategy.InvalidAppData.selector);
-        _check(order);
-    }
-
-    function testRevertsWhenOrderExpiresTooSoon() public {
-        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
-        order.validTo = uint32(block.timestamp + 4 minutes);
-
-        vm.expectRevert(IStockAccountStrategy.OrderExpiresTooSoon.selector);
         _check(order);
     }
 
@@ -275,6 +305,29 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         }
     }
 
+    function testASellOnlyPositionWindsDownIntoCashPastTheCashCeiling() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 9000), 1000);
+        deal(address(aapl), address(strategy), 0);
+        deal(address(nvda), address(strategy), 112.5e18);
+        usdc.mint(address(strategy), 2_500e18);
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.SellOnly);
+
+        // $3,000 of a $25,000 account lifts cash to 22%, past its 10% target and 10% band
+        assertTrue(_check(_order(address(nvda), address(usdc), 15e18, 2_985e18)) == MAGIC_VALUE, "magic value");
+    }
+
+    function testASellOnlySaleIntoAnotherStockStillRespectsItsCeiling() public {
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 4500, address(aapl), 4500), 1000);
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.SellOnly);
+
+        GPv2Order.Data memory order = _order(address(nvda), address(aapl), 2e18, 4e18);
+
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(aapl)));
+        _check(order);
+    }
+
     function testBuyRangeIsCheckedAtTheReferenceNotTheLimit() public {
         vm.prank(user);
         strategy.setBasket(_entries(address(nvda), 3000, address(aapl), 6000), 1000);
@@ -309,6 +362,14 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
         GPv2Order.Data memory order = _order(address(nvda), address(usdc), 2e18, 398e18);
 
         vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.BuyLeavesTokenAboveRange.selector, address(usdc)));
+        _check(order);
+    }
+
+    function testRefusesOrdersWhileAHeldTokenCannotBePriced() public {
+        priceChecker.setRate(address(aapl), address(usdc), 0);
+        GPv2Order.Data memory order = _order(address(nvda), address(usdc), 1e18, 199e18);
+
+        vm.expectRevert(IStockAccountStrategy.ValuationIncomplete.selector);
         _check(order);
     }
 

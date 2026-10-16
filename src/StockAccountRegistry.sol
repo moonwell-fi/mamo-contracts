@@ -27,14 +27,23 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     /// @notice Highest withdrawal slippage cap the admin may set, in basis points
     uint16 public constant override withdrawSlippageCeilingBps = 1_000;
 
+    /// @notice Most tokens the registry may list, bounding the valuation every account runs
+    uint256 public constant MAX_LISTED_TOKENS = 30;
+
+    /// @notice Bounds on the TWAP window, in seconds
+    uint32 public constant MIN_TWAP_WINDOW = 60;
+    uint32 public constant MAX_TWAP_WINDOW = 3600;
+
     struct Config {
         address admin;
         ISwapRouter aerodromeRouter;
         address asset;
+        address feeRecipient;
         address guardian;
         uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
         uint16 maxDeviationBps;
+        uint256 maxOrderValue;
         uint8 maxPositions;
         uint256 maxStrategyDeposit;
         uint16 maxWithdrawSlippageBps;
@@ -57,8 +66,10 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public override managementFeeBps;
     uint32 public override twapWindow;
     address public override orderSigner;
+    address public override feeRecipient;
     uint256 public override minStrategyDeposit;
     uint256 public override maxStrategyDeposit;
+    uint256 public override maxOrderValue;
 
     mapping(address => TokenConfig) internal _tokenConfig;
     address[] internal _tokens;
@@ -73,11 +84,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     event TwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event MinStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
     event MaxStrategyDepositUpdated(uint256 oldValue, uint256 newValue);
+    event MaxOrderValueUpdated(uint256 oldValue, uint256 newValue);
     event ManagementFeeBpsUpdated(uint16 oldValue, uint16 newValue);
     event OrderSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
     event TokenListed(address indexed token, TokenConfig cfg);
     event TokenPoolUpdated(address indexed token, address indexed oldPool, address indexed newPool);
     event TokenStatusUpdated(address indexed token, TokenStatus oldStatus, TokenStatus newStatus);
+    event TokenDelisted(address indexed token);
 
     /// @param config The initial roles and global configuration
     constructor(Config memory config) {
@@ -101,8 +115,10 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMinStrategyDeposit(config.minStrategyDeposit);
         _setMaxStrategyDeposit(config.maxStrategyDeposit);
         if (config.minStrategyDeposit > config.maxStrategyDeposit) revert InvalidDepositBounds();
+        _setMaxOrderValue(config.maxOrderValue);
         _setOrderSigner(config.orderSigner);
         _setManagementFeeBps(config.managementFeeBps);
+        _setFeeRecipient(config.feeRecipient);
     }
 
     /// @notice Sets the Aerodrome router used by stock accounts
@@ -181,6 +197,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setMaxStrategyDeposit(newMaxDeposit);
     }
 
+    /// @notice Sets the largest value, in asset units, a single order may sell
+    function setMaxOrderValue(uint256 newMaxOrderValue) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newMaxOrderValue == maxOrderValue) revert AlreadySet();
+        _setMaxOrderValue(newMaxOrderValue);
+    }
+
     /// @notice Sets the key the backend signs orders with, invalidating any order signed by the old one
     /// @dev Stays available while paused: rotating the key is a remediation lever
     function setOrderSigner(address newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -194,6 +216,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         _setManagementFeeBps(newFeeBps);
     }
 
+    /// @notice Sets the address every stock account pays its management fee to
+    function setFeeRecipient(address newRecipient) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        if (newRecipient == feeRecipient) revert AlreadySet();
+        _setFeeRecipient(newRecipient);
+    }
+
     /// @notice Lists a new token as tradeable by stock accounts
     /// @param token The token to list
     /// @param cfg The pricing source and venue recorded for the token. cfg.chainlinkFeed is advisory
@@ -201,6 +229,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     ///        whose feeds its own owner configures; this field is not read.
     function listToken(address token, TokenConfig calldata cfg) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
         if (token == asset) revert AssetNotListable();
+        if (_tokens.length == MAX_LISTED_TOKENS) revert TooManyListedTokens();
         if (_tokenConfig[token].status != TokenStatus.None) revert TokenAlreadyListed(token);
         if (cfg.status != TokenStatus.Active) revert MustListAsActive();
         if (token.code.length == 0) revert NotAContract(token);
@@ -236,6 +265,25 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         cfg.pool = newPool;
 
         emit TokenPoolUpdated(token, oldPool, newPool);
+    }
+
+    /// @notice Removes a halted token from the list; holders still exit it with `withdrawToken`
+    function delistToken(address token) external onlyRole(DEFAULT_ADMIN_ROLE) whenNotPaused {
+        TokenStatus status = _tokenConfig[token].status;
+        if (status == TokenStatus.None) revert TokenNotListed(token);
+        if (status != TokenStatus.Halted) revert TokenNotHalted(token);
+
+        uint256 last = _tokens.length - 1;
+        for (uint256 i = 0; i < last; i++) {
+            if (_tokens[i] == token) {
+                _tokens[i] = _tokens[last];
+                break;
+            }
+        }
+        _tokens.pop();
+        delete _tokenConfig[token];
+
+        emit TokenDelisted(token);
     }
 
     /// @notice Changes the trading status of a listed token
@@ -281,7 +329,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         return _tokenConfig[token];
     }
 
-    /// @notice Returns every token that has ever been configured
+    /// @notice Returns every listed token, halted ones included
     function allTokens() external view override returns (address[] memory) {
         return _tokens;
     }
@@ -294,11 +342,16 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     function _requireAssetPool(address token, address pool) internal view {
         (address a, address b) = (ICLPool(pool).token0(), ICLPool(pool).token1());
         if (!(a == token && b == asset) && !(a == asset && b == token)) revert PoolNotAgainstAsset(pool);
+        if (ICLPool(pool).factory() != aerodromeRouter.factory()) revert PoolNotFromRouterFactory(pool);
     }
 
     function _requirePriceable(address token) internal view {
-        uint256 oneToken = 10 ** IERC20Metadata(token).decimals();
-        try priceChecker.getExpectedOut(oneToken, token, asset) returns (uint256 quote) {
+        _requireQuote(token, 10 ** IERC20Metadata(token).decimals(), token, asset);
+        _requireQuote(token, 10 ** IERC20Metadata(asset).decimals(), asset, token);
+    }
+
+    function _requireQuote(address token, uint256 amountIn, address fromToken, address toToken) internal view {
+        try priceChecker.getExpectedOut(amountIn, fromToken, toToken) returns (uint256 quote) {
             if (quote == 0) revert TokenNotPriceable(token);
         } catch {
             revert TokenNotPriceable(token);
@@ -318,6 +371,12 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     function _setPriceChecker(ISlippagePriceChecker newPriceChecker) internal {
         if (address(newPriceChecker) == address(0)) revert ZeroAddress();
         if (address(newPriceChecker).code.length == 0) revert NotAContract(address(newPriceChecker));
+
+        // A checker that does not expose quoteAsset() (the audited SlippagePriceChecker) is accepted
+        (bool ok, bytes memory ret) = address(newPriceChecker).staticcall(abi.encodeWithSignature("quoteAsset()"));
+        if (ok && ret.length == 32 && abi.decode(ret, (address)) != asset) {
+            revert PriceCheckerAssetMismatch(address(newPriceChecker));
+        }
 
         address oldPriceChecker = address(priceChecker);
         priceChecker = newPriceChecker;
@@ -344,7 +403,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxDeviationBps(uint16 newMaxDeviationBps) internal {
-        if (newMaxDeviationBps > 10_000) revert InvalidMaxDeviation();
+        if (newMaxDeviationBps < 100 || newMaxDeviationBps > 10_000) revert InvalidMaxDeviation();
 
         uint16 oldValue = maxDeviationBps;
         maxDeviationBps = newMaxDeviationBps;
@@ -353,7 +412,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxBackendSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > backendSlippageCeilingBps) revert InvalidSlippageCap();
+        if (newSlippageBps < 10 || newSlippageBps > backendSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxBackendSlippageBps;
         maxBackendSlippageBps = newSlippageBps;
@@ -362,7 +421,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setMaxWithdrawSlippageBps(uint16 newSlippageBps) internal {
-        if (newSlippageBps > withdrawSlippageCeilingBps) revert InvalidSlippageCap();
+        if (newSlippageBps < 50 || newSlippageBps > withdrawSlippageCeilingBps) revert InvalidSlippageCap();
 
         uint16 oldValue = maxWithdrawSlippageBps;
         maxWithdrawSlippageBps = newSlippageBps;
@@ -371,7 +430,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     }
 
     function _setTwapWindow(uint32 newTwapWindow) internal {
-        if (newTwapWindow == 0) revert InvalidTwapWindow();
+        if (newTwapWindow < MIN_TWAP_WINDOW || newTwapWindow > MAX_TWAP_WINDOW) revert InvalidTwapWindow();
 
         uint32 oldValue = twapWindow;
         twapWindow = newTwapWindow;
@@ -393,6 +452,15 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         emit MaxStrategyDepositUpdated(oldValue, newMaxDeposit);
     }
 
+    function _setMaxOrderValue(uint256 newMaxOrderValue) internal {
+        if (newMaxOrderValue == 0) revert InvalidMaxOrderValue();
+
+        uint256 oldValue = maxOrderValue;
+        maxOrderValue = newMaxOrderValue;
+
+        emit MaxOrderValueUpdated(oldValue, newMaxOrderValue);
+    }
+
     function _setOrderSigner(address newSigner) internal {
         if (newSigner == address(0)) revert ZeroAddress();
 
@@ -409,5 +477,14 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
         managementFeeBps = newFeeBps;
 
         emit ManagementFeeBpsUpdated(oldValue, newFeeBps);
+    }
+
+    function _setFeeRecipient(address newRecipient) internal {
+        if (newRecipient == address(0)) revert ZeroAddress();
+
+        address oldRecipient = feeRecipient;
+        feeRecipient = newRecipient;
+
+        emit FeeRecipientUpdated(oldRecipient, newRecipient);
     }
 }

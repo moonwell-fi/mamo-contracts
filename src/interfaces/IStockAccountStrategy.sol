@@ -15,12 +15,13 @@ interface IStockAccountStrategy {
     event BasketUpdated(BasketEntry[] entries, uint16 cashTargetBps);
     event SlippageUpdated(uint16 oldBps, uint16 newBps);
     event FeesPaid(uint256 credited, address indexed token, uint256 amount);
-    event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event OrdersDisabledUpdated(bool disabled);
 
     error ZeroAddress();
     error StrategyTypeIdNotSet();
-    error NotBackend();
+    error InvalidCowSettlement();
     error ZeroAmount();
+    error NotSelf();
     error TokenNotActive(address token);
     error TokenNotListed(address token);
     error AccountBelowMinimum(uint256 nav);
@@ -32,6 +33,10 @@ interface IStockAccountStrategy {
     error SlippageExceedsMaximum();
     error InsufficientBalance();
     error InsufficientProceeds();
+    error DeadlineExpired();
+    error LengthMismatch();
+    error SellExceedsCap(address token);
+    error RouterUnderpaid(address token);
     error EmptyBalance();
     error OrderHashMismatch();
     error InvalidBackendSignature();
@@ -41,7 +46,6 @@ interface IStockAccountStrategy {
     error OrderReceiverMismatch();
     error OrderFeeMustBeZero();
     error InvalidAppData();
-    error OrderExpiresTooSoon();
     error OrderExpiresTooLate();
     error TokensMustDiffer();
     error SellTokenNotSellable(address token);
@@ -50,18 +54,27 @@ interface IStockAccountStrategy {
     error SellExceedsBalance();
     error SellLeavesTokenBelowRange(address token);
     error BuyLeavesTokenAboveRange(address token);
+    error OrderValueExceedsMaximum(uint256 sellValue);
     error PriceCheckFailed();
+    error ValuationIncomplete();
     error FeeTokenNotAllowed(address token);
     error NoBalanceForFee(address token);
     error RegistryPaused();
+    error OrdersDisabled();
 
     function deposit(uint256 amount) external;
 
     function depositToken(address token, uint256 amount) external;
 
-    function withdraw(uint256 usdcAmount, uint16 maxSlippageBps) external;
+    function withdraw(
+        uint256 usdcAmount,
+        uint16 maxSlippageBps,
+        address[] calldata tokens,
+        uint256[] calldata maxAmounts,
+        uint256 deadline
+    ) external;
 
-    function withdrawAll(uint16 maxSlippageBps) external;
+    function withdrawAll(uint16 maxSlippageBps, uint256 minUsdcOut, uint256 deadline) external;
 
     function withdrawToken(address token, uint256 amount) external;
 
@@ -71,7 +84,7 @@ interface IStockAccountStrategy {
 
     function setAccountSlippage(uint16 bps) external;
 
-    function setFeeRecipient(address newRecipient) external;
+    function setOrdersDisabled(bool disabled) external;
 
     function approveCowRelayer(address token) external;
 
@@ -108,4 +121,6 @@ interface IStockAccountStrategy {
     function lastFeePaid() external view returns (uint64);
 
     function principal() external view returns (uint256);
+
+    function ordersDisabled() external view returns (bool);
 }

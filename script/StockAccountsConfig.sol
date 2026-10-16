@@ -46,6 +46,7 @@ contract StockAccountsConfig is Script {
         uint16 managementFeeBps;
         uint16 maxBackendSlippageBps;
         uint16 maxDeviationBps;
+        uint256 maxOrderValue;
         uint8 maxPositions;
         uint256 maxStrategyDeposit;
         uint16 maxWithdrawSlippageBps;
@@ -76,6 +77,7 @@ contract StockAccountsConfig is Script {
         config.managementFeeBps = uint16(json.readUint(".managementFeeBps"));
         config.maxBackendSlippageBps = uint16(json.readUint(".maxBackendSlippageBps"));
         config.maxDeviationBps = uint16(json.readUint(".maxDeviationBps"));
+        config.maxOrderValue = json.readUint(".maxOrderValue");
         config.maxPositions = uint8(json.readUint(".maxPositions"));
         config.maxStrategyDeposit = json.readUint(".maxStrategyDeposit");
         config.maxWithdrawSlippageBps = uint16(json.readUint(".maxWithdrawSlippageBps"));

@@ -3,7 +3,9 @@ pragma solidity 0.8.28;
 
 import {ERC1967Proxy} from "./ERC1967Proxy.sol";
 import {StockAccountStrategy} from "./StockAccountStrategy.sol";
+import {IBaseStrategy} from "./interfaces/IBaseStrategy.sol";
 import {IMamoStrategyRegistry} from "./interfaces/IMamoStrategyRegistry.sol";
+import {IStockAccountRegistry} from "./interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "./interfaces/IStockAccountStrategy.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
@@ -19,9 +21,7 @@ contract StockAccountStrategyFactory is AccessControl {
     address public immutable stockRegistry;
     address public immutable asset;
     address public immutable cowSettlement;
-    address public immutable strategyImplementation;
     uint256 public immutable strategyTypeId;
-    address public immutable feeRecipient;
 
     event StrategyCreated(address indexed user, address indexed strategy);
 
@@ -29,6 +29,8 @@ contract StockAccountStrategyFactory is AccessControl {
     error StrategyTypeIdNotSet();
     error NotBackendOrUser();
     error StrategyAlreadyExists(address strategy);
+    error AssetMismatch();
+    error ImplementationNotWhitelisted();
 
     /**
      * @param admin Address to grant the DEFAULT_ADMIN_ROLE to
@@ -37,9 +39,7 @@ contract StockAccountStrategyFactory is AccessControl {
      * @param _stockRegistry Address of the StockAccountRegistry contract
      * @param _asset Address of the cash asset every account is denominated in
      * @param _cowSettlement Address of the CoW settlement contract
-     * @param _strategyImplementation Address of the StockAccountStrategy implementation
      * @param _strategyTypeId The strategy type ID assigned by the MamoStrategyRegistry
-     * @param _feeRecipient Address the management fee of every account is paid to
      */
     constructor(
         address admin,
@@ -48,9 +48,7 @@ contract StockAccountStrategyFactory is AccessControl {
         address _stockRegistry,
         address _asset,
         address _cowSettlement,
-        address _strategyImplementation,
-        uint256 _strategyTypeId,
-        address _feeRecipient
+        uint256 _strategyTypeId
     ) {
         if (admin == address(0)) revert ZeroAddress();
         if (backend == address(0)) revert ZeroAddress();
@@ -58,9 +56,8 @@ contract StockAccountStrategyFactory is AccessControl {
         if (_stockRegistry == address(0)) revert ZeroAddress();
         if (_asset == address(0)) revert ZeroAddress();
         if (_cowSettlement == address(0)) revert ZeroAddress();
-        if (_strategyImplementation == address(0)) revert ZeroAddress();
         if (_strategyTypeId == 0) revert StrategyTypeIdNotSet();
-        if (_feeRecipient == address(0)) revert ZeroAddress();
+        if (_asset != IStockAccountRegistry(_stockRegistry).asset()) revert AssetMismatch();
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(BACKEND_ROLE, backend);
@@ -69,19 +66,17 @@ contract StockAccountStrategyFactory is AccessControl {
         stockRegistry = _stockRegistry;
         asset = _asset;
         cowSettlement = _cowSettlement;
-        strategyImplementation = _strategyImplementation;
         strategyTypeId = _strategyTypeId;
-        feeRecipient = _feeRecipient;
+    }
+
+    /// @notice The implementation new accounts are deployed with: the registry's latest for this type id
+    function strategyImplementation() public view returns (address) {
+        return mamoStrategyRegistry.latestImplementationById(strategyTypeId);
     }
 
     /// @notice Returns the address at which the account of a given user is or would be deployed
     function computeStrategyAddress(address user) public view returns (address) {
-        bytes32 salt = keccak256(abi.encodePacked(user));
-
-        bytes memory bytecode =
-            abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(strategyImplementation, ""));
-
-        return Create2.computeAddress(salt, keccak256(bytecode));
+        return Create2.computeAddress(_salt(user), keccak256(_proxyBytecode(strategyImplementation())));
     }
 
     /**
@@ -99,13 +94,21 @@ contract StockAccountStrategyFactory is AccessControl {
         if (user == address(0)) revert ZeroAddress();
         if (!hasRole(BACKEND_ROLE, msg.sender) && msg.sender != user) revert NotBackendOrUser();
 
-        address predicted = computeStrategyAddress(user);
+        address implementation = strategyImplementation();
+        if (implementation == address(0)) revert ImplementationNotWhitelisted();
+
+        bytes32 salt = _salt(user);
+        bytes memory bytecode = _proxyBytecode(implementation);
+
+        address predicted = Create2.computeAddress(salt, keccak256(bytecode));
         if (predicted.code.length != 0) revert StrategyAlreadyExists(predicted);
 
-        bytes32 salt = keccak256(abi.encodePacked(user));
-
-        bytes memory bytecode =
-            abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(strategyImplementation, ""));
+        address[] memory existing = mamoStrategyRegistry.getUserStrategies(user);
+        for (uint256 i = 0; i < existing.length; i++) {
+            if (IBaseStrategy(existing[i]).strategyTypeId() == strategyTypeId) {
+                revert StrategyAlreadyExists(existing[i]);
+            }
+        }
 
         strategy = Create2.deploy(0, salt, bytecode);
 
@@ -115,7 +118,6 @@ contract StockAccountStrategyFactory is AccessControl {
                 cashTargetBps: cashTargetBps,
                 cowSettlement: cowSettlement,
                 entries: entries,
-                feeRecipient: feeRecipient,
                 mamoStrategyRegistry: address(mamoStrategyRegistry),
                 owner: user,
                 stockRegistry: stockRegistry,
@@ -126,5 +128,13 @@ contract StockAccountStrategyFactory is AccessControl {
         mamoStrategyRegistry.addStrategy(user, strategy);
 
         emit StrategyCreated(user, strategy);
+    }
+
+    function _salt(address user) private pure returns (bytes32) {
+        return keccak256(abi.encodePacked(user));
+    }
+
+    function _proxyBytecode(address implementation) private pure returns (bytes memory) {
+        return abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(implementation, ""));
     }
 }

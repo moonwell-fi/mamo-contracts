@@ -46,6 +46,10 @@ interface IStockAccountRegistry {
     error AssetNotListable();
     error PoolNotAgainstAsset(address pool);
     error InvalidDepositBounds();
+    error InvalidMaxOrderValue();
+    error PriceCheckerAssetMismatch(address checker);
+    error TooManyListedTokens();
+    error PoolNotFromRouterFactory(address pool);
 
     function asset() external view returns (address);
 
@@ -65,6 +69,8 @@ interface IStockAccountRegistry {
 
     function maxStrategyDeposit() external view returns (uint256);
 
+    function maxOrderValue() external view returns (uint256);
+
     function twapWindow() external view returns (uint32);
 
     function maxBackendSlippageBps() external view returns (uint16);
@@ -80,6 +86,8 @@ interface IStockAccountRegistry {
     function withdrawSlippageCeilingBps() external view returns (uint16);
 
     function orderSigner() external view returns (address);
+
+    function feeRecipient() external view returns (address);
 
     function aerodromeRouter() external view returns (ISwapRouter);
 
