@@ -740,11 +740,13 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /// @dev A held balance that cannot be valued right now is still held, so it does not stop the fee clock
+    /// @dev A Halted holding is outside the value the fee is charged on, so it does not hold the clock either
     function _holdsNothing() internal view returns (bool) {
         if (asset.balanceOf(address(this)) > 0) return false;
 
         address[] memory tokens = stockRegistry.allTokens();
         for (uint256 i = 0; i < tokens.length; i++) {
+            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
             if (_balanceOrZero(tokens[i]) > 0) return false;
         }
 
