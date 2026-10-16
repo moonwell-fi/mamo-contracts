@@ -11,6 +11,7 @@ import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactor
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
@@ -28,10 +29,11 @@ import {IERC5313} from "@openzeppelin/contracts/interfaces/IERC5313.sol";
  *      ADMIN_MODE (impersonate | calldata)
  */
 contract DeployStockAccounts is Script {
-    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
-    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER";
-    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
-    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
+    /// @dev The keys proposal 019 writes; the unsuffixed ones are the paused v1 system
+    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY_V2";
+    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
+    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL_V2";
+    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
 
     /// @notice Staleness bound of the USDC/USD hop every Chainlink entry is quoted through
     /// @dev Deliberately above the feed's nominal 86,400 heartbeat. Walking the live Base aggregator
@@ -58,9 +60,8 @@ contract DeployStockAccounts is Script {
         calldataMode = keccak256(bytes(adminMode)) == keccak256(bytes("calldata"));
         require(calldataMode || keccak256(bytes(adminMode)) == keccak256(bytes("impersonate")), "Unknown ADMIN_MODE");
 
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesPath, chainIds);
+        // Clears the deployer's EIP-7702 delegation, which FPS reads as a contract, in simulation only
+        addresses = PinnedAddresses.load(addressesPath);
         configLoader = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json"));
         config = configLoader.getConfig();
 
@@ -81,10 +82,10 @@ contract DeployStockAccounts is Script {
         addresses.updateJson();
         addresses.printJSONChanges();
 
-        console.log("STOCK_ACCOUNT_REGISTRY: %s", stockRegistry);
-        console.log("STOCK_ACCOUNT_PRICE_CHECKER: %s", priceChecker);
-        console.log("STOCK_ACCOUNT_STRATEGY_IMPL: %s", implementation);
-        console.log("STOCK_ACCOUNT_STRATEGY_FACTORY: %s", factory);
+        console.log("%s: %s", REGISTRY_NAME, stockRegistry);
+        console.log("%s: %s", PRICE_CHECKER_NAME, priceChecker);
+        console.log("%s: %s", IMPL_NAME, implementation);
+        console.log("%s: %s", FACTORY_NAME, factory);
         console.log("strategyTypeId: %s", strategyTypeId);
     }
 

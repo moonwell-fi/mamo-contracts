@@ -93,6 +93,11 @@ contract StockAccountRedeployTest is Test {
         proposal.preBuildMock();
 
         IStockAccountV1 v1Account = _openV1Account();
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 is the strategy multicall before 019"
+        );
 
         proposal.build();
         proposal.simulate();
@@ -196,6 +201,11 @@ contract StockAccountRedeployTest is Test {
         assertFalse(
             mamoRegistry.hasRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY")),
             "v1 factory revoked"
+        );
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 did not move"
         );
         assertTrue(StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY")).paused(), "v1 paused");
     }

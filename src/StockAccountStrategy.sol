@@ -31,7 +31,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     uint16 internal constant TOTAL_BPS = 10_000;
 
     /// @notice Gas the CoW settlement grants the fee post-hook
-    uint256 public constant HOOK_GAS_LIMIT = 2_000_000;
+    uint256 public constant HOOK_GAS_LIMIT = 4_200_000;
 
     /// @notice Value returned to CoW when this account accepts an order, per EIP-1271
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
@@ -61,6 +61,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     uint16 public accountSlippageBps;
 
     BasketEntry[] internal _entries;
+
+    // A v1 account (type id 5) must never be upgraded to this implementation: v1 kept feeRecipient at the
+    // start of this slot, so its proxy would read the old recipient's low bytes as lastFeePaid. Only ever
+    // whitelisting this implementation under type id 7 keeps the registry's latest-implementation check in the way.
 
     /// @notice Timestamp the fee was last paid at
     uint64 public override lastFeePaid;
@@ -470,8 +474,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (usdcOut == 0) revert EmptyBalance();
         if (usdcOut < minUsdcOut) revert InsufficientProceeds();
 
-        principal = 0;
-
+        _reducePrincipal(address(asset), usdcOut);
         asset.safeTransfer(owner(), usdcOut);
 
         emit Withdraw(usdcOut, sold);
@@ -553,7 +556,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     /// @notice The fee value this account owes right now, in asset units
     function feeDue() public view override returns (uint256) {
-        return _feeDue(block.timestamp - lastFeePaid);
+        return _feeDue(getNAV(), block.timestamp - lastFeePaid);
     }
 
     /// @notice The amount of a token that settles the fee owed right now
@@ -640,7 +643,11 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         if (!_isFeeToken(token)) revert FeeTokenNotAllowed(token);
 
-        uint256 due = _feeDue(elapsed);
+        // A partial valuation defers the fee, so the period is never credited against part of the account
+        (,, uint256 nav, bool complete) = _valuation();
+        if (!complete) return;
+
+        uint256 due = _feeDue(nav, elapsed);
         if (due == 0) {
             // Only a zero rate or an empty account owes nothing, a due that merely rounds down stays owed
             if (stockRegistry.managementFeeBps() == 0 || _holdsNothing()) lastFeePaid = uint64(block.timestamp);
@@ -719,13 +726,14 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _payFeesFromAny(address skip) internal {
-        if (asset.balanceOf(address(this)) > 0) {
+        if (skip != address(asset) && asset.balanceOf(address(this)) > 0) {
             _payFees(address(asset));
         }
 
         if (_feeSettled()) return;
 
-        (address[] memory tokens, uint256[] memory values,,) = _valuation();
+        (address[] memory tokens, uint256[] memory values,, bool complete) = _valuation();
+        if (!complete) return;
 
         for (uint256 i = 0; i < tokens.length && !_feeSettled(); i++) {
             if (values[i] > 0 && tokens[i] != skip) {
@@ -758,6 +766,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _tryBalance(address token) internal view returns (bool read, uint256 balance) {
+        // The call's code check runs in this frame, where try cannot catch it
+        if (token.code.length == 0) return (false, 0);
         try IERC20(token).balanceOf(address(this)) returns (uint256 held) {
             return (true, held);
         } catch {
@@ -778,8 +788,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         return lastFeePaid >= block.timestamp;
     }
 
-    function _feeDue(uint256 elapsed) internal view returns (uint256) {
-        return (getNAV() * stockRegistry.managementFeeBps() * elapsed) / (uint256(TOTAL_BPS) * 365 days);
+    function _feeDue(uint256 nav, uint256 elapsed) internal view returns (uint256) {
+        return (nav * stockRegistry.managementFeeBps() * elapsed) / (uint256(TOTAL_BPS) * 365 days);
     }
 
     function _feeAmount(address token, uint256 due) internal view returns (uint256) {

@@ -6,7 +6,9 @@ import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactor
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
@@ -20,23 +22,28 @@ import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 contract StockAccountsSmoke is Script {
     string internal constant MANIFEST_PATH = "./script/stock-accounts/vnet-manifest.json";
 
+    /// @dev The keys proposal 019 writes; the unsuffixed ones are the paused v1 system. The manifest keeps
+    ///      the unsuffixed names, since a vnet holds only the system this tree deployed
+    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY_V2";
+    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
+    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL_V2";
+    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
+
     function run() external {
         string memory addressesPath = vm.envOr("ADDRESSES_PATH", string("./addresses"));
 
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        Addresses addresses = new Addresses(addressesPath, chainIds);
+        // Clears the deployer's EIP-7702 delegation, which FPS reads as a contract, in simulation only
+        Addresses addresses = PinnedAddresses.load(addressesPath);
 
         address user = vm.envOr("TEST_USER", addresses.getAddress("DEPLOYER_EOA"));
         uint256 depositAmount = vm.envOr("SMOKE_DEPOSIT", uint256(1_000e6));
 
-        StockAccountStrategyFactory factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
+        StockAccountStrategyFactory factory = StockAccountStrategyFactory(addresses.getAddress(FACTORY_NAME));
         IERC20 asset = IERC20(factory.asset());
 
-        address priceChecker = addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER");
-        address wired = address(IStockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY")).priceChecker());
-        require(wired == priceChecker, "Stock registry does not point at STOCK_ACCOUNT_PRICE_CHECKER");
+        address priceChecker = addresses.getAddress(PRICE_CHECKER_NAME);
+        address wired = address(IStockAccountRegistry(addresses.getAddress(REGISTRY_NAME)).priceChecker());
+        require(wired == priceChecker, "Stock registry does not point at STOCK_ACCOUNT_PRICE_CHECKER_V2");
 
         address account = factory.computeStrategyAddress(user);
         bool created = account.code.length == 0;
@@ -82,9 +89,9 @@ contract StockAccountsSmoke is Script {
 
         vm.serializeString(json, "rpc", vm.envOr("TENDERLY_VNET_RPC_URL", string("")));
         vm.serializeUint(json, "chainId", block.chainid);
-        vm.serializeAddress(json, "STOCK_ACCOUNT_REGISTRY", addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
-        vm.serializeAddress(json, "STOCK_ACCOUNT_PRICE_CHECKER", addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"));
-        vm.serializeAddress(json, "STOCK_ACCOUNT_STRATEGY_IMPL", addresses.getAddress("STOCK_ACCOUNT_STRATEGY_IMPL"));
+        vm.serializeAddress(json, "STOCK_ACCOUNT_REGISTRY", addresses.getAddress(REGISTRY_NAME));
+        vm.serializeAddress(json, "STOCK_ACCOUNT_PRICE_CHECKER", addresses.getAddress(PRICE_CHECKER_NAME));
+        vm.serializeAddress(json, "STOCK_ACCOUNT_STRATEGY_IMPL", addresses.getAddress(IMPL_NAME));
         vm.serializeAddress(json, "STOCK_ACCOUNT_STRATEGY_FACTORY", address(factory));
         vm.serializeAddress(json, "AERODROME_STOCKS_CL_FACTORY", addresses.getAddress("AERODROME_STOCKS_CL_FACTORY"));
         vm.serializeAddress(json, "AERODROME_STOCKS_SWAP_ROUTER", addresses.getAddress("AERODROME_STOCKS_SWAP_ROUTER"));
