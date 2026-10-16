@@ -9,6 +9,24 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
 import {MockChainlinkAggregator} from "./mocks/MockChainlinkAggregator.sol";
 
+/// @dev A full latestRoundData tuple, but no decimals()
+contract FeedWithoutDecimals {
+    function latestRoundData() external pure returns (uint80, int256, uint256, uint256, uint80) {
+        return (1, 1e8, 1, 1, 1);
+    }
+}
+
+/// @dev decimals() answers, but latestRoundData returns a single word
+contract FeedWithShortRound {
+    function decimals() external pure returns (uint8) {
+        return 8;
+    }
+
+    function latestRoundData() external pure returns (uint256) {
+        return 1e8;
+    }
+}
+
 /// @notice Mocks-only unit coverage for the two audit fixes on SlippagePriceChecker: the
 ///         implementation initializer lock (Sherlock #44) and the reward-token latch that made a
 ///         mistaken configuration permanent.
@@ -164,5 +182,17 @@ contract SlippagePriceCheckerUnitTest is Test {
     function test_addTokenConfigurationRejectsAContractWithoutLatestRoundData() public {
         vm.expectRevert("Chainlink feed not readable");
         _configure(rewardToken, underlying, 3600, address(implementation));
+    }
+
+    function test_addTokenConfigurationRejectsAFeedWithoutDecimals() public {
+        address noDecimals = address(new FeedWithoutDecimals());
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, noDecimals);
+    }
+
+    function test_addTokenConfigurationRejectsAShortLatestRoundData() public {
+        address shortRound = address(new FeedWithShortRound());
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, shortRound);
     }
 }
