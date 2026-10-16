@@ -383,12 +383,32 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         MamoStakingRegistry registry = _freshRegistry();
         address tokenUsdcPool = address(new MockPool(rewardToken1, rewardToken2));
 
+        address newPool = address(new MockPool(rewardToken2, rewardToken1));
+
         vm.startPrank(backend);
         registry.addRewardToken(rewardToken2, tokenUsdcPool);
-        registry.updateRewardTokenPool(rewardToken2, address(new MockPool(rewardToken2, rewardToken1)));
+        registry.updateRewardTokenPool(rewardToken2, newPool);
         vm.stopPrank();
 
-        assertEq(registry.hopTokenOut(registry.getRewardTokenPool(rewardToken2), rewardToken2), rewardToken1);
+        assertEq(registry.getRewardTokenPool(rewardToken2), newPool, "pool updated");
+        assertEq(registry.hopTokenOut(newPool, rewardToken2), rewardToken1);
+    }
+
+    function testUpdateRewardTokenPoolStoresTheNewPool() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address newPool = address(new MockPool(rewardToken2, rewardToken1));
+
+        vm.startPrank(backend);
+        registry.addRewardToken(rewardToken1, pool1);
+        registry.addRewardToken(rewardToken2, pool2);
+        vm.expectEmit(address(registry));
+        emit RewardTokenPoolUpdated(rewardToken2, pool2, newPool);
+        registry.updateRewardTokenPool(rewardToken2, newPool);
+        vm.stopPrank();
+
+        assertEq(registry.getRewardTokenPool(rewardToken2), newPool, "new pool stored");
+        assertEq(registry.getRewardToken(1).pool, newPool, "entry moved to the new pool");
+        assertEq(registry.getRewardTokenPool(rewardToken1), pool1, "other token untouched");
     }
 
     function testSetDEXRouter() public {
