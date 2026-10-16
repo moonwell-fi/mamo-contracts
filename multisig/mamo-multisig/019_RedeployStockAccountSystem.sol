@@ -217,6 +217,13 @@ contract RedeployStockAccountSystem is MultisigProposal {
             mamoRegistry.hasRole(mamoRegistry.BACKEND_ROLE(), addresses.getAddress(V1_FACTORY_KEY)),
             "v1 factory should still hold BACKEND_ROLE"
         );
+        // Paired with validate(): the role churn must not move BACKEND_ROLE index 0, which every
+        // un-upgraded strategy proxy still reads as the backend (Sherlock #41, same pair as proposal 011)
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 should be the strategy multicall before this proposal"
+        );
 
         _snapshotGuardedSlots(mamoRegistry);
         _standInForNodeNativeTokens(stockRegistry);
@@ -315,6 +322,11 @@ contract RedeployStockAccountSystem is MultisigProposal {
         assertFalse(
             mamoRegistry.hasRole(mamoRegistry.BACKEND_ROLE(), addresses.getAddress(V1_FACTORY_KEY)),
             "v1 factory should no longer hold BACKEND_ROLE"
+        );
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 must not move"
         );
 
         StockAccountPriceChecker checker = StockAccountPriceChecker(priceChecker);
