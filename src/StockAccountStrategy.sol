@@ -62,6 +62,10 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
     BasketEntry[] internal _entries;
 
+    // A v1 account (type id 5) must never be upgraded to this implementation: v1 kept feeRecipient at the
+    // start of this slot, so its proxy would read the old recipient's low bytes as lastFeePaid. Only ever
+    // whitelisting this implementation under type id 7 keeps the registry's latest-implementation check in the way.
+
     /// @notice Timestamp the fee was last paid at
     uint64 public override lastFeePaid;
 

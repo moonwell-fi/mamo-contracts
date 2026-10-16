@@ -381,10 +381,12 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         vm.prank(user);
         small.withdraw(2.5e6, 50, tokens, caps, block.timestamp);
 
+        // The largest leg is lifted to the minimum sale, the others sell their rounded-up pro rata share
         assertEq(usdc.balanceOf(user), 2.5e6, "user asset");
-        assertGt(nvda.balanceOf(address(small)), 0, "no leg is sold out");
-        assertGt(aapl.balanceOf(address(small)), 0, "no leg is sold out");
-        assertGt(msft.balanceOf(address(small)), 0, "no leg is sold out");
+        assertEq(nvda.balanceOf(address(small)), 2_500, "nvda sells the minimum value");
+        assertEq(aapl.balanceOf(address(small)), 6_624, "aapl sells its own share");
+        assertEq(msft.balanceOf(address(small)), 6_624, "msft sells its own share");
+        assertEq(usdc.balanceOf(address(small)), 175_200, "the extra proceeds stay idle");
     }
 
     function testWithdrawAllLeavesDustInAnotherTokenForTheInKindExit() public {
