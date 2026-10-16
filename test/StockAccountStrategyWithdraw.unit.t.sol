@@ -147,6 +147,40 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         assertEq(aapl.balanceOf(address(strategy)), 20e18, "halted token stays");
     }
 
+    function testWithdrawAllKeepsThePrincipalOfAHaltedHoldingItLeavesBehind() public {
+        StockAccountStrategy fresh = _freshAccount(10_000e18, 20e18);
+        _halt(address(nvda));
+
+        vm.prank(user);
+        fresh.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 10_000e18, "the cash is shipped");
+        assertEq(nvda.balanceOf(address(fresh)), 20e18, "the halted holding stays");
+        assertEq(fresh.principal(), 4_000e18, "only what was shipped leaves principal");
+
+        usdc.mint(funder, 21_000e18 + 1);
+        vm.startPrank(funder);
+        usdc.approve(address(fresh), 21_000e18 + 1);
+        vm.expectRevert(abi.encodeWithSelector(IStockAccountStrategy.DepositCapExceeded.selector, CAP + 1));
+        fresh.deposit(21_000e18 + 1);
+        fresh.deposit(21_000e18);
+        vm.stopPrank();
+
+        assertEq(fresh.principal(), CAP, "the cap counts the holding left behind");
+    }
+
+    /// @dev Nothing is skipped and the router pays the reference price, so the proceeds equal principal
+    function testWithdrawAllThatSellsEverythingLeavesNoPrincipal() public {
+        StockAccountStrategy fresh = _freshAccount(10_000e18, 20e18);
+
+        vm.prank(user);
+        fresh.withdrawAll(100, 0, block.timestamp);
+
+        assertEq(usdc.balanceOf(user), 14_000e18, "user asset");
+        assertEq(nvda.balanceOf(address(fresh)), 0, "nvda sold");
+        assertEq(fresh.principal(), 0, "principal");
+    }
+
     function testWithdrawAllRevertsWhenEmpty() public {
         vm.prank(user);
         strategy.withdrawAllInKind();
@@ -399,6 +433,21 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         vm.prank(funder);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, funder));
         strategy.withdrawAll(100, 0, block.timestamp);
+    }
+
+    function _freshAccount(uint256 cash, uint256 nvdaAmount) internal returns (StockAccountStrategy fresh) {
+        fresh = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+
+        usdc.mint(funder, cash);
+        nvda.mint(funder, nvdaAmount);
+        vm.startPrank(funder);
+        usdc.approve(address(fresh), cash);
+        nvda.approve(address(fresh), nvdaAmount);
+        fresh.deposit(cash);
+        fresh.depositToken(address(nvda), nvdaAmount);
+        vm.stopPrank();
+
+        assertEq(fresh.principal(), cash + nvdaAmount * 200, "principal");
     }
 
     function _installConfigurableRouter() internal returns (MockConfigurableSwapRouter configurable) {

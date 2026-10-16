@@ -470,8 +470,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         if (usdcOut == 0) revert EmptyBalance();
         if (usdcOut < minUsdcOut) revert InsufficientProceeds();
 
-        principal = 0;
-
+        _reducePrincipal(address(asset), usdcOut);
         asset.safeTransfer(owner(), usdcOut);
 
         emit Withdraw(usdcOut, sold);
