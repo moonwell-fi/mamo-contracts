@@ -356,12 +356,12 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
                 continue;
             }
 
-            uint256 balance = IERC20(tokens[i]).balanceOf(address(this));
-            if (balance == 0) {
+            (bool read, uint256 balance) = _tryBalance(tokens[i]);
+            if (read && balance == 0) {
                 continue;
             }
 
-            (bool priced, uint256 value) = _tryValue(checker, tokens[i], balance);
+            (bool priced, uint256 value) = read ? _tryValue(checker, tokens[i], balance) : (false, 0);
             if (!priced) {
                 complete = false;
                 continue;
@@ -534,7 +534,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 count;
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            if (IERC20(tokens[i]).balanceOf(address(this)) > 0) {
+            if (_balanceOrZero(tokens[i]) > 0) {
                 count++;
             }
         }
@@ -543,7 +543,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
         uint256 next;
 
         for (uint256 i = 0; i < tokens.length; i++) {
-            if (IERC20(tokens[i]).balanceOf(address(this)) > 0) {
+            if (_balanceOrZero(tokens[i]) > 0) {
                 held[next++] = tokens[i];
             }
         }
@@ -740,22 +740,28 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     /// @dev A held balance that cannot be valued right now is still held, so it does not stop the fee clock
+    /// @dev A Halted holding is outside the value the fee is charged on, so it does not hold the clock either
     function _holdsNothing() internal view returns (bool) {
         if (asset.balanceOf(address(this)) > 0) return false;
 
         address[] memory tokens = stockRegistry.allTokens();
         for (uint256 i = 0; i < tokens.length; i++) {
+            if (stockRegistry.tokenConfig(tokens[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
             if (_balanceOrZero(tokens[i]) > 0) return false;
         }
 
         return true;
     }
 
-    function _balanceOrZero(address token) internal view returns (uint256) {
-        try IERC20(token).balanceOf(address(this)) returns (uint256 balance) {
-            return balance;
+    function _balanceOrZero(address token) internal view returns (uint256 balance) {
+        (, balance) = _tryBalance(token);
+    }
+
+    function _tryBalance(address token) internal view returns (bool read, uint256 balance) {
+        try IERC20(token).balanceOf(address(this)) returns (uint256 held) {
+            return (true, held);
         } catch {
-            return 0;
+            return (false, 0);
         }
     }
 
@@ -822,8 +828,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
 
         for (uint256 i = 0; i < listed.length; i++) {
             if (stockRegistry.tokenConfig(listed[i]).status == IStockAccountRegistry.TokenStatus.Halted) continue;
-            uint256 balance = IERC20(listed[i]).balanceOf(address(this));
-            if (balance == 0) continue;
+            (bool read, uint256 balance) = _tryBalance(listed[i]);
+            if (!read || balance == 0) continue;
 
             // A balance too small to clear the pool's rounding stays for the in-kind exit
             (bool priced, uint256 value) = _tryValue(checker, listed[i], balance);

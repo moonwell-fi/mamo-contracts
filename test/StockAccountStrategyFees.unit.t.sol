@@ -700,6 +700,19 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         );
     }
 
+    function testAnAccountHoldingOnlyAHaltedTokenIsNotChargedForTheHaltedPeriod() public {
+        StockAccountStrategy bare = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
+        nvda.mint(address(bare), 10e18);
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.Halted);
+
+        vm.warp(startTime + 30 days);
+        bare.payFees(address(usdc));
+        assertEq(bare.lastFeePaid(), startTime + 30 days, "nothing valued, so the clock catches up");
+
+        _setStatus(address(nvda), IStockAccountRegistry.TokenStatus.Active);
+        assertEq(bare.feeDue(), 0, "no fee on the period the token was halted");
+    }
+
     function testADepositDoesNotForgiveTheFeeOnAHoldingThatCannotBePriced() public {
         StockAccountStrategy bare = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
         nvda.mint(address(bare), 10e18);
