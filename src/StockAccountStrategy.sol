@@ -762,6 +762,8 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     }
 
     function _tryBalance(address token) internal view returns (bool read, uint256 balance) {
+        // The call's code check runs in this frame, where try cannot catch it
+        if (token.code.length == 0) return (false, 0);
         try IERC20(token).balanceOf(address(this)) returns (uint256 held) {
             return (true, held);
         } catch {

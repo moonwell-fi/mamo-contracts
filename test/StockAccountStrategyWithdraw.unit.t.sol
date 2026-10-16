@@ -338,6 +338,19 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.principal(), 0, "the in-kind exit completes");
     }
 
+    function testAListedAddressWithNoCodeDoesNotBlockTheExits() public {
+        _listWithPool(makeAddr("codeless"));
+
+        assertEq(strategy.getNAV(), 4_500e18, "valued without the codeless listing");
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+        assertEq(usdc.balanceOf(user), 4_500e18, "user asset");
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+    }
+
     function testATinyShortfallSellsOnlyTheLargestLegAtTheMinimumValue() public {
         _withdraw(500e18 + 1, 100);
 
