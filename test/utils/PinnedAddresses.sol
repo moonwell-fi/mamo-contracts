@@ -20,6 +20,8 @@ library PinnedAddresses {
 
     /// @dev FPS requires code at every contract entry, so entries deployed after the pin borrow a byte.
     ///      Repay it once the book is built, since those can be a deployer's next CREATE addresses.
+    ///      It also refuses code at an EOA entry, which an EIP-7702 delegation leaves behind, so that
+    ///      code is cleared and stays cleared: the tests use the deployer as a plain sender.
     function lend(string memory folder) internal returns (address[] memory lent) {
         Addresses.FileAddresses[] memory book = abi.decode(
             vm.parseJson(vm.readFile(string.concat(folder, "/", vm.toString(block.chainid), ".json"))),
@@ -32,6 +34,8 @@ library PinnedAddresses {
             if (book[i].isContract && book[i].addr.code.length == 0) {
                 vm.etch(book[i].addr, hex"00");
                 lent[count++] = book[i].addr;
+            } else if (!book[i].isContract && book[i].addr.code.length != 0) {
+                vm.etch(book[i].addr, "");
             }
         }
 
