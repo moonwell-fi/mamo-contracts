@@ -274,17 +274,23 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         vm.expectEmit(address(strategy));
         emit MamoStakingStrategyV2.MamoHeld(10_000e18);
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.Compounded(0); // nothing staked, so an indexer summing Compounded stays right
         vm.prank(backend);
         strategy.compound(block.timestamp + 10 minutes);
 
         vm.expectEmit(address(strategy));
         emit MamoStakingStrategyV2.MamoHeld(10_000e18);
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.Reinvested(0);
         vm.prank(backend);
         strategy.reinvest(_destinations(address(0), address(0)));
         assertEq(mamo.balanceOf(address(strategy)), 10_000e18, "held on the account");
 
         vm.prank(admin);
         multiRewards.setPaused(false);
+        vm.expectEmit(address(strategy));
+        emit MamoStakingStrategyV2.Compounded(10_000e18); // the held MAMO is reported once, when it is staked
         vm.prank(backend);
         strategy.compound(block.timestamp + 10 minutes);
         assertEq(multiRewards.balanceOf(address(strategy)), 1e18 + 10_000e18, "staked by the next compound");

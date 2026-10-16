@@ -70,7 +70,9 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     event ReinvestRewardTokenHeld(address indexed rewardToken, uint256 amount);
     event CompoundRewardTokenHeld(address indexed rewardToken, uint256 amount);
     event MamoHeld(uint256 amount);
+    /// @notice MAMO staked by compound; what stayed on the account while MultiRewards was paused is in MamoHeld
     event Compounded(uint256 mamoAmount);
+    /// @notice MAMO staked by reinvest; what stayed on the account while MultiRewards was paused is in MamoHeld
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event StakingRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
@@ -446,11 +448,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             }
         }
 
-        // Stake all MAMO
-        uint256 totalMamo = mamoToken.balanceOf(address(this));
-        _restakeMamo(totalMamo);
-
-        emit Compounded(totalMamo);
+        // Stake all MAMO and report what was staked; MAMO held while paused is reported by MamoHeld instead
+        emit Compounded(_restakeMamo(mamoToken.balanceOf(address(this))));
     }
 
     /**
@@ -465,10 +464,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
         require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
 
-        uint256 mamoBalance = mamoToken.balanceOf(address(this));
-
-        // Stake MAMO
-        _restakeMamo(mamoBalance);
+        // Stake MAMO; Reinvested reports what was staked, MamoHeld what stayed on the account
+        uint256 mamoStaked = _restakeMamo(mamoToken.balanceOf(address(this)));
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
@@ -510,7 +507,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             }
         }
 
-        emit Reinvested(mamoBalance);
+        emit Reinvested(mamoStaked);
     }
 
     /// @notice The token a strategy deposits, or zero when it has none
@@ -643,11 +640,13 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /// @notice Stakes for compound and reinvest, holding the MAMO while MultiRewards is paused and refuses stake
-    function _restakeMamo(uint256 amount) internal {
+    /// @return staked The amount staked, zero when the MAMO was held
+    function _restakeMamo(uint256 amount) internal returns (uint256 staked) {
         if (amount != 0 && multiRewards.paused()) {
             emit MamoHeld(amount);
-            return;
+            return 0;
         }
         _stakeMamo(amount);
+        return amount;
     }
 }
