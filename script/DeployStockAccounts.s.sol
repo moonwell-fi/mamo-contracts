@@ -11,6 +11,7 @@ import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactor
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
@@ -59,9 +60,8 @@ contract DeployStockAccounts is Script {
         calldataMode = keccak256(bytes(adminMode)) == keccak256(bytes("calldata"));
         require(calldataMode || keccak256(bytes(adminMode)) == keccak256(bytes("impersonate")), "Unknown ADMIN_MODE");
 
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesPath, chainIds);
+        // Clears the deployer's EIP-7702 delegation, which FPS reads as a contract, in simulation only
+        addresses = PinnedAddresses.load(addressesPath);
         configLoader = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json"));
         config = configLoader.getConfig();
 

@@ -6,7 +6,9 @@ import {StockAccountStrategyFactory} from "@contracts/StockAccountStrategyFactor
 import {Script} from "@forge-std/Script.sol";
 import {console} from "@forge-std/console.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
@@ -30,9 +32,8 @@ contract StockAccountsSmoke is Script {
     function run() external {
         string memory addressesPath = vm.envOr("ADDRESSES_PATH", string("./addresses"));
 
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        Addresses addresses = new Addresses(addressesPath, chainIds);
+        // Clears the deployer's EIP-7702 delegation, which FPS reads as a contract, in simulation only
+        Addresses addresses = PinnedAddresses.load(addressesPath);
 
         address user = vm.envOr("TEST_USER", addresses.getAddress("DEPLOYER_EOA"));
         uint256 depositAmount = vm.envOr("SMOKE_DEPOSIT", uint256(1_000e6));
