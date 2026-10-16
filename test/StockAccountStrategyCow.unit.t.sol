@@ -178,7 +178,7 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
             ),
             "document carries the payFees call for the fee token"
         );
-        assertTrue(vm.contains(document, '"gasLimit":"2000000"'), "document carries the hook gas limit");
+        assertTrue(vm.contains(document, '"gasLimit":"4200000"'), "document carries the hook gas limit");
     }
 
     function testAppDataDocumentDiffersPerFeeToken() public view {

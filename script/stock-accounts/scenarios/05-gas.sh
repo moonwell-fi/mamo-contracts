@@ -22,7 +22,7 @@ ORDER_SIZE=25000000
 SIZES="2 4 10"
 DAY=86400
 # StockAccountStrategy.HOOK_GAS_LIMIT, the gas every appData document gives its post-hook.
-HOOK_GAS_LIMIT=2000000
+HOOK_GAS_LIMIT=4200000
 
 USDC_TOPIC=0x000000000000000000000000$(lc "${USDC#0x}")
 

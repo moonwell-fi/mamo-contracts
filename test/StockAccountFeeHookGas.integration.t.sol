@@ -183,6 +183,7 @@ contract StockAccountFeeHookGasTest is Test {
         console.log("hook limit the cap needs for a 20% margin", atCap * 10 / 8);
 
         assertLe(atListing, limit * 8 / 10, "019's listing, all held, within 80% of the hook limit");
+        assertLe(atCap, limit * 8 / 10, "the listing cap, all held, within 80% of the hook limit");
     }
 
     /// @dev The fit is taken at `listed`; each further listed and held token adds both terms
