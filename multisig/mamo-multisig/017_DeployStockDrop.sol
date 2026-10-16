@@ -216,6 +216,13 @@ contract DeployStockDrop is MultisigProposal {
             ),
             "Deprecated staking factory should still hold BACKEND_ROLE"
         );
+        // Paired with validate(): the role churn below must not move BACKEND_ROLE index 0, which every
+        // un-upgraded strategy proxy still reads as the backend (Sherlock #41, same pair as proposal 011)
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 should be the strategy multicall before this proposal"
+        );
 
         // setStakingRegistry's admin arm needs the same admin on both registries
         MamoStakingRegistryV2 registry = MamoStakingRegistryV2(addresses.getAddress(STAKING_REGISTRY_KEY));
@@ -323,6 +330,11 @@ contract DeployStockDrop is MultisigProposal {
         assertFalse(
             mamoRegistry.hasRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED")),
             "Deprecated staking factory should lose BACKEND_ROLE"
+        );
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 must not move"
         );
         assertEq(
             StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).feeRecipient(),
