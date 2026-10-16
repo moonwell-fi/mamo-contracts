@@ -253,7 +253,9 @@ owners of the v1 accounts close them with `withdrawAllInKind`; any left open can
 and the stock pools, so 017 against the v1 keys would price every staking compound through the
 paused system. #113 reads the V2 keys.
 
-**v2 changes both cash exits.** They are `withdrawAll(maxSlippageBps, minUsdcOut, deadline)` and
+**v2 changes both cash exits.** `withdrawAll` reduces principal by what it ships rather than zeroing
+it, so a sweep that sells below the reference price can leave residual principal on an empty account;
+`withdrawAllInKind` on the empty account clears it. They are `withdrawAll(maxSlippageBps, minUsdcOut, deadline)` and
 `withdraw(usdcAmount, maxSlippageBps, tokens, maxAmounts, deadline)`. The frontend sizes `minUsdcOut`
 and `maxAmounts` from an independent quote, the Chainlink equity feed in market hours, plus the
 slippage tolerance. Off-hours it falls back to `previewWithdraw`, and then adds headroom of at least
@@ -501,7 +503,9 @@ on. That puts a status flip within the admin's existing trust, since the same ad
 **While a holding cannot be priced, the fee is deferred.** If any held token that is not Halted fails
 to price (the sequencer is down or in its grace hour, or a pool broke), no fee is paid, the clock does
 not move, and orders are refused with `ValuationIncomplete`. The whole period settles once everything
-prices again. See [A listed token stops pricing](#a-listed-token-stops-pricing).
+prices again. An owner who empties the account in kind before then forgoes the fee accrued since the
+last payment (about 0.003% of the account per day at 1%): the next payment finds an empty account and
+lets the clock catch up. See [A listed token stops pricing](#a-listed-token-stops-pricing).
 
 Three things call it:
 

@@ -12,7 +12,8 @@ orders are refused, `withdraw` pays only from idle cash, `withdrawAll` pays out 
 stocks in the account, `withdrawToken` and `withdrawAllInKind` work as usual, and every listing,
 `setPriceChecker` and `setTwapWindow` probe fails until the grace period ends. An account holding a
 PoolTwap stock that is not Halted defers its fee for that time: no payment, the clock does not move,
-and the whole period settles once everything prices again. In-kind exits pay the fee from every holding other than the token leaving, the asset
+and the whole period settles once everything prices again (an owner who empties the account in kind
+before then forgoes the fee accrued since the last payment). In-kind exits pay the fee from every holding other than the token leaving, the asset
 included, so a USDC in-kind exit pays in stock; `withdraw` and `withdrawAll` are the exits that pay in
 USDC.
 
