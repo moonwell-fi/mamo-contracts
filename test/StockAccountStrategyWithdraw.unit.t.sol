@@ -290,6 +290,20 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         strategy.withdrawAllInKind();
     }
 
+    function testAnActiveTokenWhoseBalanceReadRevertsDoesNotBlockTheExits() public {
+        _listWithPool(address(new RevertingBalanceToken()));
+
+        assertEq(strategy.getNAV(), 4_500e18, "valued without the unreadable holding");
+        assertEq(strategy.heldTokens().length, 2, "held tokens still listed");
+
+        vm.prank(user);
+        strategy.withdrawAll(100, 0, block.timestamp);
+
+        vm.prank(user);
+        strategy.withdrawAllInKind();
+        assertEq(strategy.principal(), 0, "the in-kind exit completes");
+    }
+
     function testATinyShortfallSellsOnlyTheLargestLegAtTheMinimumValue() public {
         _withdraw(500e18 + 1, 100);
 
