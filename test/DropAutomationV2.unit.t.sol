@@ -28,11 +28,28 @@ contract MockQuoter {
 }
 
 contract MockGauge {
-    address public stakingToken = address(1);
+    MockERC20Decimals public immutable stakingToken;
     uint256 public claims;
+    bool public revertOnGetReward;
+    bool public registeredOnClaim;
+
+    constructor(MockERC20Decimals stakingToken_) {
+        stakingToken = stakingToken_;
+    }
+
+    function setRevertOnGetReward(bool value) external {
+        revertOnGetReward = value;
+    }
 
     function getReward(address) external {
+        require(!revertOnGetReward, "getReward");
         claims++;
+        registeredOnClaim = DropAutomationV2(msg.sender).isGauge(address(this));
+    }
+
+    /// @dev Returns one unit less than asked
+    function withdraw(uint256 amount) external {
+        stakingToken.mint(msg.sender, amount - 1);
     }
 }
 
@@ -109,6 +126,22 @@ contract DropAutomationV2UnitTest is Test {
         (,, uint256 periodFinish, uint256 rate,,) = multiRewards.rewardData(address(stock));
         assertEq(periodFinish, block.timestamp + DURATION);
         assertEq(rate, (topUp + 4 days * firstRate) / DURATION, "the leftover rolls into the new period");
+    }
+
+    function test_createDrop_topUpTrimsTheSumWithTheLeftover() public {
+        stock.mint(address(drop), 7e8);
+        _createDrop();
+
+        skip(3 days);
+        stock.mint(address(drop), 7e8);
+        (,, uint256 periodFinish, uint256 rate,,) = multiRewards.rewardData(address(stock));
+        uint256 leftover = (periodFinish - block.timestamp) * rate;
+        uint256 before = stock.balanceOf(address(multiRewards));
+        _createDrop();
+        uint256 notified = stock.balanceOf(address(multiRewards)) - before;
+
+        assertEq((notified + leftover) % DURATION, 0);
+        assertEq(multiRewards.getRewardForDuration(address(stock)), notified + leftover, "no dust left unstreamed");
     }
 
     function test_createDrop_failingTokenDoesNotBlockTheRest() public {
@@ -189,7 +222,7 @@ contract DropAutomationV2UnitTest is Test {
     }
 
     function test_gauges() public {
-        MockGauge gauge = new MockGauge();
+        MockGauge gauge = new MockGauge(new MockERC20Decimals("LP", 18));
 
         vm.prank(owner);
         drop.addGauge(address(gauge));
@@ -200,6 +233,73 @@ contract DropAutomationV2UnitTest is Test {
         vm.prank(owner);
         drop.removeGauge(address(gauge));
         assertEq(drop.getGauges().length, 0);
+    }
+
+    function test_removeGauge_claimsFirst() public {
+        MockGauge gauge = new MockGauge(new MockERC20Decimals("LP", 18));
+        MockGauge broken = new MockGauge(new MockERC20Decimals("LP", 18));
+        broken.setRevertOnGetReward(true);
+
+        vm.startPrank(owner);
+        drop.addGauge(address(gauge));
+        drop.addGauge(address(broken));
+        drop.removeGauge(address(gauge));
+        drop.removeGauge(address(broken));
+        vm.stopPrank();
+
+        assertEq(gauge.claims(), 1, "accrued rewards claimed on removal");
+        assertTrue(gauge.registeredOnClaim(), "claimed before the gauge was deregistered");
+        assertEq(drop.getGauges().length, 0, "a reverting gauge is still removed");
+    }
+
+    function test_removeGauge_codelessGauge() public {
+        MockGauge gauge = new MockGauge(new MockERC20Decimals("LP", 18));
+
+        vm.prank(owner);
+        drop.addGauge(address(gauge));
+        vm.etch(address(gauge), "");
+
+        vm.prank(owner);
+        drop.removeGauge(address(gauge));
+        assertEq(drop.getGauges().length, 0);
+        assertFalse(drop.isGauge(address(gauge)));
+    }
+
+    function test_withdrawGauge_sendsWhatTheGaugeReturned() public {
+        MockERC20Decimals lp = new MockERC20Decimals("LP", 18);
+        MockGauge gauge = new MockGauge(lp);
+        lp.mint(address(drop), 5);
+        address recipient = makeAddr("recipient");
+
+        vm.expectEmit(address(drop));
+        emit DropAutomationV2.GaugeWithdrawn(address(gauge), recipient, 99);
+        vm.prank(owner);
+        drop.withdrawGauge(address(gauge), 100, recipient);
+
+        assertEq(lp.balanceOf(recipient), 99);
+        assertEq(lp.balanceOf(address(drop)), 5, "other LP held is untouched");
+    }
+
+    function test_addRewardToken_rejectsANonToken() public {
+        address eoa = makeAddr("eoa");
+
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.NotAToken.selector, eoa));
+        drop.addRewardToken(eoa);
+        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.NotAToken.selector, address(router)));
+        drop.addRewardToken(address(router));
+        vm.stopPrank();
+    }
+
+    function test_addRewardToken_capsTheList() public {
+        vm.startPrank(owner);
+        for (uint256 i = drop.getRewardTokens().length; i < 25; i++) {
+            drop.addRewardToken(address(new MockERC20Decimals("R", 18)));
+        }
+        address extra = address(new MockERC20Decimals("R", 18));
+        vm.expectRevert(DropAutomationV2.TooManyRewardTokens.selector);
+        drop.addRewardToken(extra);
+        vm.stopPrank();
     }
 
     function test_accessControl() public {

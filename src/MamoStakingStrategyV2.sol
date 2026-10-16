@@ -12,6 +12,7 @@ import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
@@ -68,7 +69,10 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     event ReinvestRewardTokenProcessed(address indexed rewardToken, uint256 amount);
     event ReinvestRewardTokenHeld(address indexed rewardToken, uint256 amount);
     event CompoundRewardTokenHeld(address indexed rewardToken, uint256 amount);
+    event MamoHeld(uint256 amount);
+    /// @notice MAMO staked by compound; what stayed on the account while MultiRewards was paused is in MamoHeld
     event Compounded(uint256 mamoAmount);
+    /// @notice MAMO staked by reinvest; what stayed on the account while MultiRewards was paused is in MamoHeld
     event Reinvested(uint256 mamoAmount);
     event AccountSlippageUpdated(uint256 oldSlippageInBps, uint256 newSlippageInBps);
     event StakingRegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
@@ -117,6 +121,9 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         require(params.mamoToken != address(0), "Invalid mamoToken address");
         require(params.strategyTypeId != 0, "Strategy type id not set");
         require(params.owner != address(0), "Invalid owner address");
+
+        _probeStakingRegistry(params.stakingRegistry, params.mamoToken);
+        require(IMultiRewards(params.multiRewards).stakingToken() == params.mamoToken, "MultiRewards token mismatch");
 
         __BaseStrategy_init(params.mamoStrategyRegistry, params.strategyTypeId, params.owner);
 
@@ -190,54 +197,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
         require(newStakingRegistry != address(0), "Invalid staking registry");
         require(newStakingRegistry != address(currentRegistry), "Staking registry already set");
-        require(newStakingRegistry.code.length != 0, "Staking registry not a contract");
-
-        // Probe the WHOLE surface this strategy reads at runtime before committing, not just the two
-        // selectors that caused the last incident. A contract implementing only dexRouter() and
-        // slippagePriceChecker() passes a narrow probe and still bricks the owner's own exit:
-        // withdrawAll()/withdrawRewards() revert on a missing getRewardTokens(), and since
-        // multiRewards.getReward() is only ever called from registry-reading functions, unclaimed
-        // rewards are stranded. This needs no malice — an honest v3 registry that renames or drops any
-        // of these passes a two-selector probe and bricks the fleet.
-        //
-        // Raw staticcalls with an explicit returndata check throughout, because a typed call against a
-        // contract missing the selector reverts in THIS frame with no data and is indistinguishable
-        // from an internal bug.
-        require(_readsAddress(newStakingRegistry, "slippagePriceChecker()"), "Staking registry has no price checker");
-        require(_readsAddress(newStakingRegistry, "dexRouter()"), "Staking registry has no DEX router");
-        require(_readsWord(newStakingRegistry, "BACKEND_ROLE()"), "Staking registry has no backend role");
-        require(_readsWord(newStakingRegistry, "DEFAULT_ADMIN_ROLE()"), "Staking registry has no admin role");
-        require(_readsWord(newStakingRegistry, "paused()"), "Staking registry has no pause state");
-        require(_readsWord(newStakingRegistry, "MAX_SLIPPAGE_IN_BPS()"), "Staking registry has no slippage cap");
-
-        // hasRole is probed UNCONDITIONALLY, not merely as part of the admin arm below: compound()
-        // gates on it every call, so a registry missing it bricks compounding even on the owner arm.
-        // Any (role, account) pair exercises the selector; the ANSWER is irrelevant here.
-        bytes memory hasRoleCall = abi.encodeWithSignature("hasRole(bytes32,address)", bytes32(0), address(0));
-        (bool okHasRole, bytes memory retHasRole) = newStakingRegistry.staticcall(hasRoleCall);
-        require(okHasRole && retHasRole.length == 32, "Staking registry has no hasRole");
-
-        // getRewardTokens() returns a dynamic array: ABI head is a 32-byte offset plus a 32-byte
-        // length, so anything shorter than 64 bytes cannot be a well-formed encoding of one.
-        (bool okRewards, bytes memory retRewards) =
-            newStakingRegistry.staticcall(abi.encodeWithSignature("getRewardTokens()"));
-        require(okRewards && retRewards.length >= 64, "Staking registry has no reward tokens");
-
-        // The MAMO token is what this strategy stakes; a registry disagreeing about it would price
-        // and route swaps for a different asset than the one held.
-        (bool ok, bytes memory ret) = newStakingRegistry.staticcall(abi.encodeWithSignature("mamoToken()"));
-        require(ok && ret.length == 32, "Staking registry has no MAMO token");
-        require(abi.decode(ret, (address)) == address(mamoToken), "Staking registry MAMO token mismatch");
-
-        // getAccountSlippage() falls back to the registry's default whenever the owner never set one —
-        // the common case — and compound() spends it as `(10000 - slippage)`. An unbounded default is
-        // therefore a zero minimum-out (or, above 10000, an underflow that DoSes compound outright)
-        // reachable with the honest price checker and honest router still in place, i.e. with no
-        // attacker-authored contract on chain for monitoring to notice.
-        (bool okSlip, bytes memory retSlip) =
-            newStakingRegistry.staticcall(abi.encodeWithSignature("defaultSlippageInBps()"));
-        require(okSlip && retSlip.length == 32, "Staking registry has no default slippage");
-        require(abi.decode(retSlip, (uint256)) <= MAX_REGISTRY_SLIPPAGE_IN_BPS, "Staking registry slippage too high");
+        _probeStakingRegistry(newStakingRegistry, address(mamoToken));
 
         // On the ADMIN arm only, require the caller still administers the destination. This costs an
         // honest migration nothing (whoever prepares the new registry holds its admin role) and makes
@@ -251,6 +211,56 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         stakingRegistry = MamoStakingRegistry(newStakingRegistry);
 
         emit StakingRegistryUpdated(address(currentRegistry), newStakingRegistry);
+    }
+
+    /// @notice Reverts unless `candidate` answers the whole registry surface this strategy reads, for `expectedMamo`
+    function _probeStakingRegistry(address candidate, address expectedMamo) private view {
+        require(candidate.code.length != 0, "Staking registry not a contract");
+
+        // Probe the WHOLE surface this strategy reads at runtime before committing, not just the two
+        // selectors that caused the last incident. A contract implementing only dexRouter() and
+        // slippagePriceChecker() passes a narrow probe and still bricks the owner's own exit:
+        // withdrawAll()/withdrawRewards() revert on a missing getRewardTokens(), and since
+        // multiRewards.getReward() is only ever called from registry-reading functions, unclaimed
+        // rewards are stranded. This needs no malice — an honest v3 registry that renames or drops any
+        // of these passes a two-selector probe and bricks the fleet.
+        //
+        // Raw staticcalls with an explicit returndata check throughout, because a typed call against a
+        // contract missing the selector reverts in THIS frame with no data and is indistinguishable
+        // from an internal bug.
+        require(_readsAddress(candidate, "slippagePriceChecker()"), "Staking registry has no price checker");
+        require(_readsAddress(candidate, "dexRouter()"), "Staking registry has no DEX router");
+        require(_readsWord(candidate, "BACKEND_ROLE()"), "Staking registry has no backend role");
+        require(_readsWord(candidate, "DEFAULT_ADMIN_ROLE()"), "Staking registry has no admin role");
+        require(_readsWord(candidate, "paused()"), "Staking registry has no pause state");
+        require(_readsWord(candidate, "MAX_SLIPPAGE_IN_BPS()"), "Staking registry has no slippage cap");
+
+        // hasRole is probed UNCONDITIONALLY, not merely as part of the admin arm: compound()
+        // gates on it every call, so a registry missing it bricks compounding even on the owner arm.
+        // Any (role, account) pair exercises the selector; the ANSWER is irrelevant here.
+        bytes memory hasRoleCall = abi.encodeWithSignature("hasRole(bytes32,address)", bytes32(0), address(0));
+        (bool okHasRole, bytes memory retHasRole) = candidate.staticcall(hasRoleCall);
+        require(okHasRole && retHasRole.length == 32, "Staking registry has no hasRole");
+
+        // getRewardTokens() returns a dynamic array: ABI head is a 32-byte offset plus a 32-byte
+        // length, so anything shorter than 64 bytes cannot be a well-formed encoding of one.
+        (bool okRewards, bytes memory retRewards) = candidate.staticcall(abi.encodeWithSignature("getRewardTokens()"));
+        require(okRewards && retRewards.length >= 64, "Staking registry has no reward tokens");
+
+        // The MAMO token is what this strategy stakes; a registry disagreeing about it would price
+        // and route swaps for a different asset than the one held.
+        (bool ok, bytes memory ret) = candidate.staticcall(abi.encodeWithSignature("mamoToken()"));
+        require(ok && ret.length == 32, "Staking registry has no MAMO token");
+        require(abi.decode(ret, (address)) == expectedMamo, "Staking registry MAMO token mismatch");
+
+        // getAccountSlippage() falls back to the registry's default whenever the owner never set one —
+        // the common case — and compound() spends it as `(10000 - slippage)`. An unbounded default is
+        // therefore a zero minimum-out (or, above 10000, an underflow that DoSes compound outright)
+        // reachable with the honest price checker and honest router still in place, i.e. with no
+        // attacker-authored contract on chain for monitoring to notice.
+        (bool okSlip, bytes memory retSlip) = candidate.staticcall(abi.encodeWithSignature("defaultSlippageInBps()"));
+        require(okSlip && retSlip.length == 32, "Staking registry has no default slippage");
+        require(abi.decode(retSlip, (uint256)) <= MAX_REGISTRY_SLIPPAGE_IN_BPS, "Staking registry slippage too high");
     }
 
     /**
@@ -398,7 +408,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
-     * @notice Compound all available rewards by converting them to MAMO and restaking
+     * @notice Compound all available rewards by swapping them to MAMO and staking it. A reward whose route fails
+     *         is held (CompoundRewardTokenHeld), and the MAMO is held while MultiRewards is paused (MamoHeld)
      * @dev Claims rewards and then compounds them. Can be called independently.
      * @param deadline Unix timestamp after which the swaps must no longer execute. Taken from the
      *        caller because `block.timestamp + N` computed inside the transaction is tautological:
@@ -438,11 +449,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             }
         }
 
-        // Stake all MAMO
-        uint256 totalMamo = mamoToken.balanceOf(address(this));
-        _stakeMamo(totalMamo);
-
-        emit Compounded(totalMamo);
+        // Stake all MAMO and report what was staked; MAMO held while paused is reported by MamoHeld instead
+        emit Compounded(_restakeMamo(mamoToken.balanceOf(address(this))));
     }
 
     /**
@@ -457,10 +465,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
         require(rewardStrategies.length == rewardTokens.length, "Strategies length mismatch");
 
-        uint256 mamoBalance = mamoToken.balanceOf(address(this));
-
-        // Stake MAMO
-        _stakeMamo(mamoBalance);
+        // Stake MAMO; Reinvested reports what was staked, MamoHeld what stayed on the account
+        uint256 mamoStaked = _restakeMamo(mamoToken.balanceOf(address(this)));
 
         // Process each reward token
         for (uint256 i = 0; i < rewardTokens.length; i++) {
@@ -484,8 +490,12 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             rewardToken.forceApprove(strategyAddress, rewardBalance);
 
             if (_strategyToken(strategyAddress) == address(rewardToken)) {
-                IMamoMultiMarketStrategy(strategyAddress).deposit(rewardBalance);
-                emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
+                try IMamoMultiMarketStrategy(strategyAddress).deposit(rewardBalance) {
+                    emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
+                } catch {
+                    rewardToken.forceApprove(strategyAddress, 0);
+                    emit ReinvestRewardTokenHeld(address(rewardToken), rewardBalance);
+                }
                 continue;
             }
 
@@ -498,7 +508,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             }
         }
 
-        emit Reinvested(mamoBalance);
+        emit Reinvested(mamoStaked);
     }
 
     /// @notice The token a strategy deposits, or zero when it has none
@@ -575,6 +585,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         address token1 = ICLPool(hop.pool).token1();
         require(tokenIn == token0 || tokenIn == token1, "Token not in pool");
         tokenOut = tokenIn == token0 ? token1 : token0;
+        _checkStockHop(hop, tokenIn);
 
         expectedOut = hop.checker.getExpectedOut(expectedIn, tokenIn, tokenOut);
         uint256 amountOutMinimum = (expectedOut * (10000 - slippageInBps)) / 10000;
@@ -601,6 +612,23 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         IERC20(tokenIn).forceApprove(address(hop.router), 0);
     }
 
+    /// @notice Refuses a hop priced by the stock checker unless it sells a listed stock that is not halted, on the pool
+    ///         the stock registry prices it on
+    /// @dev Only the stock checker answers registry(); the Chainlink checker has no such getter
+    function _checkStockHop(MamoStakingRegistry.Hop memory hop, address tokenIn) internal view {
+        (bool ok, bytes memory ret) = address(hop.checker).staticcall(abi.encodeWithSignature("registry()"));
+        if (!ok || ret.length != 32) return;
+
+        IStockAccountRegistry.TokenConfig memory cfg =
+            IStockAccountRegistry(abi.decode(ret, (address))).tokenConfig(tokenIn);
+        require(
+            cfg.status == IStockAccountRegistry.TokenStatus.Active
+                || cfg.status == IStockAccountRegistry.TokenStatus.SellOnly,
+            "Stock not sellable"
+        );
+        require(hop.pool == cfg.pool, "Stock pool mismatch");
+    }
+
     /**
      * @notice Internal function to stake MAMO tokens in MultiRewards
      * @param amount The amount of MAMO to stake
@@ -610,5 +638,16 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
         mamoToken.forceApprove(address(multiRewards), amount);
         multiRewards.stake(amount);
+    }
+
+    /// @notice Stakes for compound and reinvest, holding the MAMO while MultiRewards is paused and refuses stake
+    /// @return staked The amount staked, zero when the MAMO was held
+    function _restakeMamo(uint256 amount) internal returns (uint256 staked) {
+        if (amount != 0 && multiRewards.paused()) {
+            emit MamoHeld(amount);
+            return 0;
+        }
+        _stakeMamo(amount);
+        return amount;
     }
 }

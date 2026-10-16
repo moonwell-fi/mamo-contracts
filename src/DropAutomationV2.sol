@@ -23,6 +23,7 @@ contract DropAutomationV2 is Ownable {
     uint256 internal constant MAX_SLIPPAGE_BPS = 500;
     uint256 internal constant SWAP_DEADLINE_BUFFER = 300;
     int24 internal constant MAMO_CBBTC_TICK_SPACING = 200;
+    uint256 internal constant MAX_REWARD_TOKENS = 25;
 
     /// @notice The MAMO token
     IERC20 public immutable MAMO_TOKEN;
@@ -79,6 +80,8 @@ contract DropAutomationV2 is Ownable {
     error RewardTokenNotSwappable(address token);
     error InsufficientOutput();
     error NothingToDistribute();
+    error NotAToken(address token);
+    error TooManyRewardTokens();
 
     modifier onlyDedicatedMsgSender() {
         if (msg.sender != dedicatedMsgSender) revert NotDedicatedSender();
@@ -229,6 +232,10 @@ contract DropAutomationV2 is Ownable {
     function removeGauge(address gauge) external onlyOwner {
         if (!isGauge[gauge]) revert NotFound(gauge);
 
+        // try/catch does not catch the extcodesize check, so a codeless gauge would be stuck
+        if (gauge.code.length != 0) {
+            try IAerodromeGauge(gauge).getReward(address(this)) {} catch {}
+        }
         _remove(gauges, gauge);
         isGauge[gauge] = false;
 
@@ -244,10 +251,13 @@ contract DropAutomationV2 is Ownable {
     function withdrawGauge(address gauge, uint256 amount, address recipient) external onlyOwner {
         if (recipient == address(0)) revert ZeroAddress();
 
+        IERC20 lp = IERC20(IAerodromeGauge(gauge).stakingToken());
+        uint256 before = lp.balanceOf(address(this));
         IAerodromeGauge(gauge).withdraw(amount);
-        IERC20(IAerodromeGauge(gauge).stakingToken()).safeTransfer(recipient, amount);
+        uint256 received = lp.balanceOf(address(this)) - before;
+        lp.safeTransfer(recipient, received);
 
-        emit GaugeWithdrawn(gauge, recipient, amount);
+        emit GaugeWithdrawn(gauge, recipient, received);
     }
 
     /**
@@ -302,13 +312,14 @@ contract DropAutomationV2 is Ownable {
 
     function _notify(address token) internal returns (bool) {
         uint256 amount = IERC20(token).balanceOf(address(this));
-        (, uint256 duration,,,,) = MULTI_REWARDS.rewardData(token);
+        (, uint256 duration, uint256 periodFinish, uint256 rewardRate,,) = MULTI_REWARDS.rewardData(token);
 
         // Below one unit per second the stream's rate rounds to zero, so the balance waits for the next drop
         if (amount == 0 || amount < duration) return false;
 
-        // The remainder of the division by the duration would never stream, so it is kept for the next drop
-        if (duration != 0) amount -= amount % duration;
+        // MultiRewards divides amount plus the running period's leftover; that sum's remainder is kept back
+        uint256 leftover = block.timestamp < periodFinish ? (periodFinish - block.timestamp) * rewardRate : 0;
+        if (duration != 0) amount -= (amount + leftover) % duration;
 
         try this.notifyReward(token, amount) {
             emit RewardNotified(token, amount);
@@ -377,6 +388,11 @@ contract DropAutomationV2 is Ownable {
     function _addRewardToken(address token) internal {
         if (token == address(0)) revert ZeroAddress();
         if (isRewardToken[token]) revert AlreadyAdded(token);
+        if (rewardTokens.length >= MAX_REWARD_TOKENS) revert TooManyRewardTokens();
+
+        // A token without balanceOf would revert every drop in _notify
+        (bool ok, bytes memory data) = token.staticcall(abi.encodeCall(IERC20.balanceOf, (address(this))));
+        if (!ok || data.length < 32) revert NotAToken(token);
 
         rewardTokens.push(token);
         isRewardToken[token] = true;

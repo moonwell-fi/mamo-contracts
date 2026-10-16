@@ -7,6 +7,7 @@ import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 import {MamoStakingStrategyV2} from "@contracts/MamoStakingStrategyV2.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -26,10 +27,11 @@ import {StockAccountsConfig} from "@script/StockAccountsConfig.sol";
  *           - deploys {DropAutomationV2}, {MamoStakingRegistryV2} (the cbBTC, WETH and USDC pools and
  *             the stock routes to MAMO), the {MamoStakingStrategyV2} implementation and a staking factory for it;
  *           - as the multisig: whitelists the staking implementation under the existing staking type id so
- *             live accounts can upgrade, moves BACKEND_ROLE from the old staking factory to the new one, points the
- *             V2 stock registry's fee recipient at DropAutomationV2, and configures the USDC, cbBTC and WETH -> MAMO
- *             pairs on the Chainlink checker.
- * @dev Runs after mamo-multisig/019, which redeploys the stock accounts system this reads. F-MAMO owns MultiRewards,
+ *             live accounts can upgrade, moves BACKEND_ROLE from the old staking factory to the new one and revokes
+ *             the deprecated factory's, points the V2 stock registry's fee recipient at DropAutomationV2, and
+ *             configures the USDC, cbBTC and WETH -> MAMO pairs on the Chainlink checker.
+ * @dev Runs after mamo-multisig/013, whose sequencer guard the batch requires (its first action reverts on the old
+ *      checker), and mamo-multisig/019, which redeploys the stock accounts system this reads. F-MAMO owns MultiRewards,
  *      DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO proposal (f-mamo/006), and the
  *      in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
  */
@@ -44,6 +46,9 @@ contract DeployStockDrop is MultisigProposal {
     uint256 internal constant STAKING_TYPE_ID = 3;
 
     uint256 internal constant DEFAULT_SLIPPAGE_IN_BPS = 100;
+
+    /// @notice Same as proposal 013
+    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
 
     /// @dev Above the nominal 86,400: the USDC/USD node fires late most cycles (see 016)
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
@@ -80,7 +85,7 @@ contract DeployStockDrop is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
+        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), require the sequencer-guarded price checker (proposal 013), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory from the old and deprecated ones, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
     }
 
     // ─── deploy ──────────────────────────────────────────────────────────────────────────────────
@@ -193,12 +198,30 @@ contract DeployStockDrop is MultisigProposal {
             multisig,
             "Price checker owner should be MAMO_MULTISIG"
         );
+        assertEq(
+            SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY")).sequencerUptimeFeed(),
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+            "013 should have enabled the sequencer guard"
+        );
 
         // Live accounts upgrade from the implementation type id 3 points at today
         assertEq(
             mamoRegistry.latestImplementationById(STAKING_TYPE_ID),
             addresses.getAddress("MAMO_STAKING_STRATEGY"),
             "Staking type id should point at the live staking implementation"
+        );
+        assertTrue(
+            mamoRegistry.hasRole(
+                mamoRegistry.BACKEND_ROLE(), addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED")
+            ),
+            "Deprecated staking factory should still hold BACKEND_ROLE"
+        );
+        // Paired with validate(): the role churn below must not move BACKEND_ROLE index 0, which every
+        // un-upgraded strategy proxy still reads as the backend (Sherlock #41, same pair as proposal 011)
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 should be the strategy multicall before this proposal"
         );
 
         // setStakingRegistry's admin arm needs the same admin on both registries
@@ -222,17 +245,23 @@ contract DeployStockDrop is MultisigProposal {
         MamoStrategyRegistry mamoRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         bytes32 backendRole = mamoRegistry.BACKEND_ROLE();
 
-        // 1. The upgrade target for live staking accounts, under the existing type id
+        // 1. Reverts unless 013's checker is live, so the pairs below are never priced without the sequencer guard
+        SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY")).setSequencerUptimeFeed(
+            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), SEQUENCER_GRACE_PERIOD
+        );
+
+        // 2. The upgrade target for live staking accounts, under the existing type id
         mamoRegistry.whitelistImplementation(addresses.getAddress(STAKING_IMPL_KEY), STAKING_TYPE_ID);
 
-        // 2. New staking accounts come only from the new factory
+        // 3. New staking accounts come only from the new factory
         mamoRegistry.grantRole(backendRole, addresses.getAddress(STAKING_FACTORY_KEY));
         mamoRegistry.revokeRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"));
+        mamoRegistry.revokeRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED"));
 
-        // 3. Stock account fees fund the drop
+        // 4. Stock account fees fund the drop
         StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).setFeeRecipient(addresses.getAddress(DROP_KEY));
 
-        // 4. The pairs compounding prices against
+        // 5. The pairs compounding prices against
         _configurePriceChecker();
     }
 
@@ -297,6 +326,15 @@ contract DeployStockDrop is MultisigProposal {
         assertFalse(
             mamoRegistry.hasRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY")),
             "Old staking factory should lose BACKEND_ROLE"
+        );
+        assertFalse(
+            mamoRegistry.hasRole(backendRole, addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED")),
+            "Deprecated staking factory should lose BACKEND_ROLE"
+        );
+        assertEq(
+            mamoRegistry.getBackendAddress(),
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            "BACKEND_ROLE index 0 must not move"
         );
         assertEq(
             StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).feeRecipient(),
@@ -395,6 +433,12 @@ contract DeployStockDrop is MultisigProposal {
     function _validatePriceChecker() internal view {
         ISlippagePriceChecker checker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         address mamo = addresses.getAddress("MAMO");
+
+        SlippagePriceChecker guarded = SlippagePriceChecker(address(checker));
+        assertEq(
+            guarded.sequencerUptimeFeed(), addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), "Sequencer feed"
+        );
+        assertEq(guarded.sequencerGracePeriod(), SEQUENCER_GRACE_PERIOD, "Sequencer grace period");
 
         assertGt(checker.getExpectedOut(1e6, addresses.getAddress("USDC"), mamo), 0, "USDC should price in MAMO");
         assertGt(checker.getExpectedOut(1e8, addresses.getAddress("cbBTC"), mamo), 0, "cbBTC should price in MAMO");

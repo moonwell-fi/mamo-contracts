@@ -9,6 +9,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 /**
@@ -103,6 +104,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         require(_dexRouter != address(0), "Invalid DEX router address");
         require(_quoter != address(0), "Invalid quoter address");
         require(_slippagePriceChecker != address(0), "Invalid slippage price checker address");
+        _requireSlippagePriceChecker(_slippagePriceChecker);
         require(_defaultSlippageInBps <= MAX_SLIPPAGE_IN_BPS, "Default slippage too high");
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -144,6 +146,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
             poolCodeSize := extcodesize(pool)
         }
         require(poolCodeSize > 0, "Pool must be a contract");
+        hopTokenOut(pool, token);
 
         rewardTokenToIndex[token] = rewardTokens.length;
         rewardTokens.push(RewardToken({token: token, pool: pool}));
@@ -198,6 +201,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
             codeSize := extcodesize(newPool)
         }
         require(codeSize > 0, "Pool must be a contract");
+        hopTokenOut(newPool, token);
 
         rewardTokens[index].pool = newPool;
 
@@ -217,7 +221,16 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         delete routes[token];
         address tokenIn = token;
         for (uint256 i = 0; i < route.length; i++) {
-            tokenIn = hopTokenOut(route[i].pool, tokenIn);
+            address hopIn = tokenIn;
+            tokenIn = hopTokenOut(route[i].pool, hopIn);
+            // A hop's own checker gets the global checker's probe (H48); its own router only has to be a contract
+            if (address(route[i].router) != address(0)) {
+                require(address(route[i].router).code.length > 0, "Router must be a contract");
+            }
+            if (address(route[i].checker) != address(0)) {
+                _requireSlippagePriceChecker(address(route[i].checker));
+                _requireListedStockIfStockChecker(address(route[i].checker), hopIn);
+            }
             routes[token].push(route[i]);
         }
         require(route.length == 0 || tokenIn == mamoToken, "Route must end in MAMO");
@@ -281,6 +294,7 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
     {
         require(address(_slippagePriceChecker) != address(0), "Invalid slippage price checker");
         require(address(_slippagePriceChecker) != address(slippagePriceChecker), "Slippage price checker already set");
+        _requireSlippagePriceChecker(address(_slippagePriceChecker));
 
         address oldChecker = address(slippagePriceChecker);
         slippagePriceChecker = _slippagePriceChecker;
@@ -362,6 +376,24 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         address token1 = ICLPool(pool).token1();
         require(tokenIn == token0 || tokenIn == token1, "Token not in pool");
         return tokenIn == token0 ? token1 : token0;
+    }
+
+    /// @dev Probes maxTimePriceValid, which a checker answers for any token, unlike getExpectedOut
+    function _requireSlippagePriceChecker(address checker) private view {
+        (bool ok, bytes memory ret) =
+            checker.staticcall(abi.encodeCall(ISlippagePriceChecker.maxTimePriceValid, (address(0))));
+        require(ok && ret.length == 32, "Not a slippage price checker");
+    }
+
+    /// @dev The strategy treats a checker answering registry() as a stock checker and holds any token it does not list
+    function _requireListedStockIfStockChecker(address checker, address tokenIn) private view {
+        (bool ok, bytes memory ret) = checker.staticcall(abi.encodeWithSignature("registry()"));
+        if (!ok || ret.length != 32) return;
+        require(
+            IStockAccountRegistry(abi.decode(ret, (address))).tokenConfig(tokenIn).status
+                != IStockAccountRegistry.TokenStatus.None,
+            "Stock hop token not listed"
+        );
     }
 
     // ==================== RECOVERY FUNCTIONS ====================

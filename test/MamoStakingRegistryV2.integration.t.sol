@@ -5,13 +5,24 @@ import {BaseTest} from "./BaseTest.t.sol";
 import {console} from "@forge-std/console.sol";
 
 import {MockPool} from "./mocks/MockPool.sol";
+import {MockPriceChecker} from "./mocks/MockPriceChecker.sol";
+import {MockStockAccountRegistry} from "./mocks/MockStockAccountRegistry.sol";
 import {MamoStakingRegistryV2 as MamoStakingRegistry} from "@contracts/MamoStakingRegistryV2.sol";
 
 import {IQuoter} from "@interfaces/IQuoter.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
+import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+contract MockStockHopChecker is MockPriceChecker {
+    address public registry;
+
+    constructor(address registry_) {
+        registry = registry_;
+    }
+}
 
 contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     MamoStakingRegistry public stakingRegistry;
@@ -356,6 +367,60 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         );
     }
 
+    // ========== H38: A REWARD TOKEN'S POOL MUST HOLD THE TOKEN ==========
+
+    function testAddRewardTokenRevertsWhenPoolLacksToken() public {
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.prank(backend);
+        vm.expectRevert("Token not in pool");
+        registry.addRewardToken(rewardToken2, pool1);
+    }
+
+    function testUpdateRewardTokenPoolRevertsWhenPoolLacksToken() public {
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.startPrank(backend);
+        registry.addRewardToken(rewardToken2, pool2);
+        vm.expectRevert("Token not in pool");
+        registry.updateRewardTokenPool(rewardToken2, pool1);
+        vm.stopPrank();
+    }
+
+    /// @dev A stock lists against its stock/USDC pool and reaches MAMO through setRoute, so the pool's
+    ///      other side need not be MAMO
+    function testRewardTokenPoolNeedNotPairWithMamo() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken1, rewardToken2));
+
+        address newPool = address(new MockPool(rewardToken2, rewardToken1));
+
+        vm.startPrank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+        registry.updateRewardTokenPool(rewardToken2, newPool);
+        vm.stopPrank();
+
+        assertEq(registry.getRewardTokenPool(rewardToken2), newPool, "pool updated");
+        assertEq(registry.hopTokenOut(newPool, rewardToken2), rewardToken1);
+    }
+
+    function testUpdateRewardTokenPoolStoresTheNewPool() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address newPool = address(new MockPool(rewardToken2, rewardToken1));
+
+        vm.startPrank(backend);
+        registry.addRewardToken(rewardToken1, pool1);
+        registry.addRewardToken(rewardToken2, pool2);
+        vm.expectEmit(address(registry));
+        emit RewardTokenPoolUpdated(rewardToken2, pool2, newPool);
+        registry.updateRewardTokenPool(rewardToken2, newPool);
+        vm.stopPrank();
+
+        assertEq(registry.getRewardTokenPool(rewardToken2), newPool, "new pool stored");
+        assertEq(registry.getRewardToken(1).pool, newPool, "entry moved to the new pool");
+        assertEq(registry.getRewardTokenPool(rewardToken1), pool1, "other token untouched");
+    }
+
     function testSetDEXRouter() public {
         MamoStakingRegistry registry = _freshRegistry();
         address newRouter = makeAddr("newRouter");
@@ -610,7 +675,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     ///      checker is incident remediation too, so it must not require an unpause first.
     function testSetSlippagePriceCheckerSucceedsWhilePaused() public {
         MamoStakingRegistry registry = _freshRegistry();
-        address newChecker = makeAddr("newSlippagePriceChecker");
+        address newChecker = address(new MockPriceChecker());
 
         vm.prank(guardian);
         registry.pause();
@@ -622,6 +687,119 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         assertEq(
             address(registry.slippagePriceChecker()), newChecker, "price checker should be replaceable while paused"
         );
+    }
+
+    // ========== H48: THE PRICE CHECKER MUST ANSWER THE CHECKER SURFACE ==========
+
+    function testConstructorRevertsWhenCheckerLacksSurface() public {
+        address dexRouter = address(stakingRegistry.dexRouter());
+        address quoter = address(stakingRegistry.quoter());
+
+        vm.expectRevert("Not a slippage price checker");
+        new MamoStakingRegistry(admin, backend, guardian, mamoToken, dexRouter, quoter, pool1, DEFAULT_SLIPPAGE);
+    }
+
+    function testSetSlippagePriceCheckerRevertsWhenCheckerLacksSurface() public {
+        MamoStakingRegistry registry = _freshRegistry();
+
+        vm.prank(admin);
+        vm.expectRevert("Not a slippage price checker");
+        registry.setSlippagePriceChecker(ISlippagePriceChecker(pool1));
+    }
+
+    function testSetRouteRevertsWhenHopCheckerLacksSurface() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken2, rewardToken1));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(tokenUsdcPool, ISwapRouter(address(0)), ISlippagePriceChecker(pool1));
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(admin);
+        vm.expectRevert("Not a slippage price checker");
+        registry.setRoute(rewardToken2, route);
+    }
+
+    function testSetRouteRevertsWhenHopRouterIsNotAContract() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken2, rewardToken1));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+        address eoaRouter = makeAddr("eoaRouter");
+        vm.etch(eoaRouter, ""); // the label's address carries delegated code on a Base fork
+
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(tokenUsdcPool, ISwapRouter(eoaRouter), ISlippagePriceChecker(address(0)));
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(admin);
+        vm.expectRevert("Router must be a contract");
+        registry.setRoute(rewardToken2, route);
+    }
+
+    function testSetRouteAcceptsAHopNamingTheGlobalChecker() public {
+        MamoStakingRegistry registry = _freshRegistry();
+        address tokenUsdcPool = address(new MockPool(rewardToken2, rewardToken1));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, tokenUsdcPool);
+
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(
+            tokenUsdcPool,
+            ISwapRouter(address(registry.dexRouter())),
+            ISlippagePriceChecker(address(registry.slippagePriceChecker()))
+        );
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(admin);
+        registry.setRoute(rewardToken2, route);
+        assertEq(registry.getRoute(rewardToken2).length, 2, "route stored");
+    }
+
+    /// @dev Stock rewardToken2 sells into USDC (rewardToken1) on its own checker, then USDC into MAMO through pool1
+    function _stockRouteSetup()
+        internal
+        returns (MamoStakingRegistry registry, MamoStakingRegistry.Hop[] memory route)
+    {
+        registry = _freshRegistry();
+        address stockPool = address(new MockPool(rewardToken2, rewardToken1));
+        MockStockAccountRegistry stockRegistry = new MockStockAccountRegistry();
+        stockRegistry.setTokenConfig(
+            rewardToken2,
+            IStockAccountRegistry.TokenConfig(
+                IStockAccountRegistry.TokenStatus.Active,
+                IStockAccountRegistry.PriceSource.PoolTwap,
+                stockPool,
+                address(0)
+            )
+        );
+        ISlippagePriceChecker stockChecker =
+            ISlippagePriceChecker(address(new MockStockHopChecker(address(stockRegistry))));
+        vm.prank(backend);
+        registry.addRewardToken(rewardToken2, stockPool);
+
+        route = new MamoStakingRegistry.Hop[](2);
+        route[0] = MamoStakingRegistry.Hop(stockPool, ISwapRouter(address(0)), stockChecker);
+        route[1] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), stockChecker);
+    }
+
+    function testSetRouteRevertsWhenAStockCheckerPricesAnUnlistedToken() public {
+        (MamoStakingRegistry registry, MamoStakingRegistry.Hop[] memory route) = _stockRouteSetup();
+
+        vm.prank(admin);
+        vm.expectRevert("Stock hop token not listed");
+        registry.setRoute(rewardToken2, route);
+    }
+
+    function testSetRouteAcceptsAStockHopThenTheGlobalChecker() public {
+        (MamoStakingRegistry registry, MamoStakingRegistry.Hop[] memory route) = _stockRouteSetup();
+        route[1].checker = ISlippagePriceChecker(address(0));
+
+        vm.prank(admin);
+        registry.setRoute(rewardToken2, route);
+        assertEq(address(registry.getRoute(rewardToken2)[0].checker), address(route[0].checker), "stock hop stored");
     }
 
     // ========== RECOVERY FUNCTION TESTS ==========
