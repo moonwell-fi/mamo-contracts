@@ -138,25 +138,35 @@ contract StockAccountRedeployTest is Test {
         address registryV1 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY");
 
         assertEq(entries.length, 12, "twelve stocks on the list");
-        assertEq(targets.length, 6 + entries.length, "four wiring actions, twelve listings, two v1 actions");
+        assertEq(targets.length, 7 + entries.length, "five wiring actions, twelve listings, two v1 actions");
 
-        address[4] memory wiringTargets =
-            [registryV2, address(mamoRegistry), address(mamoRegistry), address(mamoRegistry)];
-        bytes4[4] memory wiringSelectors = [
+        address factoryV2 = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_V2");
+        address[5] memory wiringTargets =
+            [registryV2, address(mamoRegistry), address(mamoRegistry), address(mamoRegistry), factoryV2];
+        bytes4[5] memory wiringSelectors = [
             StockAccountRegistry.setPriceChecker.selector,
             MamoStrategyRegistry.whitelistImplementation.selector,
             IAccessControl.grantRole.selector,
-            IAccessControl.revokeRole.selector
+            IAccessControl.revokeRole.selector,
+            IAccessControl.grantRole.selector
         ];
-        for (uint256 i = 0; i < 4; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             assertEq(targets[i], wiringTargets[i], "wiring target");
             assertEq(bytes4(args[i]), wiringSelectors[i], "wiring selector");
         }
+        assertEq(
+            args[4],
+            abi.encodeCall(
+                IAccessControl.grantRole,
+                (StockAccountStrategyFactory(factoryV2).BACKEND_ROLE(), addresses.getAddress("MAMO_BACKEND"))
+            ),
+            "the queues app gets the v2 factory's BACKEND_ROLE"
+        );
 
         for (uint256 i = 0; i < entries.length; i++) {
-            assertEq(targets[4 + i], registryV2, "listing target");
-            assertEq(bytes4(args[4 + i]), StockAccountRegistry.listToken.selector, "listing selector");
-            assertEq(_firstAddressArgument(args[4 + i]), entries[i].token, "listToken targets the real token address");
+            assertEq(targets[5 + i], registryV2, "listing target");
+            assertEq(bytes4(args[5 + i]), StockAccountRegistry.listToken.selector, "listing selector");
+            assertEq(_firstAddressArgument(args[5 + i]), entries[i].token, "listToken targets the real token address");
         }
 
         uint256 last = targets.length - 1;
@@ -226,6 +236,11 @@ contract StockAccountRedeployTest is Test {
         assertEq(account.owner(), user, "account owned by the user");
         assertEq(account.strategyTypeId(), 7, "account carries type id 7");
         assertEq(mamoRegistry.getUserStrategies(user).length, 2, "the user holds a v1 and a v2 account");
+
+        address queuedUser = makeAddr("queuedUser");
+        vm.prank(addresses.getAddress("MAMO_BACKEND"));
+        address queued = factory.createStrategyForUser(queuedUser, _basket(), 5_000);
+        assertEq(StockAccountStrategy(payable(queued)).owner(), queuedUser, "the queues app creates for a user");
 
         deal(usdc, user, V2_DEPOSIT);
         vm.startPrank(user);
