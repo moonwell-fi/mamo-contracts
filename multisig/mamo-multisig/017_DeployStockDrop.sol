@@ -40,7 +40,7 @@ contract DeployStockDrop is MultisigProposal {
     string internal constant STAKING_REGISTRY_KEY = "MAMO_STAKING_REGISTRY_V2";
     string internal constant STAKING_IMPL_KEY = "MAMO_STAKING_STRATEGY_V2";
     string internal constant STAKING_FACTORY_KEY = "MAMO_STAKING_STRATEGY_FACTORY_V2";
-    string internal constant STOCK_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_V2";
+    string internal constant STOCK_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
 
     /// @notice The staking strategy type id, whose latest implementation live accounts upgrade to
     uint256 internal constant STAKING_TYPE_ID = 3;
@@ -404,7 +404,7 @@ contract DeployStockDrop is MultisigProposal {
             );
             assertEq(
                 address(route[0].checker),
-                addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_V2"),
+                addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"),
                 string.concat(stocks[i].symbol, " route checker")
             );
             assertEq(route[1].pool, addresses.getAddress("USDC_MAMO_CL_POOL"), "USDC to MAMO hop");
@@ -469,7 +469,7 @@ contract DeployStockDrop is MultisigProposal {
         route[0] = MamoStakingRegistryV2.Hop({
             pool: stockPool,
             router: ISwapRouter(addresses.getAddress("AERODROME_STOCKS_SWAP_ROUTER")),
-            checker: ISlippagePriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_V2"))
+            checker: ISlippagePriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"))
         });
         route[1] = MamoStakingRegistryV2.Hop({
             pool: addresses.getAddress("USDC_MAMO_CL_POOL"),

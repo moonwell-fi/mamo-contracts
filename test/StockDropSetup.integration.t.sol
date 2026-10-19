@@ -64,7 +64,9 @@ contract StockDropSetupTest is Test {
 
         // The deployer's EIP-7702 delegation reads as a contract to FPS; a nonce-0 throwaway replaces it anyway
         vm.etch(DEPLOYER_EOA, "");
-        addresses = PinnedAddresses.load("./addresses");
+        addresses = PinnedAddresses.loadWithout(
+            "./addresses", "./script/stock-accounts/addresses-rehearsal/stock-drop", _liveStockKeys()
+        );
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", makeAddr("stockDropDeployer"), false);
 
@@ -85,8 +87,8 @@ contract StockDropSetupTest is Test {
 
         // 013: upgrade, sequencer feed, 6 backfills, 2 WETH pairs
         _run(oracleProposal, 10);
-        // 019: 4 wiring actions, 12 listings, 2 v1 retirements
-        _run(redeployProposal, 18);
+        // 019: 5 wiring actions, 12 listings, 2 v1 retirements
+        _run(redeployProposal, 19);
         // 017: sequencer feed, whitelist, grant, 2 revokes, fee recipient, 3 pairs
         _run(deployProposal, 9);
         // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module
@@ -106,7 +108,7 @@ contract StockDropSetupTest is Test {
         (bool guarded,) = checker.staticcall(abi.encodeWithSignature("sequencerUptimeFeed()"));
         assertFalse(guarded, "pinned checker should predate 013");
 
-        _run(redeployProposal, 18);
+        _run(redeployProposal, 19);
         deployProposal.setPrimaryForkId(vm.activeFork());
         deployProposal.deploy();
 
@@ -207,7 +209,7 @@ contract StockDropSetupTest is Test {
 
     function _proveStockAccountPaysDropAutomation() internal {
         StockAccountStrategyFactory factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_V2"));
+            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
         address drop = addresses.getAddress("DROP_AUTOMATION_V2");
         IERC20 usdc = IERC20(addresses.getAddress("USDC"));
 
@@ -218,7 +220,7 @@ contract StockDropSetupTest is Test {
         StockAccountStrategy stockAccount =
             StockAccountStrategy(payable(factory.createStrategyForUser(user, entries, 5_000)));
         assertEq(
-            StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY_V2")).feeRecipient(),
+            StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY")).feeRecipient(),
             drop,
             "Fees go to DropAutomationV2"
         );
@@ -234,5 +236,14 @@ contract StockDropSetupTest is Test {
         stockAccount.payFees(address(usdc));
 
         assertGt(usdc.balanceOf(drop), before, "The management fee reached DropAutomationV2");
+    }
+
+    /// @dev Deployed after the pinned block, so 019 would otherwise skip its deploys
+    function _liveStockKeys() internal pure returns (string[] memory names) {
+        names = new string[](4);
+        names[0] = "STOCK_ACCOUNT_REGISTRY";
+        names[1] = "STOCK_ACCOUNT_PRICE_CHECKER";
+        names[2] = "STOCK_ACCOUNT_STRATEGY_IMPL";
+        names[3] = "STOCK_ACCOUNT_STRATEGY_FACTORY";
     }
 }
