@@ -171,11 +171,16 @@ contract StockAccountFeeHookGasTest is Test {
         uint256 limit = account.HOOK_GAS_LIMIT();
         uint256 cap = registry.MAX_LISTED_TOKENS();
         uint256 atListing = _worst(base, perHeld, perListed, listed, listed);
-        uint256 atCap = _worst(base, perHeld, perListed, listed, cap);
+        uint256 atCap = base + perHeld * registry.maxPositions() + perListed * (cap - listed);
 
         console.log("cold fit, k held of 12 listed: base, per held, per listed", base, perHeld, perListed);
         console.log("warm fit, k held of 12 listed: base, per held", warmBase, warmPerHeld);
-        console.log("cold worst case, every listed token held: at 12, at the cap", atListing, atCap);
+        console.log(
+            "cold worst case, every listed token held: at 12, at the cap",
+            atListing,
+            _worst(base, perHeld, perListed, listed, cap)
+        );
+        console.log("cold, a full basket held at the cap", atCap);
         console.log(
             "largest listing within 80% of the hook limit",
             (limit * 8 / 10 + listed * perListed - base) / (perHeld + perListed)
@@ -183,7 +188,7 @@ contract StockAccountFeeHookGasTest is Test {
         console.log("hook limit the cap needs for a 20% margin", atCap * 10 / 8);
 
         assertLe(atListing, limit * 8 / 10, "019's listing, all held, within 80% of the hook limit");
-        assertLe(atCap, limit * 8 / 10, "the listing cap, all held, within 80% of the hook limit");
+        assertLe(atCap, limit * 8 / 10, "the listing cap, a full basket held, within 80% of the hook limit");
     }
 
     /// @dev The fit is taken at `listed`; each further listed and held token adds both terms
