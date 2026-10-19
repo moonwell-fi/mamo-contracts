@@ -21,7 +21,7 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  *      stood in for exactly as in proposal 016, so their `decimals()` probes can execute in revm.
  */
 contract ListStockUniverse is MultisigProposal {
-    string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
+    string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_DEPRECATED";
 
     StockAccountsConfig public immutable deployConfig;
 

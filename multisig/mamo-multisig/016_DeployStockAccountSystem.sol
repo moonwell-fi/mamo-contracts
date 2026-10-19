@@ -62,10 +62,10 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  *      that byte — see {_standInForNodeNativeTokens} for exactly what that does and does not prove.
  */
 contract DeployStockAccountSystem is MultisigProposal {
-    string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
-    string internal constant PRICE_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER";
-    string internal constant IMPL_KEY = "STOCK_ACCOUNT_STRATEGY_IMPL";
-    string internal constant FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY";
+    string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_DEPRECATED";
+    string internal constant PRICE_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED";
+    string internal constant IMPL_KEY = "STOCK_ACCOUNT_STRATEGY_IMPL_DEPRECATED";
+    string internal constant FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED";
 
     /// @notice The launch list this proposal executed with, frozen so later list edits do not rewrite it
     string internal constant TOKEN_LIST = "./config/stock-accounts/8453-016.json";

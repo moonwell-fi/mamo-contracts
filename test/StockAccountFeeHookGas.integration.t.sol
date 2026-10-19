@@ -81,7 +81,9 @@ contract StockAccountFeeHookGasTest is Test {
         vm.fee(0);
 
         vm.etch(DEPLOYER_EOA, "");
-        addresses = PinnedAddresses.load("./addresses");
+        addresses = PinnedAddresses.loadWithout(
+            "./addresses", "./script/stock-accounts/addresses-rehearsal/fee-hook", _liveStockKeys()
+        );
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", makeAddr("stockAccountsV2Deployer"), false);
         usdc = addresses.getAddress("USDC");
@@ -94,7 +96,7 @@ contract StockAccountFeeHookGasTest is Test {
         proposal.build();
         proposal.simulate();
 
-        registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY_V2"));
+        registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
         StockAccountsConfig.TokenListEntry[] memory list = proposal.deployConfig().loadTokenList();
         for (uint256 i = 0; i < list.length; i++) {
             entries.push(list[i]);
@@ -106,7 +108,7 @@ contract StockAccountFeeHookGasTest is Test {
         IStockAccountStrategy.BasketEntry[] memory basket = new IStockAccountStrategy.BasketEntry[](1);
         basket[0] = IStockAccountStrategy.BasketEntry({token: NVDAC, targetBps: 5_000});
         StockAccountStrategyFactory factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_V2"));
+            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
         address user = makeAddr("feeHookGasUser");
         vm.prank(user);
         account = StockAccountStrategy(payable(factory.createStrategyForUser(user, basket, 5_000)));
@@ -284,5 +286,13 @@ contract StockAccountFeeHookGasTest is Test {
         assembly {
             ok := call(gas(), target, 0, add(data, 0x20), mload(data), 0, 0)
         }
+    }
+
+    function _liveStockKeys() internal pure returns (string[] memory names) {
+        names = new string[](4);
+        names[0] = "STOCK_ACCOUNT_REGISTRY";
+        names[1] = "STOCK_ACCOUNT_PRICE_CHECKER";
+        names[2] = "STOCK_ACCOUNT_STRATEGY_IMPL";
+        names[3] = "STOCK_ACCOUNT_STRATEGY_FACTORY";
     }
 }

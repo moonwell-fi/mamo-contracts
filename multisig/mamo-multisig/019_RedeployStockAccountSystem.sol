@@ -31,13 +31,13 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  *      the node-native token stand-in.
  */
 contract RedeployStockAccountSystem is MultisigProposal {
-    string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_V2";
-    string internal constant PRICE_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
-    string internal constant IMPL_KEY = "STOCK_ACCOUNT_STRATEGY_IMPL_V2";
-    string internal constant FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
+    string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
+    string internal constant PRICE_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER";
+    string internal constant IMPL_KEY = "STOCK_ACCOUNT_STRATEGY_IMPL";
+    string internal constant FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
-    string internal constant V1_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
-    string internal constant V1_FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY";
+    string internal constant V1_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_DEPRECATED";
+    string internal constant V1_FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED";
 
     /// @notice The mamo-queues app, which creates accounts on users' behalf through the factory
     string internal constant QUEUES_KEY = "MAMO_BACKEND";

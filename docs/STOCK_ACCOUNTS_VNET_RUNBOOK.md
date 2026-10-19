@@ -44,21 +44,21 @@ account's NAV after that (see below). The whole rerun is a no-op.
 
 ## What it deploys, in order
 
-`DeployStockAccounts` records under the `_V2` keys proposal 019 writes; the unsuffixed
-`STOCK_ACCOUNT_*` keys are the paused v1 system, which no script acts on any more.
+`DeployStockAccounts` records under the `STOCK_ACCOUNT_*` keys, which hold the system proposal 019
+deployed. The paused v1 system is kept under `STOCK_ACCOUNT_*_DEPRECATED`, which no script acts on.
 
-1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY_V2`,
+1. `StockAccountRegistry(Config)` — the per-chain rulebook, recorded as `STOCK_ACCOUNT_REGISTRY`,
    deployed with the placeholder price checker (see Configuration)
 2. `StockAccountPriceChecker(registry, USDC, existingPriceChecker, sequencerUptimeFeed, 3600)` —
-   recorded as `STOCK_ACCOUNT_PRICE_CHECKER_V2`; the third argument is the audited `SlippagePriceChecker`
+   recorded as `STOCK_ACCOUNT_PRICE_CHECKER`; the third argument is the audited `SlippagePriceChecker`
    that every `PriceSource.Chainlink` token is priced against (see Configuration); the last two gate
    every PoolTwap quote on the Base sequencer being up for at least an hour
 3. admin: `StockAccountRegistry.setPriceChecker(checker)` — replaces the placeholder
-4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL_V2`
+4. `StockAccountStrategy` implementation — recorded as `STOCK_ACCOUNT_STRATEGY_IMPL`
 5. admin: `MamoStrategyRegistry.whitelistImplementation(impl, strategyTypeId)` — the id comes from the
    deploy config (ids 1-5 are taken on Base and 6 is reserved for the leveraged-Aero account; both
    deploy configs now say **7**, the id proposal 019 redeploys under)
-6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY_V2`
+6. `StockAccountStrategyFactory(...)` — recorded as `STOCK_ACCOUNT_STRATEGY_FACTORY`
 7. admin: `MamoStrategyRegistry.grantRole(BACKEND_ROLE, factory)` so the factory can call `addStrategy`
 8. every entry of `config/stock-accounts/8453.json`, in two parts:
    - **8a**, only for a `Chainlink` entry: admin calls on `existingPriceChecker` —
@@ -173,12 +173,12 @@ moves, the proposal stops being executable as one batch and has to be split.
 The batch, in order — the order is load-bearing for the same two reasons as the script's
 (see [Ordering](#ordering-and-what-it-means-for-the-safe-batch)):
 
-1. `STOCK_ACCOUNT_REGISTRY.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER)`
+1. `STOCK_ACCOUNT_REGISTRY_DEPRECATED.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED)`
 2. `MAMO_STRATEGY_REGISTRY.whitelistImplementation(impl, 5)` — the **configured** id, never auto-assigned
-3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY)`
+3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED)`
 4. `CHAINLINK_SWAP_CHECKER_PROXY.addTokenConfiguration(cbBTC, USDC, [BTC/USD, USDC/USD reversed])`
 5. `CHAINLINK_SWAP_CHECKER_PROXY.setMaxTimePriceValid(cbBTC, 3600)`
-6-10. `STOCK_ACCOUNT_REGISTRY.listToken(...)` for AAPLc, cbBTC, GOOGLc, METAc, NVDAc
+6-10. `STOCK_ACCOUNT_REGISTRY_DEPRECATED.listToken(...)` for AAPLc, cbBTC, GOOGLc, METAc, NVDAc
 
 Run it against a Base fork:
 
@@ -189,8 +189,8 @@ forge script multisig/mamo-multisig/016_DeployStockAccountSystem.sol:DeployStock
 ```
 
 **The address book is not written unless you ask.** FPS gates that on `DO_UPDATE_ADDRESS_JSON`, which
-defaults to **false**; the run only prints the four new keys (`STOCK_ACCOUNT_REGISTRY`,
-`STOCK_ACCOUNT_PRICE_CHECKER`, `STOCK_ACCOUNT_STRATEGY_IMPL`, `STOCK_ACCOUNT_STRATEGY_FACTORY`). Add
+defaults to **false**; the run only prints the four new keys, which 016 records under
+`STOCK_ACCOUNT_*_DEPRECATED` now that 019's system holds the unsuffixed names. Add
 `DO_UPDATE_ADDRESS_JSON=true` on the run whose deployed addresses you want committed, and only then.
 
 **Known discrepancy: two MultiSend addresses.** The simulator hard-codes
@@ -231,19 +231,21 @@ settlement.
 `multisig/mamo-multisig/019_RedeployStockAccountSystem.sol` redeploys the whole system with the
 external-audit fixes under strategy type id **7** and retires v1. v1 accounts are not upgraded. It
 reads `deploy/stock-accounts/8453_PROD.json` and `config/stock-accounts/8453.json` (the twelve
-PoolTwap stocks) and records four new keys: `STOCK_ACCOUNT_REGISTRY_V2`,
-`STOCK_ACCOUNT_PRICE_CHECKER_V2`, `STOCK_ACCOUNT_STRATEGY_IMPL_V2` and
-`STOCK_ACCOUNT_STRATEGY_FACTORY_V2`. The v1 keys stay, since the batch acts on v1 too.
+PoolTwap stocks). Its contracts were deployed on 2026-10-19 (Base blocks 52,827,362 to 52,827,366) and
+hold the unsuffixed keys `STOCK_ACCOUNT_REGISTRY`, `STOCK_ACCOUNT_PRICE_CHECKER`,
+`STOCK_ACCOUNT_STRATEGY_IMPL` and `STOCK_ACCOUNT_STRATEGY_FACTORY`. The v1 contracts moved to the same
+names with a `_DEPRECATED` suffix; the batch acts on them too.
 
 The batch, all from `MAMO_MULTISIG`, in order:
 
-1. `STOCK_ACCOUNT_REGISTRY_V2.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER_V2)`
-2. `MAMO_STRATEGY_REGISTRY.whitelistImplementation(STOCK_ACCOUNT_STRATEGY_IMPL_V2, 7)`
-3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY_V2)`
-4. `MAMO_STRATEGY_REGISTRY.revokeRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY)` (the v1 factory)
-5-16. `STOCK_ACCOUNT_REGISTRY_V2.listToken(...)` for the twelve stocks
-17. `STOCK_ACCOUNT_REGISTRY.setOrderSigner(0x000000000000000000000000000000000000dEaD)`
-18. `STOCK_ACCOUNT_REGISTRY.pause()` (`GUARDIAN_ROLE`, which `MAMO_MULTISIG` holds on PROD)
+1. `STOCK_ACCOUNT_REGISTRY.setPriceChecker(STOCK_ACCOUNT_PRICE_CHECKER)`
+2. `MAMO_STRATEGY_REGISTRY.whitelistImplementation(STOCK_ACCOUNT_STRATEGY_IMPL, 7)`
+3. `MAMO_STRATEGY_REGISTRY.grantRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY)`
+4. `MAMO_STRATEGY_REGISTRY.revokeRole(BACKEND_ROLE, STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED)` (the v1 factory)
+5. `STOCK_ACCOUNT_STRATEGY_FACTORY.grantRole(BACKEND_ROLE, MAMO_BACKEND)` (the mamo-queues app)
+6-17. `STOCK_ACCOUNT_REGISTRY.listToken(...)` for the twelve stocks
+18. `STOCK_ACCOUNT_REGISTRY_DEPRECATED.setOrderSigner(0x000000000000000000000000000000000000dEaD)`
+19. `STOCK_ACCOUNT_REGISTRY_DEPRECATED.pause()` (`GUARDIAN_ROLE`, which `MAMO_MULTISIG` holds on PROD)
 
 After it, no v1 order can validate (the signer is dead and the registry is paused) and the v1
 factory can no longer register an account, but every v1 exit keeps working. Before the batch, the
@@ -381,7 +383,7 @@ Run the check again afterwards; only that read says what is on chain.
 The target is `twapWindow / 2 x 2`, capped at `type(uint16).max`: Base produces a block about every two
 seconds, so a 180-second window needs about 90 observations, and the ring is sized at twice that for
 headroom — **180 for the configured 180-second window**. `twapWindow` is read from the deployed
-registry when `STOCK_ACCOUNT_REGISTRY_V2` is in the address book, and from the deploy config before that.
+registry when `STOCK_ACCOUNT_REGISTRY` is in the address book, and from the deploy config before that.
 
 The grow step only sends `increaseObservationCardinalityNext` to a pool whose `observationCardinalityNext`
 is below the target, so a second grow run sends nothing. All twelve pools already sit above it (2048 on
@@ -469,7 +471,7 @@ Tenderly vnet, where the node serves the precompile, and not in `forge test`.
 
 `StockAccountsSmoke` therefore creates an all-cash account (empty basket, `cashTargetBps = 10000`),
 deposits 1,000 USDC and asserts `getNAV() == 1_000e6`. No token pricing is involved. It also asserts
-the registry points at `STOCK_ACCOUNT_PRICE_CHECKER_V2`.
+the registry points at `STOCK_ACCOUNT_PRICE_CHECKER`.
 
 `getNAV` still reads a balance for **every** listed token before it prices anything, so the smoke has
 to run before the B20 listings — which is exactly where `vnet-up.sh` puts it. After them, that
@@ -569,7 +571,7 @@ so an order cannot settle unless its hook takes the fee in the token that order 
 `script/stock-accounts/vnet-manifest.json` (gitignored) is written by the smoke script and is what the
 backend or a follow-up script reads to pick the vnet up: the admin `rpc`, `chainId`, every
 `STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address (unsuffixed: a vnet holds only the system this tree
-deployed, read from the book's `_V2` keys), the `strategyTypeId`, the test user with the
+deployed, read from the book's `STOCK_ACCOUNT_*` keys), the `strategyTypeId`, the test user with the
 account created for them, and that account's USDC document as `appDataHashUsdc` and
 `appDataDocumentUsdc` — the cash leg, since documents are per buy token and the smoke account is all
 cash. Forge writes the document inlined as JSON rather than as a string, so `jq -c` is what reproduces

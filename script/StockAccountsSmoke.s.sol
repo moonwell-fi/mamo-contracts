@@ -24,10 +24,10 @@ contract StockAccountsSmoke is Script {
 
     /// @dev The keys proposal 019 writes; the unsuffixed ones are the paused v1 system. The manifest keeps
     ///      the unsuffixed names, since a vnet holds only the system this tree deployed
-    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY_V2";
-    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
-    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL_V2";
-    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
+    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
+    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER";
+    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
+    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
     function run() external {
         string memory addressesPath = vm.envOr("ADDRESSES_PATH", string("./addresses"));
@@ -43,7 +43,7 @@ contract StockAccountsSmoke is Script {
 
         address priceChecker = addresses.getAddress(PRICE_CHECKER_NAME);
         address wired = address(IStockAccountRegistry(addresses.getAddress(REGISTRY_NAME)).priceChecker());
-        require(wired == priceChecker, "Stock registry does not point at STOCK_ACCOUNT_PRICE_CHECKER_V2");
+        require(wired == priceChecker, "Stock registry does not point at STOCK_ACCOUNT_PRICE_CHECKER");
 
         address account = factory.computeStrategyAddress(user);
         bool created = account.code.length == 0;
