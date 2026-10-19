@@ -354,18 +354,22 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
     function testATinyShortfallSellsOnlyTheLargestLegAtTheMinimumValue() public {
         _withdraw(500e18 + 1, 100);
 
-        assertEq(nvda.balanceOf(address(strategy)), 10e18 - 5_000, "one USDC of the largest leg");
+        assertEq(nvda.balanceOf(address(strategy)), 10e18 - 50, "the minimum sale of the largest leg");
         assertEq(aapl.balanceOf(address(strategy)), 20e18, "the other leg is not touched");
         assertEq(usdc.balanceOf(user), 500e18 + 1, "user asset");
-        assertEq(usdc.balanceOf(address(strategy)), 1e6 - 1, "the extra proceeds stay idle");
+        assertEq(usdc.balanceOf(address(strategy)), 1e4 - 1, "the extra proceeds stay idle");
     }
 
-    /// @dev Three legs worth 1.5 USDC each against a 2.5 USDC shortfall: every share is under the
-    ///      minimum, but the largest leg cannot absorb them, so they stay planned pro rata
+    /// @dev Three legs worth 1.5 minimum sales each against a 2.5 minimum-sale shortfall: every share is under
+    ///      the minimum, but the largest leg cannot absorb them, so they stay planned pro rata
     function testSmallLegsAreOnlyFoldedWhileTheLargestLegCanAbsorbThem() public {
         MockERC20 msft = new MockERC20("MSFT Coin", "MSFTc");
-        priceChecker.setRate(address(msft), address(usdc), 100e18);
-        router.setRate(address(msft), address(usdc), 100e18);
+        priceChecker.setRate(address(msft), address(usdc), 1e18);
+        router.setRate(address(msft), address(usdc), 1e18);
+        priceChecker.setRate(address(nvda), address(usdc), 2e18);
+        router.setRate(address(nvda), address(usdc), 2e18);
+        priceChecker.setRate(address(aapl), address(usdc), 1e18);
+        router.setRate(address(aapl), address(usdc), 1e18);
         _listWithPool(address(msft));
 
         StockAccountStrategy small = StockAccountStrategy(payable(_deployProxy(_defaultParams())));
@@ -379,26 +383,26 @@ contract StockAccountStrategyWithdrawUnitTest is StockAccountStrategyTestBase {
         (caps[0], caps[1], caps[2]) = (7_500, 15_000, 15_000);
 
         vm.prank(user);
-        small.withdraw(2.5e6, 50, tokens, caps, block.timestamp);
+        small.withdraw(2.5e4, 50, tokens, caps, block.timestamp);
 
         // The largest leg is lifted to the minimum sale, the others sell their rounded-up pro rata share
-        assertEq(usdc.balanceOf(user), 2.5e6, "user asset");
+        assertEq(usdc.balanceOf(user), 2.5e4, "user asset");
         assertEq(nvda.balanceOf(address(small)), 2_500, "nvda sells the minimum value");
         assertEq(aapl.balanceOf(address(small)), 6_624, "aapl sells its own share");
         assertEq(msft.balanceOf(address(small)), 6_624, "msft sells its own share");
-        assertEq(usdc.balanceOf(address(small)), 175_200, "the extra proceeds stay idle");
+        assertEq(usdc.balanceOf(address(small)), 1_752, "the extra proceeds stay idle");
     }
 
     function testWithdrawAllLeavesDustInAnotherTokenForTheInKindExit() public {
         vm.prank(user);
         strategy.withdrawToken(address(aapl), 20e18);
-        aapl.mint(address(strategy), 1_000);
+        aapl.mint(address(strategy), 99);
 
         vm.prank(user);
         strategy.withdrawAll(100, 0, block.timestamp);
 
         assertEq(nvda.balanceOf(address(strategy)), 0, "nvda sold");
-        assertEq(aapl.balanceOf(address(strategy)), 1_000, "the dust stays");
+        assertEq(aapl.balanceOf(address(strategy)), 99, "the dust stays");
         assertEq(usdc.balanceOf(user), 2_500e18, "user asset");
     }
 
