@@ -10,7 +10,7 @@
   "guardian": "MAMO_MULTISIG",
   "managementFeeBps": 100,
   "maxBackendSlippageBps": 100,
-  "maxDeviationBps": 1000,
+  "maxDeviationBps": 500,
   "maxOrderValue": 25000000000,
   "maxPositions": 10,
   "maxStrategyDeposit": 25000000000,
