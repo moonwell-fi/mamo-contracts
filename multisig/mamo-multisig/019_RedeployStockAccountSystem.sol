@@ -23,7 +23,8 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  * @title RedeployStockAccountSystem
  * @notice Multisig proposal that redeploys the stock accounts system under strategy type id 7 and
  *         retires v1 in one Safe batch: the v2 registry, price checker, implementation and factory
- *         are deployed, wired in and given the 12-stock list; the v1 factory loses BACKEND_ROLE and
+ *         are deployed, wired in and given the 12-stock list, and the queues app may create v2 accounts;
+ *         the v1 factory loses BACKEND_ROLE and
  *         the v1 registry is paused with its order signer set to a dead address.
  * @dev v1 accounts are not upgraded. Pausing the v1 registry stops every order from validating while
  *      every v1 exit keeps working. Built on proposal 016's hooks; see it for the bootstrap order and
@@ -37,6 +38,9 @@ contract RedeployStockAccountSystem is MultisigProposal {
 
     string internal constant V1_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
     string internal constant V1_FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY";
+
+    /// @notice The mamo-queues app, which creates accounts on users' behalf through the factory
+    string internal constant QUEUES_KEY = "MAMO_BACKEND";
 
     address internal constant DEAD_SIGNER = 0x000000000000000000000000000000000000dEaD;
 
@@ -82,7 +86,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
 
     function description() public pure override returns (string memory) {
         return
-        "Redeploy the stock accounts system (registry, price checker, account implementation, factory) under strategy type id 7, list the twelve stocks, move BACKEND_ROLE from the v1 factory to the new one, and retire v1 by setting its order signer to a dead address and pausing its registry";
+        "Redeploy the stock accounts system (registry, price checker, account implementation, factory) under strategy type id 7, list the twelve stocks, move BACKEND_ROLE from the v1 factory to the new one, let the queues app create accounts on the new factory, and retire v1 by setting its order signer to a dead address and pausing its registry";
     }
 
     // ─── deploy: four contracts, each skipped when the address book already holds it ──────────────
@@ -217,6 +221,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
             mamoRegistry.hasRole(mamoRegistry.BACKEND_ROLE(), addresses.getAddress(V1_FACTORY_KEY)),
             "v1 factory should still hold BACKEND_ROLE"
         );
+        assertEq(addresses.getAddress(QUEUES_KEY).code.length, 0, "Queues app should be a plain EOA");
         // Paired with validate(): the role churn must not move BACKEND_ROLE index 0, which every
         // un-upgraded strategy proxy still reads as the backend (Sherlock #41, same pair as proposal 011)
         assertEq(
@@ -276,6 +281,9 @@ contract RedeployStockAccountSystem is MultisigProposal {
         mamoRegistry.whitelistImplementation(addresses.getAddress(IMPL_KEY), strategyTypeId);
         mamoRegistry.grantRole(mamoRegistry.BACKEND_ROLE(), addresses.getAddress(FACTORY_KEY));
         mamoRegistry.revokeRole(mamoRegistry.BACKEND_ROLE(), addresses.getAddress(V1_FACTORY_KEY));
+
+        StockAccountStrategyFactory factory = StockAccountStrategyFactory(addresses.getAddress(FACTORY_KEY));
+        factory.grantRole(factory.BACKEND_ROLE(), addresses.getAddress(QUEUES_KEY));
 
         StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
         for (uint256 i = 0; i < entries.length; i++) {
@@ -421,6 +429,16 @@ contract RedeployStockAccountSystem is MultisigProposal {
         );
         assertTrue(
             factory.hasRole(factory.BACKEND_ROLE(), addresses.getAddress(cfg.backend)), "Factory backend mismatch"
+        );
+        assertTrue(
+            factory.hasRole(factory.BACKEND_ROLE(), addresses.getAddress(QUEUES_KEY)),
+            "Queues app should hold the factory's BACKEND_ROLE"
+        );
+        // The factory grant is all the queues app needs; the Mamo registry's role would make it backend on every strategy
+        MamoStrategyRegistry mamoRegistry = _mamoRegistry();
+        assertFalse(
+            mamoRegistry.hasRole(mamoRegistry.BACKEND_ROLE(), addresses.getAddress(QUEUES_KEY)),
+            "Queues app should not hold BACKEND_ROLE on the Mamo registry"
         );
     }
 
