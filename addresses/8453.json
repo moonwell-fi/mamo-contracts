@@ -536,21 +536,41 @@
   },
   {
     "addr": "0xb0e62191C30256790Ae62e71138707483a9B6EAA",
-    "name": "STOCK_ACCOUNT_REGISTRY",
+    "name": "STOCK_ACCOUNT_REGISTRY_DEPRECATED",
     "isContract": true
   },
   {
     "addr": "0xb309cFC028965300b76Fa3909ba0c7B98Dc74035",
-    "name": "STOCK_ACCOUNT_PRICE_CHECKER",
+    "name": "STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED",
     "isContract": true
   },
   {
     "addr": "0x17Fff4d4E628fc17C4e01B1E781A368Bc33444e5",
-    "name": "STOCK_ACCOUNT_STRATEGY_IMPL",
+    "name": "STOCK_ACCOUNT_STRATEGY_IMPL_DEPRECATED",
     "isContract": true
   },
   {
     "addr": "0xad0fFd91D25e132116a2fBe3d16BFBfc7B840528",
+    "name": "STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED",
+    "isContract": true
+  },
+  {
+    "addr": "0xE5312013c603Fe0F73eB3DD56a41964F6756eEDc",
+    "name": "STOCK_ACCOUNT_REGISTRY",
+    "isContract": true
+  },
+  {
+    "addr": "0x0f34Fbab256D24d20928F036685635c3f9130289",
+    "name": "STOCK_ACCOUNT_PRICE_CHECKER",
+    "isContract": true
+  },
+  {
+    "addr": "0xF899350FBe1E8BDfa8d8415f7aba7D7E3DaE0E9A",
+    "name": "STOCK_ACCOUNT_STRATEGY_IMPL",
+    "isContract": true
+  },
+  {
+    "addr": "0x54fa54F8bDE08A5718022ec878044EdcF97eD144",
     "name": "STOCK_ACCOUNT_STRATEGY_FACTORY",
     "isContract": true
   },

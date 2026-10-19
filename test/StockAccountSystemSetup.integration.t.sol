@@ -123,7 +123,7 @@ contract StockAccountSystemSetupTest is Test {
         string name;
     }
 
-    /// @dev The live 016 contracts have no code at the pinned block, so the rehearsal drops them from the book
+    /// @dev Neither stock deployment has code at the pinned block, so the rehearsal drops both from the book
     function _bookWithoutTheLiveDeployment() internal returns (string memory dir) {
         dir = "./script/stock-accounts/addresses-rehearsal";
         vm.createDir(dir, true);
@@ -138,6 +138,10 @@ contract StockAccountSystemSetupTest is Test {
                 name == keccak256("STOCK_ACCOUNT_REGISTRY") || name == keccak256("STOCK_ACCOUNT_PRICE_CHECKER")
                     || name == keccak256("STOCK_ACCOUNT_STRATEGY_IMPL")
                     || name == keccak256("STOCK_ACCOUNT_STRATEGY_FACTORY")
+                    || name == keccak256("STOCK_ACCOUNT_REGISTRY_DEPRECATED")
+                    || name == keccak256("STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED")
+                    || name == keccak256("STOCK_ACCOUNT_STRATEGY_IMPL_DEPRECATED")
+                    || name == keccak256("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED")
             ) continue;
 
             json = string.concat(
@@ -186,7 +190,7 @@ contract StockAccountSystemSetupTest is Test {
     function _proveRecordedBatch() internal view {
         (address[] memory targets, uint256[] memory values, bytes[] memory args) = proposal.getProposalActions();
 
-        address stockRegistry = addresses.getAddress("STOCK_ACCOUNT_REGISTRY");
+        address stockRegistry = addresses.getAddress("STOCK_ACCOUNT_REGISTRY_DEPRECATED");
         address mamoRegistry = addresses.getAddress("MAMO_STRATEGY_REGISTRY");
         address existingChecker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
 
@@ -249,15 +253,16 @@ contract StockAccountSystemSetupTest is Test {
 
     function _proveBatchPostConditions() internal view {
         MamoStrategyRegistry mamoRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
-        address implementation = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_IMPL");
-        address factory = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY");
+        StockAccountRegistry stockRegistry =
+            StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY_DEPRECATED"));
+        address implementation = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_IMPL_DEPRECATED");
+        address factory = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED");
         uint256 typeId = proposal.strategyTypeId();
 
         assertEq(typeId, 5, "the launch strategy type id");
         assertEq(
             address(stockRegistry.priceChecker()),
-            addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"),
+            addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED"),
             "registry repointed at the real checker"
         );
         assertEq(mamoRegistry.latestImplementationById(typeId), implementation, "implementation whitelisted at type 5");
@@ -281,9 +286,8 @@ contract StockAccountSystemSetupTest is Test {
 
         // cbBTC is priceable through the pair the batch configured on the EXISTING checker, and the
         // quote lands in a band no mis-scaling survives.
-        uint256 oneCbBTC = StockAccountPriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER")).getExpectedOut(
-            1e8, CBBTC, usdc
-        );
+        uint256 oneCbBTC = StockAccountPriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED"))
+            .getExpectedOut(1e8, CBBTC, usdc);
         assertGt(oneCbBTC, CBBTC_MIN_PRICE, "one cbBTC should be worth more than the floor");
         assertLt(oneCbBTC, CBBTC_MAX_PRICE, "one cbBTC should be worth less than the ceiling");
     }
@@ -292,7 +296,7 @@ contract StockAccountSystemSetupTest is Test {
 
     function _proveUserLifecycle() internal {
         StockAccountStrategyFactory factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
+            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED"));
         MamoStrategyRegistry mamoRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
 
         address predicted = factory.computeStrategyAddress(user);
@@ -316,7 +320,8 @@ contract StockAccountSystemSetupTest is Test {
     }
 
     function _proveDepositAndValuation(StockAccountStrategy account) internal {
-        StockAccountPriceChecker checker = StockAccountPriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"));
+        StockAccountPriceChecker checker =
+            StockAccountPriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED"));
 
         deal(usdc, user, USDC_DEPOSIT);
         vm.startPrank(user);

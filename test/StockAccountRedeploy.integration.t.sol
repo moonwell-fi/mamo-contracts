@@ -75,7 +75,9 @@ contract StockAccountRedeployTest is Test {
         /// @dev The deployer carries an EIP-7702 delegation, which FPS reads as a contract; a nonce-0
         ///      throwaway then deploys into CREATE slots the book cannot already record
         vm.etch(DEPLOYER_EOA, "");
-        addresses = PinnedAddresses.load("./addresses");
+        addresses = PinnedAddresses.loadWithout(
+            "./addresses", "./script/stock-accounts/addresses-rehearsal/019", _liveStockKeys()
+        );
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", deployer, false);
 
@@ -116,7 +118,7 @@ contract StockAccountRedeployTest is Test {
 
     function _openV1Account() internal returns (IStockAccountV1 account) {
         StockAccountStrategyFactory v1Factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
+            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED"));
 
         vm.prank(user);
         account = IStockAccountV1(v1Factory.createStrategyForUser(user, _basket(), 5_000));
@@ -134,29 +136,39 @@ contract StockAccountRedeployTest is Test {
         (address[] memory targets, uint256[] memory values, bytes[] memory args) = proposal.getProposalActions();
         StockAccountsConfig.TokenListEntry[] memory entries = proposal.deployConfig().loadTokenList();
 
-        address registryV2 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY_V2");
-        address registryV1 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY");
+        address registryV2 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY");
+        address registryV1 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY_DEPRECATED");
 
         assertEq(entries.length, 12, "twelve stocks on the list");
-        assertEq(targets.length, 6 + entries.length, "four wiring actions, twelve listings, two v1 actions");
+        assertEq(targets.length, 7 + entries.length, "five wiring actions, twelve listings, two v1 actions");
 
-        address[4] memory wiringTargets =
-            [registryV2, address(mamoRegistry), address(mamoRegistry), address(mamoRegistry)];
-        bytes4[4] memory wiringSelectors = [
+        address factoryV2 = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY");
+        address[5] memory wiringTargets =
+            [registryV2, address(mamoRegistry), address(mamoRegistry), address(mamoRegistry), factoryV2];
+        bytes4[5] memory wiringSelectors = [
             StockAccountRegistry.setPriceChecker.selector,
             MamoStrategyRegistry.whitelistImplementation.selector,
             IAccessControl.grantRole.selector,
-            IAccessControl.revokeRole.selector
+            IAccessControl.revokeRole.selector,
+            IAccessControl.grantRole.selector
         ];
-        for (uint256 i = 0; i < 4; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             assertEq(targets[i], wiringTargets[i], "wiring target");
             assertEq(bytes4(args[i]), wiringSelectors[i], "wiring selector");
         }
+        assertEq(
+            args[4],
+            abi.encodeCall(
+                IAccessControl.grantRole,
+                (StockAccountStrategyFactory(factoryV2).BACKEND_ROLE(), addresses.getAddress("MAMO_BACKEND"))
+            ),
+            "the queues app gets the v2 factory's BACKEND_ROLE"
+        );
 
         for (uint256 i = 0; i < entries.length; i++) {
-            assertEq(targets[4 + i], registryV2, "listing target");
-            assertEq(bytes4(args[4 + i]), StockAccountRegistry.listToken.selector, "listing selector");
-            assertEq(_firstAddressArgument(args[4 + i]), entries[i].token, "listToken targets the real token address");
+            assertEq(targets[5 + i], registryV2, "listing target");
+            assertEq(bytes4(args[5 + i]), StockAccountRegistry.listToken.selector, "listing selector");
+            assertEq(_firstAddressArgument(args[5 + i]), entries[i].token, "listToken targets the real token address");
         }
 
         uint256 last = targets.length - 1;
@@ -183,7 +195,7 @@ contract StockAccountRedeployTest is Test {
         assertEq(proposal.strategyTypeId(), 7, "type id 7");
         assertEq(
             mamoRegistry.latestImplementationById(7),
-            addresses.getAddress("STOCK_ACCOUNT_STRATEGY_IMPL_V2"),
+            addresses.getAddress("STOCK_ACCOUNT_STRATEGY_IMPL"),
             "v2 implementation at slot 7"
         );
         assertEq(mamoRegistry.latestImplementationById(6), address(0), "slot 6 still reserved");
@@ -195,11 +207,11 @@ contract StockAccountRedeployTest is Test {
         );
 
         assertTrue(
-            mamoRegistry.hasRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_V2")),
+            mamoRegistry.hasRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY")),
             "v2 factory holds BACKEND_ROLE"
         );
         assertFalse(
-            mamoRegistry.hasRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY")),
+            mamoRegistry.hasRole(backendRole, addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED")),
             "v1 factory revoked"
         );
         assertEq(
@@ -207,12 +219,14 @@ contract StockAccountRedeployTest is Test {
             addresses.getAddress("STRATEGY_MULTICALL"),
             "BACKEND_ROLE index 0 did not move"
         );
-        assertTrue(StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY")).paused(), "v1 paused");
+        assertTrue(
+            StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY_DEPRECATED")).paused(), "v1 paused"
+        );
     }
 
     function _proveV2Lifecycle() internal {
         StockAccountStrategyFactory factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_V2"));
+            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
 
         address predicted = factory.computeStrategyAddress(user);
         assertEq(predicted.code.length, 0, "nothing at the predicted address yet");
@@ -226,6 +240,11 @@ contract StockAccountRedeployTest is Test {
         assertEq(account.owner(), user, "account owned by the user");
         assertEq(account.strategyTypeId(), 7, "account carries type id 7");
         assertEq(mamoRegistry.getUserStrategies(user).length, 2, "the user holds a v1 and a v2 account");
+
+        address queuedUser = makeAddr("queuedUser");
+        vm.prank(addresses.getAddress("MAMO_BACKEND"));
+        address queued = factory.createStrategyForUser(queuedUser, _basket(), 5_000);
+        assertEq(StockAccountStrategy(payable(queued)).owner(), queuedUser, "the queues app creates for a user");
 
         deal(usdc, user, V2_DEPOSIT);
         vm.startPrank(user);
@@ -252,7 +271,7 @@ contract StockAccountRedeployTest is Test {
     }
 
     function _proveV1ExitAfterPause(IStockAccountV1 account) internal {
-        address v1Factory = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY");
+        address v1Factory = addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED");
         address lateUser = makeAddr("v1LateUser");
         bytes32 backendRole = mamoRegistry.BACKEND_ROLE();
 
@@ -271,5 +290,13 @@ contract StockAccountRedeployTest is Test {
         account.withdrawAllInKind();
         assertEq(IERC20(usdc).balanceOf(user) - before, V1_DEPOSIT, "v1 in-kind exit works after the pause");
         assertEq(account.getNAV(), 0, "v1 account empty");
+    }
+
+    function _liveStockKeys() internal pure returns (string[] memory names) {
+        names = new string[](4);
+        names[0] = "STOCK_ACCOUNT_REGISTRY";
+        names[1] = "STOCK_ACCOUNT_PRICE_CHECKER";
+        names[2] = "STOCK_ACCOUNT_STRATEGY_IMPL";
+        names[3] = "STOCK_ACCOUNT_STRATEGY_FACTORY";
     }
 }

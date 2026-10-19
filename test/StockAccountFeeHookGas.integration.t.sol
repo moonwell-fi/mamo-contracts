@@ -81,7 +81,9 @@ contract StockAccountFeeHookGasTest is Test {
         vm.fee(0);
 
         vm.etch(DEPLOYER_EOA, "");
-        addresses = PinnedAddresses.load("./addresses");
+        addresses = PinnedAddresses.loadWithout(
+            "./addresses", "./script/stock-accounts/addresses-rehearsal/fee-hook", _liveStockKeys()
+        );
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", makeAddr("stockAccountsV2Deployer"), false);
         usdc = addresses.getAddress("USDC");
@@ -94,7 +96,7 @@ contract StockAccountFeeHookGasTest is Test {
         proposal.build();
         proposal.simulate();
 
-        registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY_V2"));
+        registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
         StockAccountsConfig.TokenListEntry[] memory list = proposal.deployConfig().loadTokenList();
         for (uint256 i = 0; i < list.length; i++) {
             entries.push(list[i]);
@@ -106,7 +108,7 @@ contract StockAccountFeeHookGasTest is Test {
         IStockAccountStrategy.BasketEntry[] memory basket = new IStockAccountStrategy.BasketEntry[](1);
         basket[0] = IStockAccountStrategy.BasketEntry({token: NVDAC, targetBps: 5_000});
         StockAccountStrategyFactory factory =
-            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY_V2"));
+            StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
         address user = makeAddr("feeHookGasUser");
         vm.prank(user);
         account = StockAccountStrategy(payable(factory.createStrategyForUser(user, basket, 5_000)));
@@ -171,11 +173,16 @@ contract StockAccountFeeHookGasTest is Test {
         uint256 limit = account.HOOK_GAS_LIMIT();
         uint256 cap = registry.MAX_LISTED_TOKENS();
         uint256 atListing = _worst(base, perHeld, perListed, listed, listed);
-        uint256 atCap = _worst(base, perHeld, perListed, listed, cap);
+        uint256 atCap = base + perHeld * registry.maxPositions() + perListed * (cap - listed);
 
         console.log("cold fit, k held of 12 listed: base, per held, per listed", base, perHeld, perListed);
         console.log("warm fit, k held of 12 listed: base, per held", warmBase, warmPerHeld);
-        console.log("cold worst case, every listed token held: at 12, at the cap", atListing, atCap);
+        console.log(
+            "cold worst case, every listed token held: at 12, at the cap",
+            atListing,
+            _worst(base, perHeld, perListed, listed, cap)
+        );
+        console.log("cold, a full basket held at the cap", atCap);
         console.log(
             "largest listing within 80% of the hook limit",
             (limit * 8 / 10 + listed * perListed - base) / (perHeld + perListed)
@@ -183,7 +190,7 @@ contract StockAccountFeeHookGasTest is Test {
         console.log("hook limit the cap needs for a 20% margin", atCap * 10 / 8);
 
         assertLe(atListing, limit * 8 / 10, "019's listing, all held, within 80% of the hook limit");
-        assertLe(atCap, limit * 8 / 10, "the listing cap, all held, within 80% of the hook limit");
+        assertLe(atCap, limit * 8 / 10, "the listing cap, a full basket held, within 80% of the hook limit");
     }
 
     /// @dev The fit is taken at `listed`; each further listed and held token adds both terms
@@ -279,5 +286,13 @@ contract StockAccountFeeHookGasTest is Test {
         assembly {
             ok := call(gas(), target, 0, add(data, 0x20), mload(data), 0, 0)
         }
+    }
+
+    function _liveStockKeys() internal pure returns (string[] memory names) {
+        names = new string[](4);
+        names[0] = "STOCK_ACCOUNT_REGISTRY";
+        names[1] = "STOCK_ACCOUNT_PRICE_CHECKER";
+        names[2] = "STOCK_ACCOUNT_STRATEGY_IMPL";
+        names[3] = "STOCK_ACCOUNT_STRATEGY_FACTORY";
     }
 }

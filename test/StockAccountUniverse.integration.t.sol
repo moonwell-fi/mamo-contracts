@@ -44,7 +44,7 @@ contract StockAccountUniverseListingTest is Test {
         addresses = PinnedAddresses.load("./addresses");
         vm.makePersistent(address(addresses));
 
-        registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
+        registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY_DEPRECATED"));
         proposal = new ListStockUniverse();
         proposal.setPrimaryForkId(vm.activeFork());
         proposal.setAddresses(addresses);

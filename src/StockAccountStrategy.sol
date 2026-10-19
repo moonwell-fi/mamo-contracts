@@ -37,7 +37,7 @@ contract StockAccountStrategy is BaseStrategy, IStockAccountStrategy {
     bytes4 internal constant MAGIC_VALUE = 0x1626ba7e;
 
     /// @notice Smallest value, in asset units, a cash exit sells of one token
-    uint256 internal constant MIN_SELL_VALUE = 1e6;
+    uint256 internal constant MIN_SELL_VALUE = 1e4;
 
     /// @notice Longest time an order may stay valid for
     uint256 internal constant MAX_ORDER_VALIDITY = 30 minutes;

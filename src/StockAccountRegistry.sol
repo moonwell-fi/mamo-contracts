@@ -28,7 +28,7 @@ contract StockAccountRegistry is AccessControlEnumerable, Pausable, IStockAccoun
     uint16 public constant override withdrawSlippageCeilingBps = 1_000;
 
     /// @notice Most tokens the registry may list, bounding the valuation every account runs
-    uint256 public constant MAX_LISTED_TOKENS = 30;
+    uint256 public constant MAX_LISTED_TOKENS = 100;
 
     /// @notice Bounds on the TWAP window, in seconds
     uint32 public constant MIN_TWAP_WINDOW = 60;

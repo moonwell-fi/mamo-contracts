@@ -30,10 +30,10 @@ import {IERC5313} from "@openzeppelin/contracts/interfaces/IERC5313.sol";
  */
 contract DeployStockAccounts is Script {
     /// @dev The keys proposal 019 writes; the unsuffixed ones are the paused v1 system
-    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY_V2";
-    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
-    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL_V2";
-    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY_V2";
+    string internal constant REGISTRY_NAME = "STOCK_ACCOUNT_REGISTRY";
+    string internal constant PRICE_CHECKER_NAME = "STOCK_ACCOUNT_PRICE_CHECKER";
+    string internal constant IMPL_NAME = "STOCK_ACCOUNT_STRATEGY_IMPL";
+    string internal constant FACTORY_NAME = "STOCK_ACCOUNT_STRATEGY_FACTORY";
 
     /// @notice Staleness bound of the USDC/USD hop every Chainlink entry is quoted through
     /// @dev Deliberately above the feed's nominal 86,400 heartbeat. Walking the live Base aggregator
