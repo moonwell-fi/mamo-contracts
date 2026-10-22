@@ -82,8 +82,10 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     }
 
     /// @inheritdoc ISlippagePriceChecker
-    /// @dev Composes `from -> quote -> to`. The intermediate is carried at 36 decimals; the final
-    ///      floor into `_toToken` units is the only rounding that can move the result by a whole unit.
+    /// @dev Composes `from -> quote -> to`. The intermediate is carried at 36 decimals, so the only
+    ///      amount rounding that reaches a whole unit is the final floor into `_toToken` units. A
+    ///      PoolTwap leg's price is also floored: `_twapTick` rounds the mean tick toward -inf, which
+    ///      can move the quote by up to one tick (about 0.01%), in a direction set by the pool's token order.
     function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken)
         public
         view

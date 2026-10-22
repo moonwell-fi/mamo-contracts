@@ -183,7 +183,10 @@ contract DropAutomationV2 is Ownable {
 
     /**
      * @notice Adds a token paid out as it is
-     * @param token The token, whose MultiRewards distributor must be this contract
+     * @dev Setting this contract as the token's MultiRewards distributor is the operator's job: it is not
+     *      checked here. Until it is, the token's notification in createDrop reverts, the revert is caught,
+     *      and the balance stays on this contract until the distributor is set or the token is removed.
+     * @param token The token
      */
     function addRewardToken(address token) external onlyOwner {
         _addRewardToken(token);
