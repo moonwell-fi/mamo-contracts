@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {ICLGauge} from "@interfaces/ICLGauge.sol";
+import {ICLGauge, ICLGaugeV3} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -128,15 +128,58 @@ library LPPositionLib {
     }
 
     /// @dev Validate a gauge binding (shared by registerPosition/setPool via _validateAndStore AND
-    ///      setGauge, so the two admin paths cannot drift): a non-zero gauge must reward in `aero`
-    ///      (or staked emissions would be stranded) and must be the gauge for THIS `pool` — a valid
-    ///      AERO-rewarding gauge for a different pool would otherwise be accepted and only fail
-    ///      later, deep inside stake()/_restakeBoth on the rebalance path.
-    function validateGauge(address gauge, address pool, address aero) public view {
-        if (gauge != address(0)) {
-            if (ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
-            if (ICLGauge(gauge).pool() != pool) revert PoolMismatch();
+    ///      setGauge, so the two admin paths cannot drift). A non-zero gauge, of either version, must
+    ///      be bound to THIS `pool` from both sides (`gauge.pool()` and `pool.gauge()`) and must accept
+    ///      THIS balancer's `positionManager` NFTs (`gauge.nft()`); otherwise registration succeeds and
+    ///      the mismatch only surfaces later, deep inside stake()/_restakeBoth on the rebalance path.
+    ///      A V1 gauge must also reward in `aero` (or staked emissions would be stranded). A V3 gauge
+    ///      has no `rewardToken()` (its LeafVoter mints emissions) and nothing on-chain names its
+    ///      emission token, so the deployer must pair the V3 position manager with the V3 AERO.
+    function validateGauge(address gauge, address pool, address aero, address positionManager) public view {
+        if (gauge == address(0)) return;
+        if (!isV3Gauge(gauge) && ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
+        if (ICLGauge(gauge).pool() != pool || ICLPool(pool).gauge() != gauge) revert PoolMismatch();
+        if (ICLGauge(gauge).nft() != positionManager) revert PoolMismatch();
+    }
+
+    /// @notice True for a Slipstream V3 CLGauge, identified POSITIVELY by its V3-only
+    ///         `depositBlock(uint256)` view. Anything else takes the V1 path, whose calls
+    ///         (`rewardToken`, `getReward`) revert on a V3 gauge — so a misclassification fails
+    ///         loudly rather than silently skipping a claim.
+    function isV3Gauge(address gauge) public view returns (bool) {
+        (bool ok, bytes memory ret) = gauge.staticcall(abi.encodeCall(ICLGaugeV3.depositBlock, (0)));
+        return ok && ret.length == 32;
+    }
+
+    /// @notice Claim pending AERO for the staked legs into this contract, for either gauge version.
+    /// @dev V1: `getReward(tokenId)` per staked leg. V3: one `claimEmissions(this, this, ids)`, which
+    ///      also sweeps any account-level emissions the gauge deferred when a withdraw-time mint
+    ///      failed. Runs under DELEGATECALL, so the gauge sees the balancer as `msg.sender` (= the
+    ///      staking account the V3 gauge requires). The caller measures the AERO balance delta.
+    function claimRewards(address gauge, uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
+        public
+    {
+        uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (ids.length == 0) return;
+        if (isV3Gauge(gauge)) {
+            ICLGaugeV3(gauge).claimEmissions(address(this), address(this), ids);
+            return;
         }
+        for (uint256 i; i < ids.length; i++) {
+            ICLGauge(gauge).getReward(ids[i]);
+        }
+    }
+
+    /// @dev The staked legs' token ids, main first; the alt counts only when it exists.
+    function _stakedIds(uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
+        private
+        pure
+        returns (uint256[] memory ids)
+    {
+        bool alt = altStaked && altTokenId != 0;
+        ids = new uint256[]((mainStaked ? 1 : 0) + (alt ? 1 : 0));
+        if (mainStaked) ids[0] = mainTokenId;
+        if (alt) ids[ids.length - 1] = altTokenId;
     }
 
     /// @notice Collect accrued LP fees for `tokenId` (recipient = the balancer under DELEGATECALL) and
@@ -259,13 +302,17 @@ library LPPositionLib {
         uint256 altTokenId,
         bool altStaked
     ) public view returns (uint256 total) {
-        if (mainStaked) {
-            try ICLGauge(gauge).earned(owner, mainTokenId) returns (uint256 e) {
-                total += e;
+        uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (ids.length == 0) return 0;
+        if (isV3Gauge(gauge)) {
+            // One call over both legs; V3 `earned` also counts the account's deferred emissions.
+            try ICLGaugeV3(gauge).earned(owner, ids) returns (uint256 e) {
+                total = e;
             } catch {}
+            return total;
         }
-        if (altStaked && altTokenId != 0) {
-            try ICLGauge(gauge).earned(owner, altTokenId) returns (uint256 e) {
+        for (uint256 i; i < ids.length; i++) {
+            try ICLGauge(gauge).earned(owner, ids[i]) returns (uint256 e) {
                 total += e;
             } catch {}
         }

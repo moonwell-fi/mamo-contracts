@@ -5,6 +5,7 @@ import {LPSequencerFeedMock} from "./LPValuationLib.unit.t.sol";
 import {MockERC20} from "./MockERC20.sol";
 import {LPAutoBalancerV2Harness} from "./harness/LPAutoBalancerV2Harness.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
+import {MockCLGaugeV3} from "./mocks/MockCLGaugeV3.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
@@ -388,6 +389,13 @@ contract MockCLPoolV2 is ICLPool {
         _tickSpacing = ts;
     }
 
+    /// @notice The pool's own gauge pointer, read only by the V3 gauge binding check.
+    address public gauge;
+
+    function setGauge(address gauge_) external {
+        gauge = gauge_;
+    }
+
     function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, bool unlocked) {
         return (sqrtPX96, currentTick, 0, 0, 0, true);
     }
@@ -481,11 +489,14 @@ contract LPAutoBalancerV2UnitTest is Test {
         // registerPosition cross-validates the pool descriptor: token0/token1/tickSpacing must match.
         mockPool.setTokens(token0, token1);
         mockPool.setTickSpacing(200);
-        // Bind the gauge to this pool so _validateAndStore's gauge->pool check passes.
+        // Bind the gauge to this pool from both sides so _validateAndStore's gauge<->pool check passes.
         mockGauge.setPool(pool);
+        mockPool.setGauge(gauge);
 
         // Rich PM mock with full position lifecycle (positions/decrease/collect/mint/burn).
         mockPM = new MockPositionManagerV2(address(0));
+        // The gauge accepts this position manager's NFTs (validateGauge's gauge->NFPM check).
+        mockGauge.setNft(address(mockPM));
 
         // Real mock feeds: registerPosition probes latestRoundData at set-time
         oracle0 = address(new MockPriceFeed(1e8, 8, block.timestamp));
@@ -1787,6 +1798,123 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.setPositionConfig(200, 2000, 400, 1800, 200, 100, 0); // minWidth == tickSpacing
     }
 
+    // ─── Slipstream V3 gauge (no rewardToken/getReward; claimEmissions + earned(address,uint256[])) ───
+
+    /// @dev Swap the fixture's V1 gauge for a V3 mock bound from both sides (gauge.pool, pool.gauge).
+    function _useV3Gauge() internal returns (MockCLGaugeV3 v3) {
+        v3 = new MockCLGaugeV3(address(mockAero));
+        v3.setPool(pool);
+        v3.setNft(address(mockPM));
+        mockPool.setGauge(address(v3));
+        gauge = address(v3);
+    }
+
+    function test_isV3Gauge_classifiesBothVersions() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        assertTrue(LPPositionLib.isV3Gauge(address(v3)), "V3 mock");
+        assertFalse(LPPositionLib.isV3Gauge(address(mockGauge)), "V1 mock");
+        assertFalse(LPPositionLib.isV3Gauge(makeAddr("eoa")), "no code");
+    }
+
+    function test_v3Gauge_registerAcceptsPoolBoundGauge() public {
+        _useV3Gauge();
+        _register(true);
+        assertEq(lab.exposed_position().gauge, gauge, "V3 gauge stored");
+    }
+
+    function test_v3Gauge_registerRevertsWhenPoolNamesAnotherGauge() public {
+        _useV3Gauge();
+        mockPool.setGauge(makeAddr("otherGauge"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_v3Gauge_setGaugeRevertsWhenGaugeNamesAnotherPool() public {
+        _register(false);
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        v3.setPool(makeAddr("otherPool"));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(v3));
+    }
+
+    function test_v3Gauge_registerRevertsWhenGaugeAcceptsAnotherManager() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        v3.setNft(makeAddr("v1Nfpm"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_v3Gauge_claimEmissionsClaimsBothLegsInOneCall() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 14e18);
+        v3.setAeroPerId(7e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.claimCallCount(), 1, "one claim call");
+        assertEq(v3.lastClaimIdCount(), 2, "main + alt claimed");
+        assertEq(v3.lastClaimRecipient(), address(lab), "claimed to the balancer");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 14e18, "both legs forwarded");
+    }
+
+    function test_v3Gauge_compoundDropsAndForwardsToModule() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 1_000e18);
+        v3.setAeroPerId(1_000e18);
+        uint256 fcBefore = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.compound(7_000);
+        assertEq(v3.lastClaimIdCount(), 1, "main only (no alt)");
+        assertEq(mockAero.balanceOf(feeCollector) - fcBefore, 300e18, "30% dropped");
+        assertEq(mockAero.balanceOf(moduleSink), 700e18, "70% to module");
+    }
+
+    function test_v3Gauge_compoundUnstakedSkipsClaim() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NothingToCompound.selector);
+        lab.compound(5_000);
+        assertEq(v3.claimCallCount(), 0, "no claim while unstaked");
+    }
+
+    function test_v3Gauge_unstakeForwardsWithdrawClaim() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 5e18);
+        v3.setAeroPerId(5e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertEq(mockAero.balanceOf(feeCollector) - before, 5e18, "withdraw claim forwarded");
+    }
+
+    function test_v3Gauge_snapshotEarnedTolerant() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        v3.setEarned(3e18, false);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 3e18, "one earned call over both legs");
+        v3.setEarned(3e18, true);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 0, "reverting earned reads as 0");
+    }
+
     /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
     function test_registerPosition_revertGaugeRewardMismatch() public {
         MockCLGauge badGauge = new MockCLGauge(makeAddr("notAero")); // rewardToken != AERO
@@ -1816,6 +1944,37 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
         lab.setGauge(address(wrongPoolGauge));
+    }
+
+    /// @dev The gauge<->pool binding is checked from both sides on V1 too: a gauge that names this
+    ///      pool is still rejected when the pool names a different gauge.
+    function test_registerPosition_revertWhenPoolNamesAnotherGauge() public {
+        mockPool.setGauge(makeAddr("otherGauge"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev A gauge for this pool that accepts another position manager's NFTs would register and
+    ///      then revert deep inside stake(): the gauge->NFPM binding rejects it up front.
+    function test_registerPosition_revertWhenGaugeAcceptsAnotherManager() public {
+        mockGauge.setNft(makeAddr("otherNfpm"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_setGauge_revertWhenGaugeAcceptsAnotherManager() public {
+        _register(false);
+        MockCLGauge otherNfpmGauge = new MockCLGauge(address(mockAero));
+        otherNfpmGauge.setPool(pool);
+        otherNfpmGauge.setNft(makeAddr("otherNfpm"));
+        mockPool.setGauge(address(otherNfpmGauge));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(otherNfpmGauge));
     }
 
     /// @dev Widths are uint24 but downstream tick math casts them to int24, which bit-reinterprets
