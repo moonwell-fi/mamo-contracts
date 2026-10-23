@@ -32,6 +32,8 @@ jobs:
       - name: Install Node.js dependencies
         run: npm ci
 
+      # fmt stays on this nightly (1.7.x formats differently); the test jobs run v1.7.1, whose EIP-7702
+      # handling matches Base (older revm follows the delegation, so a delegated EOA reads as a contract)
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
@@ -72,7 +74,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run basic tests
         run: make test
@@ -98,7 +100,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run unit tests
         run: make test-unit
@@ -124,7 +126,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run USDC strategy tests
         run: make usdc-strategy
@@ -150,7 +152,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run cbBTC strategy tests
         run: make cbbtc-strategy
@@ -176,7 +178,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run WETH strategy tests
         run: make weth-strategy
@@ -202,7 +204,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run strategy factory tests
         run: make strategy-factory
@@ -234,7 +236,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run USDC price checker tests
         run: make usdc-price-checker
@@ -260,7 +262,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run cbBTC price checker tests
         run: make cbbtc-price-checker
@@ -286,7 +288,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run WETH price checker tests
         run: make weth-price-checker
@@ -312,7 +314,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       # Covers BOTH test/LeveragedAeroVault.unit.t.sol and test/leveraged-aero/*.unit.t.sol —
       # the make target names each path explicitly rather than relying on the test-unit glob.
@@ -343,7 +345,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       # Self-forking Base test (see the make target's comment for why there is no --fork-url).
       # BASE_RPC_URL comes from the workflow-level env and is read via vm.envString in setUp.
@@ -371,7 +373,10 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
+
+      - name: Run LPAutoBalancerV2 integration tests
+        run: make lp-auto-balancer-v2
 
       - name: Run LPAutoBalancerV2 deploy-script test
         run: make lp-v2-deploy
@@ -400,7 +405,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run stock price checker tests
         run: make stock-price-checker
@@ -444,7 +449,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run stock router swap tests
         run: make stock-router-swap
@@ -470,12 +475,65 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       # Self-forking Base test (see the make target's comment for why there is no --fork-url).
       # BASE_RPC_URL comes from the workflow-level env and is read via vm.envString in setUp.
       - name: Run stock accounts deployment proposal tests (016, on a Base fork)
         run: make stock-accounts-setup
+
+  mamo-staking-v2:
+    name: Staking V2 Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Run staking V2 tests
+        run: make mamo-staking-v2
+
+  stock-drop-setup:
+    name: Stock Drop Proposal Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      # Self-forking Base test; BASE_RPC_URL comes from the workflow-level env.
+      - name: Run stock drop proposal tests (013, 019 then 017, f-mamo 006 and 007, on a Base fork)
+        run: make stock-drop-setup
 
   stock-universe-listing:
     name: Stock Universe Listing Proposal Tests
@@ -498,7 +556,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       # Self-forking Base test (see the make target's comment for why there is no --fork-url).
       - name: Run stock universe listing proposal tests (018, on a Base fork)
@@ -525,7 +583,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       # Self-forking Base test (see the make target's comment for why there is no --fork-url).
       # BASE_RPC_URL comes from the workflow-level env and is read via vm.envString in setUp.
