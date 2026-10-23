@@ -308,6 +308,32 @@ jobs:
       - name: Run v1 strategy upgrade tests
         run: make v1-upgrade
 
+  strategy-v2-upgrade:
+    name: Strategy V2 Upgrade Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - name: Run strategy v2 upgrade tests
+        run: make strategy-v2-upgrade
+
   strategy-factory-multicall:
     name: Strategy Factory & Multicall Tests
     runs-on: ubuntu-latest
