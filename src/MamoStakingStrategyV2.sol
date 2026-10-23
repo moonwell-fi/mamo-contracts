@@ -48,6 +48,10 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      *      driving compound()'s amountOutMinimum to zero with the honest checker and honest router
      *      still in place. Mirrors MamoStakingRegistry.MAX_SLIPPAGE_IN_BPS; if that policy ever
      *      changes, this constant is the second place to change.
+     * @dev Checked once, in setStakingRegistry. getAccountSlippage() reads the registry's
+     *      defaultSlippageInBps() live without bounding it, and setAccountSlippage() bounds the owner's
+     *      value only by the current registry's MAX_SLIPPAGE_IN_BPS(). MamoStakingRegistry and V2 cap
+     *      both at 2500, so the ceiling holds for as long as one of them is the registry in use.
      */
     uint256 public constant MAX_REGISTRY_SLIPPAGE_IN_BPS = 2500;
 
@@ -389,7 +393,11 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
     /**
      * @notice Withdraw all available rewards without affecting staked balance
-     * @dev Claims all reward tokens and transfers them to the owner
+     * @dev Claims every MultiRewards reward but forwards only the tokens the staking registry lists.
+     *      MamoStakingRegistryV2 refuses to list MAMO, so MAMO paid by getReward() stays here until compound or
+     *      reinvest stakes it, withdrawAll transfers it, or recoverERC20 recovers it. A reward token missing
+     *      from the registry (e.g. on a strategy still pointed at the deprecated registry) stays here too,
+     *      until it is listed, the strategy is repointed with setStakingRegistry, or it is recovered.
      */
     function withdrawRewards() external onlyOwner {
         multiRewards.getReward();
