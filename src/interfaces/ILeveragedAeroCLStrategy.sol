@@ -23,7 +23,6 @@ interface ILeveragedAeroCLStrategy {
         Pending, // 0
         Executed, // 1
         Settled // 2
-
     }
 
     /// @notice An escrowed async-redeem request; field order MUST match the vendored
