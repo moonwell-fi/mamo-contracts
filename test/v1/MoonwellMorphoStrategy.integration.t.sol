@@ -135,11 +135,10 @@ contract MoonwellMorphoStrategyV1Test is Test {
 
         require(addresses.isAddressSet(assetConfig.strategyImplementation), "Strategy implementation not deployed");
 
-        splitMToken = assetConfig.strategyParams.splitMToken;
-        splitVault = assetConfig.strategyParams.splitVault;
-
         string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         StrategyFactory factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
+        splitMToken = factory.splitMToken();
+        splitVault = factory.splitVault();
 
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
@@ -742,8 +741,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify initial split
-        assertEq(strategy.splitMToken(), config.splitMToken, "Initial mToken split should be 5000 (50%)");
-        assertEq(strategy.splitVault(), config.splitVault, "Initial vault split should be 5000 (50%)");
+        assertEq(strategy.splitMToken(), splitMToken, "Initial mToken split should be 5000 (50%)");
+        assertEq(strategy.splitVault(), splitVault, "Initial vault split should be 5000 (50%)");
 
         // Verify initial balances match the expected split
         uint256 totalBalance = getTotalBalance(address(strategy));
@@ -820,8 +819,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfInvalidSplitParameters() public {
@@ -841,8 +840,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfNoFundsToRebalance() public {
@@ -855,8 +854,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), splitVault, "Vault split should remain unchanged");
     }
 
     function testDepositIdleTokens() public {

@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {UpgradeV1Strategies} from "../../multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol";
 import {BaseTest} from "../BaseTest.t.sol";
+
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
 import {ERC20MoonwellMorphoStrategy} from "@contracts/v1/ERC20MoonwellMorphoStrategy.sol";
 import {StrategyFactory} from "@contracts/v1/StrategyFactory.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
@@ -55,50 +59,37 @@ contract StrategyV1UpgradeTest is BaseTest {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
         vm.txGasPrice(0);
         vm.fee(0);
-        super.setUp();
+        // Frozen pre-020 book: the live one moves to contracts that do not exist at the pin
+        vm.setEnv("ADDRESSES_PATH", "./addresses/rehearsal-020");
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+        addresses = new Addresses("./addresses/rehearsal-020", chainIds);
+        vm.makePersistent(address(addresses));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
-        liveFactory = StrategyFactory(addresses.getAddress("USDC_STRATEGY_FACTORY"));
+        liveFactory = StrategyFactory(addresses.getAddress("USDC_STRATEGY_FACTORY")); // pre-proposal book
         usdc = IERC20(addresses.getAddress("USDC"));
         mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
         vault = IERC20(addresses.getAddress("USDC_METAMORPHO_VAULT"));
         xwell = addresses.getAddress("xWELL_PROXY");
         backend = registry.getBackendAddress();
-        address multisig = addresses.getAddress("MAMO_MULTISIG");
         assertEq(mToken.getCash(), 0, "pin must sit where Moonwell USDC has no cash");
 
-        newImpl = new ERC20MoonwellMorphoStrategy();
-        address[] memory rewardTokens = new address[](2);
-        rewardTokens[0] = xwell;
-        rewardTokens[1] = addresses.getAddress("MORPHO");
-        factory = new StrategyFactory(
-            address(registry),
-            liveFactory.mamoBackend(),
-            address(mToken),
-            address(vault),
-            address(usdc),
-            liveFactory.slippagePriceChecker(),
-            address(newImpl),
-            multisig,
-            0,
-            10_000,
-            1,
-            liveFactory.hookGasLimit(),
-            liveFactory.allowedSlippageInBps(),
-            liveFactory.compoundFee(),
-            rewardTokens
-        );
-
-        vm.startPrank(multisig);
-        registry.whitelistImplementation(address(newImpl), 1);
-        registry.grantRole(registry.BACKEND_ROLE(), address(factory));
-        vm.stopPrank();
+        UpgradeV1Strategies upgrade = new UpgradeV1Strategies();
+        vm.makePersistent(address(upgrade));
+        upgrade.run();
+        newImpl = ERC20MoonwellMorphoStrategy(payable(upgrade.addresses().getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
+        factory = StrategyFactory(upgrade.addresses().getAddress("USDC_STRATEGY_FACTORY"));
     }
 
     function test_liveFactory_canNoLongerCreate() public {
         address user = makeAddr("user");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, address(liveFactory), registry.BACKEND_ROLE()
+            )
+        );
         vm.prank(user);
-        vm.expectRevert("Not latest implementation");
         liveFactory.createStrategyForUser(user);
     }
 

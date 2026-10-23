@@ -5,8 +5,8 @@
   "moonwellMarket": "MOONWELL_USDC",
   "metamorphoVault": "USDC_METAMORPHO_VAULT",
   "strategyParams": {
-    "splitMToken": 10000,
-    "splitVault": 0,
+    "splitMToken": 0,
+    "splitVault": 10000,
     "hookGasLimit": 100000,
     "allowedSlippageInBps": 100,
     "compoundFee": 500,
