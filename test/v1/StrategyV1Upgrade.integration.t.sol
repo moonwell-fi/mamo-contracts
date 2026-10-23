@@ -242,6 +242,60 @@ contract StrategyV1UpgradeTest is BaseTest {
         s.updatePosition(0, 10_000);
     }
 
+    function test_withdrawAll_allInDryMoonwell_keepsTheEventAndDoesNotRevert() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
+        uint256 underlying = mToken.balanceOfUnderlying(FUNDED_PROXY);
+        vm.expectEmit(true, true, true, true);
+        emit ERC20MoonwellMorphoStrategy.MoonwellRedeemLimited(0, mBalance, underlying);
+        vm.prank(FUNDED_OWNER);
+        s.withdrawAll();
+        assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "position stays until Moonwell has cash");
+    }
+
+    function test_wethDustCash_skipsARedeemThatWouldBurnZeroMTokens() public {
+        // A type-4 account on the new implementation, 10000 / 0 like the live WETH factory
+        StrategyFactory live = StrategyFactory(addresses.getAddress("WETH_STRATEGY_FACTORY"));
+        address[] memory rewardTokens = new address[](2);
+        rewardTokens[0] = xwell;
+        rewardTokens[1] = addresses.getAddress("MORPHO");
+        StrategyFactory wethFactory = new StrategyFactory(
+            address(registry),
+            live.mamoBackend(),
+            live.mToken(),
+            live.metaMorphoVault(),
+            live.token(),
+            live.slippagePriceChecker(),
+            registry.latestImplementationById(4),
+            live.feeRecipient(),
+            10_000,
+            0,
+            4,
+            live.hookGasLimit(),
+            live.allowedSlippageInBps(),
+            live.compoundFee(),
+            rewardTokens
+        );
+        bytes32 role = registry.BACKEND_ROLE();
+        vm.prank(addresses.getAddress("MAMO_MULTISIG"));
+        registry.grantRole(role, address(wethFactory));
+        address user = makeAddr("wethUser");
+        vm.prank(user);
+        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(wethFactory.createStrategyForUser(user)));
+        IERC20 weth = IERC20(live.token());
+        IMToken mweth = IMToken(live.mToken());
+        deal(address(weth), user, 1 ether);
+        vm.startPrank(user);
+        weth.approve(address(s), 1 ether);
+        s.deposit(1 ether);
+        vm.stopPrank();
+        deal(address(weth), address(mweth), 1e8); // 0.1 gwei of cash burns zero mTokens at WETH's exchange rate
+        vm.prank(backend);
+        s.updatePosition(0, 10_000);
+        assertEq(s.splitVault(), 10_000);
+        assertGt(mweth.balanceOf(address(s)), 0, "dust cash is skipped, position stays");
+    }
+
     function test_implementation_refusesInitialize() public {
         ERC20MoonwellMorphoStrategy.InitParams memory params;
         vm.expectRevert(Initializable.InvalidInitialization.selector);

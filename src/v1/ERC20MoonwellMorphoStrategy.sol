@@ -300,7 +300,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Get final token balance
         uint256 finalBalance = token.balanceOf(address(this));
-        require(finalBalance > 0, "No tokens to withdraw");
+        // Nothing redeemable right now is not an error when Moonwell still holds the position
+        require(finalBalance > 0 || IERC20(address(mToken)).balanceOf(address(this)) > 0, "No tokens to withdraw");
+        if (finalBalance == 0) return;
 
         // Transfer all tokens to the owner
         token.safeTransfer(msg.sender, finalBalance);
@@ -551,6 +553,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         if (cash >= underlying) {
             require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
         } else {
+            // Moonwell rejects a redeem that burns zero mTokens, which dust cash does at WETH's exchange rate
+            if (cash * 1e18 / mToken.exchangeRateStored() == 0) cash = 0;
             if (cash > 0) require(mToken.redeemUnderlying(cash) == 0, "Failed to redeem mToken");
             emit MoonwellRedeemLimited(cash, IERC20(address(mToken)).balanceOf(address(this)), underlying - cash);
         }
