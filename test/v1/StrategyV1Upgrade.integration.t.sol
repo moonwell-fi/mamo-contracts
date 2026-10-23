@@ -230,6 +230,18 @@ contract StrategyV1UpgradeTest is BaseTest {
         s.claimRewards(tokens, amounts, new bytes32[][](2));
     }
 
+    function test_onlyBackend_isRoleMembership() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        vm.prank(address(factory)); // any BACKEND_ROLE member, not only index 0
+        s.updatePosition(0, 10_000);
+        vm.prank(addresses.getAddress("MAMO_BACKEND")); // the operator EOA holds no role today
+        vm.expectRevert("Not backend");
+        s.updatePosition(0, 10_000);
+        vm.prank(EMPTY_OWNER);
+        vm.expectRevert("Not backend");
+        s.updatePosition(0, 10_000);
+    }
+
     function test_implementation_refusesInitialize() public {
         ERC20MoonwellMorphoStrategy.InitParams memory params;
         vm.expectRevert(Initializable.InvalidInitialization.selector);
