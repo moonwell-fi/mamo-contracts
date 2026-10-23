@@ -5,6 +5,7 @@ import {LPSequencerFeedMock} from "./LPValuationLib.unit.t.sol";
 import {MockERC20} from "./MockERC20.sol";
 import {LPAutoBalancerV2Harness} from "./harness/LPAutoBalancerV2Harness.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
+import {MockCLGaugeV3} from "./mocks/MockCLGaugeV3.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
@@ -386,6 +387,13 @@ contract MockCLPoolV2 is ICLPool {
 
     function setTickSpacing(int24 ts) external {
         _tickSpacing = ts;
+    }
+
+    /// @notice The pool's own gauge pointer, read only by the V3 gauge binding check.
+    address public gauge;
+
+    function setGauge(address gauge_) external {
+        gauge = gauge_;
     }
 
     function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, bool unlocked) {
@@ -1788,6 +1796,113 @@ contract LPAutoBalancerV2UnitTest is Test {
     }
 
     /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
+    // ─── Slipstream V3 gauge (no rewardToken/getReward; claimEmissions + earned(address,uint256[])) ───
+
+    /// @dev Swap the fixture's V1 gauge for a V3 mock bound from both sides (gauge.pool, pool.gauge).
+    function _useV3Gauge() internal returns (MockCLGaugeV3 v3) {
+        v3 = new MockCLGaugeV3(address(mockAero));
+        v3.setPool(pool);
+        mockPool.setGauge(address(v3));
+        gauge = address(v3);
+    }
+
+    function test_isV3Gauge_classifiesBothVersions() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        assertTrue(LPPositionLib.isV3Gauge(address(v3)), "V3 mock");
+        assertFalse(LPPositionLib.isV3Gauge(address(mockGauge)), "V1 mock");
+        assertFalse(LPPositionLib.isV3Gauge(makeAddr("eoa")), "no code");
+    }
+
+    function test_v3Gauge_registerAcceptsPoolBoundGauge() public {
+        _useV3Gauge();
+        _register(true);
+        assertEq(lab.exposed_position().gauge, gauge, "V3 gauge stored");
+    }
+
+    function test_v3Gauge_registerRevertsWhenPoolNamesAnotherGauge() public {
+        _useV3Gauge();
+        mockPool.setGauge(makeAddr("otherGauge"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_v3Gauge_setGaugeRevertsWhenGaugeNamesAnotherPool() public {
+        _register(false);
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        v3.setPool(makeAddr("otherPool"));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(v3));
+    }
+
+    function test_v3Gauge_claimEmissionsClaimsBothLegsInOneCall() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 14e18);
+        v3.setAeroPerId(7e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.claimCallCount(), 1, "one claim call");
+        assertEq(v3.lastClaimIdCount(), 2, "main + alt claimed");
+        assertEq(v3.lastClaimRecipient(), address(lab), "claimed to the balancer");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 14e18, "both legs forwarded");
+    }
+
+    function test_v3Gauge_compoundDropsAndForwardsToModule() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 1_000e18);
+        v3.setAeroPerId(1_000e18);
+        uint256 fcBefore = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.compound(7_000);
+        assertEq(v3.lastClaimIdCount(), 1, "main only (no alt)");
+        assertEq(mockAero.balanceOf(feeCollector) - fcBefore, 300e18, "30% dropped");
+        assertEq(mockAero.balanceOf(moduleSink), 700e18, "70% to module");
+    }
+
+    function test_v3Gauge_compoundUnstakedSkipsClaim() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NothingToCompound.selector);
+        lab.compound(5_000);
+        assertEq(v3.claimCallCount(), 0, "no claim while unstaked");
+    }
+
+    function test_v3Gauge_unstakeForwardsWithdrawClaim() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 5e18);
+        v3.setAeroPerId(5e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertEq(mockAero.balanceOf(feeCollector) - before, 5e18, "withdraw claim forwarded");
+    }
+
+    function test_v3Gauge_snapshotEarnedTolerant() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        v3.setEarned(3e18, false);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 3e18, "one earned call over both legs");
+        v3.setEarned(3e18, true);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 0, "reverting earned reads as 0");
+    }
+
     function test_registerPosition_revertGaugeRewardMismatch() public {
         MockCLGauge badGauge = new MockCLGauge(makeAddr("notAero")); // rewardToken != AERO
         LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();

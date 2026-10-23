@@ -655,10 +655,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (!p.mainStaked) revert NotStaked();
         // Snapshot AERO balance before claiming from both legs, then forward the net gain.
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        ICLGauge(p.gauge).getReward(p.mainTokenId);
-        if (p.altStaked && p.altTokenId != 0) {
-            ICLGauge(p.gauge).getReward(p.altTokenId);
-        }
+        LPPositionLib.claimRewards(p.gauge, p.mainTokenId, true, p.altTokenId, p.altStaked);
         uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         if (aeroEarned > 0) {
             IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
@@ -701,9 +698,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
 
-        // Harvest pending AERO from staked legs into this contract (no unstake).
-        if (p.mainStaked) ICLGauge(p.gauge).getReward(p.mainTokenId);
-        if (p.altStaked && p.altTokenId != 0) ICLGauge(p.gauge).getReward(p.altTokenId);
+        // Harvest pending AERO from staked legs into this contract (no unstake; V1 or V3 gauge).
+        LPPositionLib.claimRewards(p.gauge, p.mainTokenId, p.mainStaked, p.altTokenId, p.altStaked);
 
         uint256 aero = IERC20(AERO).balanceOf(address(this));
         if (aero == 0) revert NothingToCompound();

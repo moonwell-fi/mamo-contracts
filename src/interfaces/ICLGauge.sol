@@ -10,3 +10,14 @@ interface ICLGauge {
     function pool() external view returns (address);
     function stakedContains(address depositor, uint256 tokenId) external view returns (bool);
 }
+
+/// @notice The Slipstream V3 CLGauge surface that differs from `ICLGauge`. V3 drops `getReward`,
+///         `earned(address,uint256)` and `rewardToken()` (emissions are minted by the LeafVoter);
+///         `deposit`, `withdraw`, `pool` and `stakedContains` keep the `ICLGauge` signatures.
+interface ICLGaugeV3 {
+    /// @notice Claims the listed positions' emissions plus the account's deferred emissions.
+    function claimEmissions(address account, address recipient, uint256[] calldata tokenIds) external;
+    function earned(address account, uint256[] memory tokenIds) external view returns (uint256);
+    /// @notice Block of the position's deposit. V3-only: used to tell the gauge versions apart.
+    function depositBlock(uint256 tokenId) external view returns (uint256);
+}
