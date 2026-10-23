@@ -12,29 +12,18 @@ import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManag
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LPAutoBalancerV2V3Integration — REAL Base-fork test against Slipstream V3 (WETH/cbBTC CL1).
-//
-// V3 differs from the V1 gauge the balancer was written against: a new position manager, emissions
-// minted by the LeafVoter in a NEW AERO token, no `rewardToken()` / `getReward(uint256)` /
-// `earned(address,uint256)`, and a 100% early-withdraw penalty inside `minStakeBlocks` (7).
-// This proves registration, staking, claiming, compounding, a no-swap rebalance and exit on the
-// real contracts, with the balancer constructed for V3 (V3 NFPM + V3 AERO).
-//
-// Real Base mainnet addresses (resolved on-chain at block 52_964_000):
-//   POOL     0xeC3c3755b9DED4a2960ef50C9b48C1694CE274C2  WETH/cbBTC CL V3, tickSpacing = 1
-//   GAUGE    0xAbb3fb6659e05847631896cB87A6D1b8bc0c6D8C  its CLGauge (pool.gauge() == GAUGE)
-//   NFPM     0x4857DB576eE0e45F10525eC59527BfD10beeC60b  "Slipstream V3 Deposit" (gauge.nft())
-//   AERO_V3  0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee  token the V3 LeafVoter mints as emissions
-//   V1_GAUGE 0x61E0B10423a0009C3f83ab4313813d29437d0817  the CL10 V1 gauge (classifier control)
-// ─────────────────────────────────────────────────────────────────────────────
+// LPAutoBalancerV2V3Integration — Base-fork test against Slipstream V3 (WETH/cbBTC CL1). V3 has a new
+// position manager, emissions minted in a NEW AERO by the LeafVoter, no rewardToken()/getReward/
+// earned(address,uint256), and a 100% early-withdraw penalty inside 7 blocks. Proves registration,
+// staking, claiming, compounding, a no-swap rebalance and exit with a balancer built for V3.
+// Addresses resolved on-chain at PINNED_BLOCK.
 
 contract LPAutoBalancerV2V3Integration is Test {
-    address constant POOL = 0xeC3c3755b9DED4a2960ef50C9b48C1694CE274C2;
-    address constant GAUGE = 0xAbb3fb6659e05847631896cB87A6D1b8bc0c6D8C;
-    address constant NFPM = 0x4857DB576eE0e45F10525eC59527BfD10beeC60b;
-    address constant AERO_V3 = 0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee;
-    address constant V1_GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817;
+    address constant POOL = 0xeC3c3755b9DED4a2960ef50C9b48C1694CE274C2; // WETH/cbBTC CL V3, tickSpacing 1
+    address constant GAUGE = 0xAbb3fb6659e05847631896cB87A6D1b8bc0c6D8C; // pool.gauge() == GAUGE
+    address constant NFPM = 0x4857DB576eE0e45F10525eC59527BfD10beeC60b; // "Slipstream V3 Deposit" = gauge.nft()
+    address constant AERO_V3 = 0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee; // minted as V3 emissions
+    address constant V1_GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817; // CL10 V1 gauge (classifier control)
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
@@ -99,32 +88,25 @@ contract LPAutoBalancerV2V3Integration is Test {
             })
             );
         INonfungiblePositionManager(NFPM).safeTransferFrom(address(this), address(lab), tokenId);
+        // Unset fields (alt, staked flags, cooldown, lastRebalance, active) are zero, as registration expects.
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg;
+        cfg.mainTokenId = tokenId;
+        cfg.pool = POOL;
+        cfg.token0 = WETH;
+        cfg.token1 = CBBTC;
+        cfg.tickSpacing = TICK_SPACING;
+        cfg.gauge = GAUGE;
+        cfg.feeCollector = feeCollector;
+        cfg.oracle0 = ETH_USD;
+        cfg.oracle1 = BTC_USD;
+        cfg.minWidth = 200;
+        cfg.maxWidth = 20_000;
+        cfg.maxCenterDeviation = 200;
+        cfg.twapWindow = 60;
+        cfg.maxTickDeviation = 800_000;
+        cfg.maxRebalanceLossBps = 100;
         vm.prank(admin);
-        lab.registerPosition(
-            LPAutoBalancerV2.ManagedPositionV2({
-                mainTokenId: tokenId,
-                altTokenId: 0,
-                pool: POOL,
-                token0: WETH,
-                token1: CBBTC,
-                tickSpacing: TICK_SPACING,
-                gauge: GAUGE,
-                mainStaked: false,
-                altStaked: false,
-                feeCollector: feeCollector,
-                oracle0: ETH_USD,
-                oracle1: BTC_USD,
-                minWidth: 200,
-                maxWidth: 20_000,
-                maxCenterDeviation: 200,
-                twapWindow: 60,
-                maxTickDeviation: 800_000,
-                maxRebalanceLossBps: 100,
-                minRebalanceInterval: 0,
-                lastRebalance: 0,
-                active: false
-            })
-        );
+        lab.registerPosition(cfg);
         vm.prank(rebalancer);
         lab.stake();
     }
@@ -187,32 +169,23 @@ contract LPAutoBalancerV2V3Integration is Test {
         // swap, which at spacing 1 would cross thousands of initialized ticks over the fork RPC.
         uint24 width = 2 * WIDTH;
         (int24 tl, int24 tu) = _straddle(width);
+        // Zero amount minimums: the fork is pinned and deterministic.
+        LPAutoBalancerV2.RebalanceParams memory params;
+        params.width = width;
+        params.altWidth = 10;
+        params.deadline = block.timestamp + 1;
+        params.expectedTickLower = tl;
+        params.expectedTickUpper = tu;
         uint256 aeroBefore = IERC20(AERO_V3).balanceOf(feeCollector);
         vm.prank(rebalancer);
-        lab.rebalanceUsingAlt(
-            LPAutoBalancerV2.RebalanceParams({
-                width: width,
-                altWidth: 10,
-                amount0MinMain: 0,
-                amount1MinMain: 0,
-                amount0MinAlt: 0,
-                amount1MinAlt: 0,
-                amount0MinWithdraw: 0,
-                amount1MinWithdraw: 0,
-                amount0MinWithdrawAlt: 0,
-                amount1MinWithdrawAlt: 0,
-                deadline: block.timestamp + 1,
-                expectedTickLower: tl,
-                expectedTickUpper: tu
-            })
-        );
-        (uint256 newId,,,,,,, bool mainStaked,,,,,,,,,,,,,) = lab.position();
+        lab.rebalanceUsingAlt(params);
+        (uint256 newId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        LPAutoBalancerV2.DecisionSnapshotV2 memory snap = lab.getDecisionSnapshot();
         assertTrue(newId != oldId, "fresh main");
-        assertTrue(mainStaked, "restaked");
+        assertTrue(snap.mainStaked, "restaked");
         assertEq(INonfungiblePositionManager(NFPM).ownerOf(newId), GAUGE, "new main in the V3 gauge");
-        (,,,,, int24 newTl, int24 newTu,,,,,) = INonfungiblePositionManager(NFPM).positions(newId);
-        assertEq(newTl, tl, "committed lower tick");
-        assertEq(newTu, tu, "committed upper tick");
+        assertEq(snap.mainTickLower, tl, "committed lower tick");
+        assertEq(snap.mainTickUpper, tu, "committed upper tick");
         assertGt(IERC20(AERO_V3).balanceOf(feeCollector), aeroBefore, "withdraw-time claim forwarded");
     }
 

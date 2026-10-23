@@ -1795,7 +1795,6 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.setPositionConfig(200, 2000, 400, 1800, 200, 100, 0); // minWidth == tickSpacing
     }
 
-    /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
     // ─── Slipstream V3 gauge (no rewardToken/getReward; claimEmissions + earned(address,uint256[])) ───
 
     /// @dev Swap the fixture's V1 gauge for a V3 mock bound from both sides (gauge.pool, pool.gauge).
@@ -1903,6 +1902,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(lab.getDecisionSnapshot().earnedAero, 0, "reverting earned reads as 0");
     }
 
+    /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
     function test_registerPosition_revertGaugeRewardMismatch() public {
         MockCLGauge badGauge = new MockCLGauge(makeAddr("notAero")); // rewardToken != AERO
         LPAutoBalancerV2.ManagedPositionV2 memory cfg = _baseConfig();

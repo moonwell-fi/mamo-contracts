@@ -24,7 +24,6 @@ contract MockCLGaugeV3 {
     address public lastClaimRecipient;
 
     mapping(address => mapping(uint256 => bool)) internal _staked;
-    mapping(uint256 => uint256) public depositBlock;
 
     constructor(address emissionToken_) {
         emissionToken = emissionToken_;
@@ -45,13 +44,11 @@ contract MockCLGaugeV3 {
 
     function deposit(uint256 tokenId) external {
         _staked[msg.sender][tokenId] = true;
-        depositBlock[tokenId] = block.number;
     }
 
     function withdraw(uint256 tokenId) external {
         require(_staked[msg.sender][tokenId], "NA");
         _staked[msg.sender][tokenId] = false;
-        delete depositBlock[tokenId];
         if (aeroPerId > 0) IERC20(emissionToken).safeTransfer(msg.sender, aeroPerId);
     }
 
@@ -74,6 +71,9 @@ contract MockCLGaugeV3 {
         }
         return earnedAmount;
     }
+
+    /// @notice Exists only for LPPositionLib.isV3Gauge, which probes it to classify the gauge.
+    function depositBlock(uint256) external pure returns (uint256) {}
 
     function stakedContains(address depositor, uint256 tokenId) external view returns (bool) {
         return _staked[depositor][tokenId];

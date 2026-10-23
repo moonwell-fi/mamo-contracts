@@ -133,7 +133,8 @@ library LPPositionLib {
     ///      later, deep inside stake()/_restakeBoth on the rebalance path. A V1 gauge must also reward
     ///      in `aero` (or staked emissions would be stranded). A V3 gauge has no `rewardToken()` — the
     ///      LeafVoter mints its emissions — so it is instead bound from both sides: the pool must name
-    ///      it as its gauge. The V3 emission token is checked against `AERO` at deployment.
+    ///      it as its gauge. Nothing on-chain names the V3 emission token, so the deployer must pair
+    ///      the V3 position manager with the V3 AERO in the constructor.
     function validateGauge(address gauge, address pool, address aero) public view {
         if (gauge != address(0)) {
             if (isV3Gauge(gauge)) {
@@ -162,28 +163,27 @@ library LPPositionLib {
     function claimRewards(address gauge, uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
         public
     {
-        bool alt = altStaked && altTokenId != 0;
-        if (!mainStaked && !alt) return;
-        if (!isV3Gauge(gauge)) {
-            if (mainStaked) ICLGauge(gauge).getReward(mainTokenId);
-            if (alt) ICLGauge(gauge).getReward(altTokenId);
+        uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (ids.length == 0) return;
+        if (isV3Gauge(gauge)) {
+            ICLGaugeV3(gauge).claimEmissions(address(this), address(this), ids);
             return;
         }
-        ICLGaugeV3(gauge).claimEmissions(
-            address(this), address(this), _stakedIds(mainTokenId, mainStaked, altTokenId, alt)
-        );
+        for (uint256 i; i < ids.length; i++) {
+            ICLGauge(gauge).getReward(ids[i]);
+        }
     }
 
-    /// @dev The staked legs' token ids, main first. `alt` already folds in `altTokenId != 0`.
-    function _stakedIds(uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool alt)
+    /// @dev The staked legs' token ids, main first; the alt counts only when it exists.
+    function _stakedIds(uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
         private
         pure
         returns (uint256[] memory ids)
     {
+        bool alt = altStaked && altTokenId != 0;
         ids = new uint256[]((mainStaked ? 1 : 0) + (alt ? 1 : 0));
-        uint256 i;
-        if (mainStaked) ids[i++] = mainTokenId;
-        if (alt) ids[i] = altTokenId;
+        if (mainStaked) ids[0] = mainTokenId;
+        if (alt) ids[ids.length - 1] = altTokenId;
     }
 
     /// @notice Collect accrued LP fees for `tokenId` (recipient = the balancer under DELEGATECALL) and
@@ -306,25 +306,17 @@ library LPPositionLib {
         uint256 altTokenId,
         bool altStaked
     ) public view returns (uint256 total) {
+        uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (ids.length == 0) return 0;
         if (isV3Gauge(gauge)) {
-            bool alt = altStaked && altTokenId != 0;
-            if (!mainStaked && !alt) return 0;
             // One call over both legs; V3 `earned` also counts the account's deferred emissions.
-            try ICLGaugeV3(gauge).earned(owner, _stakedIds(mainTokenId, mainStaked, altTokenId, alt)) returns (
-                uint256 e
-            ) {
-                return e;
-            } catch {
-                return 0;
-            }
-        }
-        if (mainStaked) {
-            try ICLGauge(gauge).earned(owner, mainTokenId) returns (uint256 e) {
-                total += e;
+            try ICLGaugeV3(gauge).earned(owner, ids) returns (uint256 e) {
+                total = e;
             } catch {}
+            return total;
         }
-        if (altStaked && altTokenId != 0) {
-            try ICLGauge(gauge).earned(owner, altTokenId) returns (uint256 e) {
+        for (uint256 i; i < ids.length; i++) {
+            try ICLGauge(gauge).earned(owner, ids[i]) returns (uint256 e) {
                 total += e;
             } catch {}
         }
