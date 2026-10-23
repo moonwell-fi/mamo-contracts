@@ -59,6 +59,7 @@ contract UpgradeV1Strategies is MultisigProposal {
 
         address deployer = addresses.getAddress("DEPLOYER_EOA");
         vm.startBroadcast(deployer);
+        // Same bytecode twice: implementationToId maps each address to a single type id
         address impl = address(new ERC20MoonwellMorphoStrategy());
         address implV2 = address(new ERC20MoonwellMorphoStrategy());
         vm.stopBroadcast();
@@ -110,12 +111,25 @@ contract UpgradeV1Strategies is MultisigProposal {
             addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL"),
             addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL_V2")
         ];
+        address[2] memory oldImpls = [OLD_IMPL, OLD_IMPL_V2];
         uint256[2] memory ids = [uint256(1), 4];
+        ERC20MoonwellMorphoStrategy.InitParams memory params;
         for (uint256 i; i < 2; i++) {
             assertTrue(registry.whitelistedImplementations(impls[i]), "new implementation should be whitelisted");
             assertEq(registry.implementationToId(impls[i]), ids[i], "new implementation has the wrong type id");
             assertEq(registry.latestImplementationById(ids[i]), impls[i], "latest implementation should be the new one");
+            // Un-upgraded proxies keep a valid upgrade path
+            assertTrue(registry.whitelistedImplementations(oldImpls[i]), "old implementation should stay whitelisted");
+            assertEq(registry.implementationToId(oldImpls[i]), ids[i], "old implementation has the wrong type id");
+            try ERC20MoonwellMorphoStrategy(payable(impls[i])).initialize(params) {
+                revert("bare implementation should refuse initialize");
+            } catch (bytes memory reason) {
+                assertEq(reason, abi.encodeWithSignature("InvalidInitialization()"), "initialize revert");
+            }
         }
+        assertEq(_codeWithoutSelf(impls[0]), _codeWithoutSelf(impls[1]), "implementations should share bytecode");
+        (, bytes32 appDataHash) = ERC20MoonwellMorphoStrategy(payable(impls[0])).expectedAppData();
+        assertEq(appDataHash, keccak256(bytes('{"appCode":"Mamo","metadata":{},"version":"1.3.0"}')), "appData");
 
         bytes32 role = registry.BACKEND_ROLE();
         for (uint256 i; i < 3; i++) {
@@ -140,6 +154,7 @@ contract UpgradeV1Strategies is MultisigProposal {
             assertEq(factory.mamoBackend(), addresses.getAddress("MAMO_BACKEND"), "mamoBackend");
         }
 
+        // Un-upgraded proxies gate on index 0; the new implementation gates on BACKEND_ROLE membership
         assertEq(
             registry.getBackendAddress(),
             addresses.getAddress("STRATEGY_MULTICALL"),
@@ -157,6 +172,11 @@ contract UpgradeV1Strategies is MultisigProposal {
                 abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, oldFactories[0], role)
             );
         }
+    }
+
+    // UUPS embeds address(this) as an immutable, so blank it out before comparing
+    function _codeWithoutSelf(address a) internal view returns (string memory) {
+        return vm.replace(vm.toString(a.code), vm.replace(vm.toLowercase(vm.toString(a)), "0x", ""), "");
     }
 
     function _registry() internal view returns (MamoStrategyRegistry) {
