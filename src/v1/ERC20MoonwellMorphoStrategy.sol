@@ -15,6 +15,7 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IMerkleDistributor {
     function claim(
@@ -119,6 +120,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when the compound fee is taken from claimed rewards
     event CompoundFeeCollected(address indexed feeRecipient, address[] rewardTokens, uint256[] feeAmounts);
 
+    // @notice Emitted when Moonwell's cash could not cover the whole mToken position
+    event MoonwellRedeemLimited(uint256 cashRedeemed, uint256 mTokenLeft, uint256 underlyingLeft);
+
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
@@ -145,11 +149,16 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
      */
     modifier onlyBackend() {
-        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        require(_isBackend(msg.sender), "Not backend");
         _;
     }
 
     // ==================== INITIALIZER ====================
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
     /**
      * @notice Initializer function that sets all the parameters and grants appropriate roles
@@ -237,18 +246,30 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         if (tokenBalance < amount) {
             uint256 amountNeeded = amount - tokenBalance;
 
-            uint256 withdrawFromMoonwell = (amountNeeded * splitMToken) / SPLIT_TOTAL;
+            // Split is the preference; a leg that cannot pay its share now shifts the excess to the other
+            uint256 fromMoonwell = (amountNeeded * splitMToken) / SPLIT_TOTAL;
+            uint256 fromVault = amountNeeded - fromMoonwell;
+            uint256 moonwellMax = Math.min(mToken.getCash(), mToken.balanceOfUnderlying(address(this)));
+            uint256 vaultMax = metaMorphoVault.maxWithdraw(address(this));
+
+            if (fromMoonwell > moonwellMax) {
+                fromVault += fromMoonwell - moonwellMax;
+                fromMoonwell = moonwellMax;
+            }
+            if (fromVault > vaultMax) {
+                fromMoonwell += fromVault - vaultMax;
+                fromVault = vaultMax;
+            }
+            require(fromMoonwell <= moonwellMax, "Moonwell cannot pay the remainder now");
 
             // Withdraw from Moonwell if needed
-            if (withdrawFromMoonwell > 0) {
-                require(mToken.redeemUnderlying(withdrawFromMoonwell) == 0, "Failed to redeem mToken");
+            if (fromMoonwell > 0) {
+                require(mToken.redeemUnderlying(fromMoonwell) == 0, "Failed to redeem mToken");
             }
 
-            uint256 withdrawFromMetaMorpho = (amountNeeded * splitVault) / SPLIT_TOTAL;
-
             // Withdraw from MetaMorpho if needed
-            if (withdrawFromMetaMorpho > 0) {
-                metaMorphoVault.withdraw(withdrawFromMetaMorpho, address(this), address(this));
+            if (fromVault > 0) {
+                metaMorphoVault.withdraw(fromVault, address(this), address(this));
             }
         }
 
@@ -324,6 +345,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /**
      * @notice Claims rewards from Merkle protocol distributor on behalf of a user
      * @dev Only callable by the backend address
+     * @dev Merkl only lets this contract claim for itself, so the fee is not user-skippable
      * @param rewardTokens The addresses of the reward tokens
      * @param rewardAmounts The amounts of the reward tokens
      * @param proofs The proofs of the reward tokens
@@ -339,6 +361,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address[] memory accounts = new address[](rewardTokens.length);
         uint256[] memory feeAmounts = new uint256[](rewardTokens.length);
         for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (i > 0) require(rewardTokens[i] > rewardTokens[i - 1], "Reward tokens must be strictly ascending");
             accounts[i] = address(this);
             feeAmounts[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
@@ -524,10 +547,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         if (mTokenBalance == 0) return;
 
         uint256 cash = mToken.getCash();
-        if (cash >= mToken.balanceOfUnderlying(address(this))) {
+        uint256 underlying = mToken.balanceOfUnderlying(address(this));
+        if (cash >= underlying) {
             require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
-        } else if (cash > 0) {
-            require(mToken.redeemUnderlying(cash) == 0, "Failed to redeem mToken");
+        } else {
+            if (cash > 0) require(mToken.redeemUnderlying(cash) == 0, "Failed to redeem mToken");
+            emit MoonwellRedeemLimited(cash, IERC20(address(mToken)).balanceOf(address(this)), underlying - cash);
         }
     }
 
