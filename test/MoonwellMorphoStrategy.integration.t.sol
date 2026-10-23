@@ -128,8 +128,9 @@ contract MoonwellMorphoStrategyTest is Test {
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         marketRegistry = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
 
-        splitMToken = assetConfig.strategyParams.splitMToken;
-        splitVault = assetConfig.strategyParams.splitVault;
+        // The multi-market factory takes its default split from markets[], not the v1 strategyParams
+        splitMToken = assetConfig.markets[0].splitBps;
+        splitVault = assetConfig.markets[1].splitBps;
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
         // Create strategy for owner using the deployed factory
