@@ -128,22 +128,18 @@ library LPPositionLib {
     }
 
     /// @dev Validate a gauge binding (shared by registerPosition/setPool via _validateAndStore AND
-    ///      setGauge, so the two admin paths cannot drift): a non-zero gauge must be the gauge for THIS
-    ///      `pool` — a valid gauge for a different pool would otherwise be accepted and only fail
-    ///      later, deep inside stake()/_restakeBoth on the rebalance path. A V1 gauge must also reward
-    ///      in `aero` (or staked emissions would be stranded). A V3 gauge has no `rewardToken()` — the
-    ///      LeafVoter mints its emissions — so it is instead bound from both sides: the pool must name
-    ///      it as its gauge. Nothing on-chain names the V3 emission token, so the deployer must pair
-    ///      the V3 position manager with the V3 AERO in the constructor.
-    function validateGauge(address gauge, address pool, address aero) public view {
-        if (gauge != address(0)) {
-            if (isV3Gauge(gauge)) {
-                if (ICLPool(pool).gauge() != gauge) revert PoolMismatch();
-            } else if (ICLGauge(gauge).rewardToken() != aero) {
-                revert GaugeRewardMismatch();
-            }
-            if (ICLGauge(gauge).pool() != pool) revert PoolMismatch();
-        }
+    ///      setGauge, so the two admin paths cannot drift). A non-zero gauge, of either version, must
+    ///      be bound to THIS `pool` from both sides (`gauge.pool()` and `pool.gauge()`) and must accept
+    ///      THIS balancer's `positionManager` NFTs (`gauge.nft()`); otherwise registration succeeds and
+    ///      the mismatch only surfaces later, deep inside stake()/_restakeBoth on the rebalance path.
+    ///      A V1 gauge must also reward in `aero` (or staked emissions would be stranded). A V3 gauge
+    ///      has no `rewardToken()` (its LeafVoter mints emissions) and nothing on-chain names its
+    ///      emission token, so the deployer must pair the V3 position manager with the V3 AERO.
+    function validateGauge(address gauge, address pool, address aero, address positionManager) public view {
+        if (gauge == address(0)) return;
+        if (!isV3Gauge(gauge) && ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
+        if (ICLGauge(gauge).pool() != pool || ICLPool(pool).gauge() != gauge) revert PoolMismatch();
+        if (ICLGauge(gauge).nft() != positionManager) revert PoolMismatch();
     }
 
     /// @notice True for a Slipstream V3 CLGauge, identified POSITIVELY by its V3-only

@@ -43,6 +43,14 @@ contract MockCLGauge {
         pool = pool_;
     }
 
+    /// @notice Position manager this gauge reports via `nft()` (for the gauge->NFPM binding check).
+    ///         Independent of `npm`, which only opts in to real NFT custody.
+    address public nft;
+
+    function setNft(address nft_) external {
+        nft = nft_;
+    }
+
     function setNpm(address npm_) external {
         npm = npm_;
     }

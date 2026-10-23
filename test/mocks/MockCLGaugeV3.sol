@@ -33,6 +33,13 @@ contract MockCLGaugeV3 {
         pool = pool_;
     }
 
+    /// @notice Position manager reported via `nft()` (for the gauge->NFPM binding check).
+    address public nft;
+
+    function setNft(address nft_) external {
+        nft = nft_;
+    }
+
     function setAeroPerId(uint256 amount) external {
         aeroPerId = amount;
     }

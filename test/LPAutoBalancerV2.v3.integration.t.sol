@@ -24,6 +24,7 @@ contract LPAutoBalancerV2V3Integration is Test {
     address constant NFPM = 0x4857DB576eE0e45F10525eC59527BfD10beeC60b; // "Slipstream V3 Deposit" = gauge.nft()
     address constant AERO_V3 = 0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee; // minted as V3 emissions
     address constant V1_GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817; // CL10 V1 gauge (classifier control)
+    address constant V3_CL10_GAUGE = 0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5; // V3 gauge of the WETH/cbBTC CL10 V3 pool
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
@@ -136,6 +137,16 @@ contract LPAutoBalancerV2V3Integration is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.GaugeRewardMismatch.selector);
         lab.setGauge(V1_GAUGE);
+    }
+
+    function test_v3_setGaugeRejectsAnotherPoolsV3Gauge() public {
+        _bootstrap();
+        vm.prank(rebalancer);
+        lab.unstake();
+        // Same V3 position manager and gauge version, but bound to the CL10 V3 pool, not POOL.
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(V3_CL10_GAUGE);
     }
 
     function test_v3_claimEmissionsPaysV3Aero() public {

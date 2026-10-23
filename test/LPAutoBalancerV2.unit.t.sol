@@ -489,11 +489,14 @@ contract LPAutoBalancerV2UnitTest is Test {
         // registerPosition cross-validates the pool descriptor: token0/token1/tickSpacing must match.
         mockPool.setTokens(token0, token1);
         mockPool.setTickSpacing(200);
-        // Bind the gauge to this pool so _validateAndStore's gauge->pool check passes.
+        // Bind the gauge to this pool from both sides so _validateAndStore's gauge<->pool check passes.
         mockGauge.setPool(pool);
+        mockPool.setGauge(gauge);
 
         // Rich PM mock with full position lifecycle (positions/decrease/collect/mint/burn).
         mockPM = new MockPositionManagerV2(address(0));
+        // The gauge accepts this position manager's NFTs (validateGauge's gauge->NFPM check).
+        mockGauge.setNft(address(mockPM));
 
         // Real mock feeds: registerPosition probes latestRoundData at set-time
         oracle0 = address(new MockPriceFeed(1e8, 8, block.timestamp));
@@ -1801,6 +1804,7 @@ contract LPAutoBalancerV2UnitTest is Test {
     function _useV3Gauge() internal returns (MockCLGaugeV3 v3) {
         v3 = new MockCLGaugeV3(address(mockAero));
         v3.setPool(pool);
+        v3.setNft(address(mockPM));
         mockPool.setGauge(address(v3));
         gauge = address(v3);
     }
@@ -1834,6 +1838,15 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
         lab.setGauge(address(v3));
+    }
+
+    function test_v3Gauge_registerRevertsWhenGaugeAcceptsAnotherManager() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        v3.setNft(makeAddr("v1Nfpm"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
     }
 
     function test_v3Gauge_claimEmissionsClaimsBothLegsInOneCall() public {
@@ -1931,6 +1944,37 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
         lab.setGauge(address(wrongPoolGauge));
+    }
+
+    /// @dev The gauge<->pool binding is checked from both sides on V1 too: a gauge that names this
+    ///      pool is still rejected when the pool names a different gauge.
+    function test_registerPosition_revertWhenPoolNamesAnotherGauge() public {
+        mockPool.setGauge(makeAddr("otherGauge"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev A gauge for this pool that accepts another position manager's NFTs would register and
+    ///      then revert deep inside stake(): the gauge->NFPM binding rejects it up front.
+    function test_registerPosition_revertWhenGaugeAcceptsAnotherManager() public {
+        mockGauge.setNft(makeAddr("otherNfpm"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_setGauge_revertWhenGaugeAcceptsAnotherManager() public {
+        _register(false);
+        MockCLGauge otherNfpmGauge = new MockCLGauge(address(mockAero));
+        otherNfpmGauge.setPool(pool);
+        otherNfpmGauge.setNft(makeAddr("otherNfpm"));
+        mockPool.setGauge(address(otherNfpmGauge));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(otherNfpmGauge));
     }
 
     /// @dev Widths are uint24 but downstream tick math casts them to int24, which bit-reinterprets

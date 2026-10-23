@@ -447,9 +447,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Both legs must be unstaked: a partial unstake can leave the alt NFT custodied by the OLD
         // gauge; changing the gauge while altStaked would strand it (M-2).
         if (position.mainStaked || position.altStaked) revert PositionStaked();
-        // Same gauge->pool + reward-token binding _validateAndStore enforces at registration —
-        // shared via LPPositionLib.validateGauge so the two admin paths cannot drift.
-        LPPositionLib.validateGauge(gauge, p.pool, AERO);
+        // Same gauge<->pool, gauge->NFPM and reward-token binding _validateAndStore enforces at
+        // registration — shared via LPPositionLib.validateGauge so the two admin paths cannot drift.
+        LPPositionLib.validateGauge(gauge, p.pool, AERO, address(POSITION_MANAGER));
         position.gauge = gauge;
         emit GaugeUpdated(gauge);
     }
@@ -1623,9 +1623,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             MAX_LOSS_CAP_BPS,
             config.tickSpacing
         );
-        // Gauge reward-token + gauge->pool binding, shared with setGauge (LPPositionLib.validateGauge)
-        // so the registration and post-registration admin paths enforce the same invariant.
-        LPPositionLib.validateGauge(config.gauge, config.pool, AERO);
+        // Gauge reward-token + gauge<->pool + gauge->NFPM binding, shared with setGauge
+        // (LPPositionLib.validateGauge) so registration and later admin paths enforce one invariant.
+        LPPositionLib.validateGauge(config.gauge, config.pool, AERO, address(POSITION_MANAGER));
         // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPPositionLib for
         // EIP-170 headroom (see validatePoolAndNft's NatSpec for the full invariants).
         LPPositionLib.validatePoolAndNft(
