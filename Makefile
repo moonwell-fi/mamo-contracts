@@ -1,7 +1,7 @@
 # The excluded suites self-fork at a PINNED block in setUp: a CLI --fork-url on top of that panics
 # on the Isthmus L1Block and doubles the RPC load. Each has its own target (and CI job) below.
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "ERC20StrategyV2Test|MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|StrategyFactoryIntegrationV1Test|StrategyV1UpgradeTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "ERC20StrategyV2Test|LPAutoBalancerV2Integration|MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|StrategyFactoryIntegrationV1Test|StrategyV1UpgradeTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
