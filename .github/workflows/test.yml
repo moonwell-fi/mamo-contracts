@@ -199,7 +199,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run v1 USDC strategy tests
         run: make v1-usdc-strategy
@@ -225,7 +225,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run v1 cbBTC strategy tests
         run: make v1-cbbtc-strategy
@@ -251,7 +251,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run v1 WETH strategy tests
         run: make v1-weth-strategy
@@ -277,7 +277,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run v1 strategy factory tests
         run: make v1-strategy-factory
@@ -303,7 +303,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-e52076714ace23c7a68e14f0048a40be3c6c8f0b
+          version: v1.7.1
 
       - name: Run v1 strategy upgrade tests
         run: make v1-upgrade

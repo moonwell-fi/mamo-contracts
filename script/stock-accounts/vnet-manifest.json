@@ -1,0 +1,32 @@
+{
+  "AERODROME_SLIPSTREAM_NFPM_V2": "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53",
+  "AERODROME_STOCKS_CL_FACTORY": "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef",
+  "AERODROME_STOCKS_QUOTER": "0x514c8B5f54112481E28028F1166Bd78501089259",
+  "AERODROME_STOCKS_SWAP_ROUTER": "0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F",
+  "STOCK_ACCOUNT_PRICE_CHECKER": "0x3A9D8069d2Fa2dF14B210fC6F9EB83E6a66522be",
+  "STOCK_ACCOUNT_REGISTRY": "0x49Bb2593105f405fd7DBc77Ea45Cd0bdD0FC490E",
+  "STOCK_ACCOUNT_STRATEGY_FACTORY": "0x876c0DE1815bfBb72e0565105B89f71338c15Ef2",
+  "STOCK_ACCOUNT_STRATEGY_IMPL": "0xFCa52C7a82e7ff0B4F2a378a5F95481459e09D71",
+  "appDataDocumentUsdc": {
+    "appCode": "Mamo",
+    "metadata": {
+      "hooks": {
+        "post": [
+          {
+            "callData": "0xb8f9197b000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "gasLimit": "1000000",
+            "target": "0x2d593116878c48037cd7884f9f1d7c29613e033f"
+          }
+        ],
+        "version": "0.1.0"
+      }
+    },
+    "version": "1.3.0"
+  },
+  "appDataHashUsdc": "0xbbc2a897d5b69e09166c0c51350ed6163f1fbfa5f0dd9e7688c48cd992a4ddf2",
+  "chainId": 8453,
+  "rpc": "https://virtual.base.eu.rpc.tenderly.co/27c844aa-5383-4c21-aa11-38d01db817dc",
+  "strategyTypeId": 5,
+  "testUser": "0xDca82E03057329f53Ed4173429D46B0511E46Fb8",
+  "testUserAccount": "0x2D593116878c48037Cd7884F9f1D7C29613e033f"
+}
