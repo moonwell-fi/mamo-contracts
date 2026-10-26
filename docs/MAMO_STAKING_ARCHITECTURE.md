@@ -551,7 +551,11 @@ sequenceDiagram
      `MAX_SLIPPAGE_IN_BPS()`, which would be circular: `getAccountSlippage()` falls back to that
      default whenever the owner never set one, and `compound()` spends it as `(10000 - slippage)`, so
      an unbounded value is a zero minimum-out with the honest checker and honest router still in
-     place. On the admin arm only, the caller must also hold `DEFAULT_ADMIN_ROLE` on the CANDIDATE,
+     place. That bound is checked once, when the registry is set: afterwards `getAccountSlippage()`
+     reads `defaultSlippageInBps()` live without bounding it, and `setAccountSlippage()` bounds the
+     owner's value only by the current registry's `MAX_SLIPPAGE_IN_BPS()`. Both staking registries
+     cap these at 2500, so the ceiling holds for as long as one of them is the registry in use. On
+     the admin arm only, the caller must also hold `DEFAULT_ADMIN_ROLE` on the CANDIDATE,
      which costs an honest migration nothing and stops an admin handing the fleet to a registry it
      does not control.
 
@@ -713,10 +717,12 @@ on its own leaves MOO-741 exactly as unmitigated as before. Proposal
    `maxTimePriceValid` flag, and `removeTokenConfiguration` cannot tell "the last pair was just
    removed" from "this pair was never counted".
 
-`setFeedBounds` stays unset on purpose: today's aggregators report representational limits rather
-than market bounds, so no answer can saturate, and configuring bounds against a live feed is an
-ongoing operational commitment. It is available the day an aggregator with active finite bounds
-appears behind one of these feeds.
+`setFeedBounds` is left unset. Aggregator bounds vary by feed: some report representational limits
+(`maxAnswer = 2**176 - 1`), while the Base USDC/USD aggregator reports `maxAnswer = 105000000`
+(1.05 USD), so a higher answer saturates and is reported as 1.05.
+Proposal 017 prices the USDC→MAMO pair through that feed with no bounds configured on the checker,
+so the checker's own bound check is a no-op there and the aggregator's saturation is the only
+ceiling.
 
 **What the sequencer guard does not cover** — stated here so the docs do not claim more than the
 code delivers:

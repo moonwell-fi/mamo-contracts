@@ -517,7 +517,12 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     }
 
     /**
-     * @notice The compound fee `rewardToken` currently owes, i.e. what {sweepRewardFees} would pay
+     * @notice The compound fee on the uncharged balance of `rewardToken`, i.e. what {sweepRewardFees}
+     *         would pay for an eligible reward token
+     * @dev Skips {sweepRewardFees}' eligibility checks. For the strategy's own asset, a market share,
+     *      or a never-settled token the price checker does not price, {sweepRewardFees} reverts
+     *      ({claimRewards} skips it and {recoverERC20} transfers it without a fee), so the number
+     *      reported is never collected.
      */
     function pendingRewardFee(address rewardToken) public view returns (uint256) {
         uint256 balance = IERC20(rewardToken).balanceOf(address(this));
@@ -757,6 +762,8 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
             // Asking for more than the cash returns TOKEN_INSUFFICIENT_CASH, which the require
             // below turns into a hard revert of the ENTIRE withdrawal, including the second pass
             // that would have covered the shortfall from a market that does have the funds.
+            // Exception: a non-zero `toWithdraw` worth less than one mToken base unit (e.g. cash below it)
+            // redeems zero mTokens, which Moonwell reverts with "redeemTokens zero", reverting withdraw().
             uint256 capacity = IMToken(market.target).balanceOfUnderlying(address(this));
             uint256 cash = IMToken(market.target).getCash();
             if (cash < capacity) capacity = cash;
@@ -828,6 +835,10 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
      *      (the documented recovery route), and updatePosition(), which opens with this sweep and
      *      is the only way to repair a split configuration. Draining what cash there is and leaving
      *      the remainder earning interest is strictly better than bricking all three.
+     *      EXCEPTION: Moonwell converts `redeemUnderlying(cash)` to `floor(cash * 1e18 / exchangeRate)`
+     *      mTokens and reverts "redeemTokens zero" when that is zero, so a market whose non-zero cash
+     *      is worth less than one mToken base unit reverts this sweep, blocking withdrawAll() and
+     *      updatePosition() until the cash reaches one base unit's worth or drops to zero.
      */
     function _withdrawFromMarket(RegistryMarket memory market) internal {
         if (market.marketType == MarketType.MTOKEN) {
@@ -945,10 +956,11 @@ contract MamoMultiMarketStrategy is Initializable, UUPSUpgradeable, BaseStrategy
     ///      approving an mToken or 4626 share does the same one level up, and because
     ///      `sweepRewardFees` is permissionless a single mistaken price-checker entry would let
     ///      anyone tax 5% of the position's shares. Walking that entry back takes a deliberate
-    ///      owner action on the price checker — `removeTokenConfiguration` leaves `maxTimePriceValid`
-    ///      set (it is keyed by `fromToken` alone), so only `clearRewardToken` flips `isRewardToken`
-    ///      back to false, and only fleet-wide. That is what makes the redundant check here worth
-    ///      its gas: it holds locally, per strategy, without any price-checker mutation.
+    ///      owner action on the price checker — `removeTokenConfiguration` on the token's last counted
+    ///      pair takes `configuredPairCount` to zero and clears `maxTimePriceValid`, and
+    ///      `clearRewardToken` clears a residual legacy flag once the count is already zero; either
+    ///      flips `isRewardToken` back to false, and only fleet-wide. That is what makes the redundant
+    ///      check here worth its gas: it holds locally, per strategy, without any price-checker mutation.
     function _requireRewardToken(address rewardToken) internal view {
         require(rewardToken != address(token), "Not a reward token");
         require(!_isMarketTarget(rewardToken), "Market share is not a reward token");

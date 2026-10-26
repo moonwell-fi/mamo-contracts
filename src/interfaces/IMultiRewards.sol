@@ -26,6 +26,7 @@ interface IMultiRewards {
     // View functions
     function owner() external view returns (address);
     function nominatedOwner() external view returns (address);
+    function paused() external view returns (bool);
     function stakingToken() external view returns (address);
     function rewardData(address)
         external
