@@ -601,18 +601,19 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
         IERC20(tokenIn).forceApprove(address(hop.router), amountIn);
         uint256 balanceBefore = IERC20(tokenOut).balanceOf(address(this));
 
-        hop.router.exactInputSingle(
-            ISwapRouter.ExactInputSingleParams({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                tickSpacing: ICLPool(hop.pool).tickSpacing(),
-                recipient: address(this),
-                deadline: deadline,
-                amountIn: amountIn,
-                amountOutMinimum: amountOutMinimum,
-                sqrtPriceLimitX96: 0
-            })
-        );
+        hop.router
+            .exactInputSingle(
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn: tokenIn,
+                    tokenOut: tokenOut,
+                    tickSpacing: ICLPool(hop.pool).tickSpacing(),
+                    recipient: address(this),
+                    deadline: deadline,
+                    amountIn: amountIn,
+                    amountOutMinimum: amountOutMinimum,
+                    sqrtPriceLimitX96: 0
+                })
+            );
 
         received = IERC20(tokenOut).balanceOf(address(this)) - balanceBefore;
         require(received >= amountOutMinimum, "Insufficient MAMO received");

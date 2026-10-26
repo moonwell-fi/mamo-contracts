@@ -260,7 +260,7 @@ contract DeployStockAccounts is Script {
             bool isChainlink = keccak256(bytes(entries[i].source)) == keccak256(bytes("Chainlink"));
 
             IStockAccountRegistry.TokenStatus status =
-                IStockAccountRegistry(stockRegistry).tokenConfig(entries[i].token).status;
+            IStockAccountRegistry(stockRegistry).tokenConfig(entries[i].token).status;
 
             if (status != IStockAccountRegistry.TokenStatus.None) {
                 console.log("step 8 skipped for %s, already listed", entries[i].symbol);
@@ -305,14 +305,10 @@ contract DeployStockAccounts is Script {
             ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
                 new ISlippagePriceChecker.TokenFeedConfiguration[](2);
             cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-                chainlinkFeed: entry.chainlinkFeed,
-                reverse: false,
-                heartbeat: entry.heartbeat
+                chainlinkFeed: entry.chainlinkFeed, reverse: false, heartbeat: entry.heartbeat
             });
             cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-                chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"),
-                reverse: true,
-                heartbeat: USDC_USD_HEARTBEAT
+                chainlinkFeed: addresses.getAddress("CHAINLINK_USDC_USD"), reverse: true, heartbeat: USDC_USD_HEARTBEAT
             });
 
             _adminCall(

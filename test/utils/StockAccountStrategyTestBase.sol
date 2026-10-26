@@ -134,9 +134,10 @@ abstract contract StockAccountStrategyTestBase is Test {
     }
 
     function _deployProxy(StockAccountStrategy.InitParams memory params) internal returns (address) {
-        return address(
-            new ERC1967Proxy(address(implementation), abi.encodeCall(StockAccountStrategy.initialize, (params)))
-        );
+        return
+            address(
+                new ERC1967Proxy(address(implementation), abi.encodeCall(StockAccountStrategy.initialize, (params)))
+            );
     }
 
     function _sign(bytes32 digest) internal view returns (bytes memory) {

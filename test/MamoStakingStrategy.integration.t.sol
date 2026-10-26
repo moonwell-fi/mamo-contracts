@@ -95,14 +95,10 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         // while tests vm.warp days forward; a heartbeat that spans the suite keeps the REAL answers
         // usable. Heartbeat enforcement itself is covered in SlippagePriceChecker.integration.t.sol.
         feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_BTC_USD"),
-            reverse: false,
-            heartbeat: 3650 days
+            chainlinkFeed: addresses.getAddress("CHAINLINK_BTC_USD"), reverse: false, heartbeat: 3650 days
         });
         feeds[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"),
-            reverse: true,
-            heartbeat: 3650 days
+            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"), reverse: true, heartbeat: 3650 days
         });
 
         vm.prank(checkerOwner);

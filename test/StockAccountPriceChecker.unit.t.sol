@@ -80,10 +80,7 @@ contract StockAccountPriceCheckerUnitTest is Test {
         registry.setTokenConfig(
             token,
             IStockAccountRegistry.TokenConfig({
-                status: IStockAccountRegistry.TokenStatus.Active,
-                source: source,
-                pool: pool,
-                chainlinkFeed: address(0)
+                status: IStockAccountRegistry.TokenStatus.Active, source: source, pool: pool, chainlinkFeed: address(0)
             })
         );
     }

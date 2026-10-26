@@ -58,9 +58,7 @@ contract SlippagePriceCheckerUnitTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
         configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: chainlinkFeed,
-            reverse: false,
-            heartbeat: 3600
+            chainlinkFeed: chainlinkFeed, reverse: false, heartbeat: 3600
         });
 
         vm.startPrank(owner);

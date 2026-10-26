@@ -3,8 +3,9 @@ pragma solidity 0.8.28;
 
 import {StockDropCutover} from "../multisig/f-mamo/006_StockDropCutover.sol";
 import {AddStockRewards} from "../multisig/f-mamo/007_AddStockRewards.sol";
-import {SlippagePriceCheckerOracleHardening} from
-    "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
+import {
+    SlippagePriceCheckerOracleHardening
+} from "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
 import {DeployStockDrop} from "../multisig/mamo-multisig/017_DeployStockDrop.sol";
 import {RedeployStockAccountSystem} from "../multisig/mamo-multisig/019_RedeployStockAccountSystem.sol";
 

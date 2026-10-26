@@ -109,24 +109,20 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         MamoStakingStrategyV2 impl = new MamoStakingStrategyV2();
         strategy = MamoStakingStrategyV2(
-            payable(
-                new ERC1967Proxy(
+            payable(new ERC1967Proxy(
                     address(impl),
                     abi.encodeCall(
                         MamoStakingStrategyV2.initialize,
-                        (
-                            MamoStakingStrategyV2.InitParams({
+                        (MamoStakingStrategyV2.InitParams({
                                 mamoStrategyRegistry: address(strategyRegistry),
                                 stakingRegistry: address(registry),
                                 multiRewards: address(multiRewards),
                                 mamoToken: address(mamo),
                                 strategyTypeId: 1,
                                 owner: user
-                            })
-                        )
+                            }))
                     )
-                )
-            )
+                ))
         );
         strategyRegistry.register(user, address(stockAccount));
 

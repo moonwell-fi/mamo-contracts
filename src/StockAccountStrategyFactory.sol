@@ -112,8 +112,9 @@ contract StockAccountStrategyFactory is AccessControl {
 
         strategy = Create2.deploy(0, salt, bytecode);
 
-        StockAccountStrategy(payable(strategy)).initialize(
-            StockAccountStrategy.InitParams({
+        StockAccountStrategy(payable(strategy))
+            .initialize(
+                StockAccountStrategy.InitParams({
                 asset: asset,
                 cashTargetBps: cashTargetBps,
                 cowSettlement: cowSettlement,
@@ -123,7 +124,7 @@ contract StockAccountStrategyFactory is AccessControl {
                 stockRegistry: stockRegistry,
                 strategyTypeId: strategyTypeId
             })
-        );
+            );
 
         mamoStrategyRegistry.addStrategy(user, strategy);
 

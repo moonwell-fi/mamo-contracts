@@ -359,11 +359,7 @@ contract DropAutomationV2 is Ownable {
 
         (uint256 quoted,,,) = AERODROME_QUOTER.quoteExactInputSingle(
             IQuoter.QuoteExactInputSingleParams({
-                tokenIn: tokenIn,
-                tokenOut: tokenOut,
-                amountIn: amountIn,
-                tickSpacing: tickSpacing,
-                sqrtPriceLimitX96: 0
+                tokenIn: tokenIn, tokenOut: tokenOut, amountIn: amountIn, tickSpacing: tickSpacing, sqrtPriceLimitX96: 0
             })
         );
 

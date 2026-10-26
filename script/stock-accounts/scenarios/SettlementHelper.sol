@@ -35,10 +35,7 @@ interface IGPv2SettlementLike {
 }
 
 interface IStockRegistryLike {
-    function tokenConfig(address token)
-        external
-        view
-        returns (uint8 status, uint8 source, address pool, address feed);
+    function tokenConfig(address token) external view returns (uint8 status, uint8 source, address pool, address feed);
 }
 
 interface IPoolLike {
@@ -205,9 +202,7 @@ contract SettlementHelper {
         returns (IGPv2SettlementLike.Interaction memory)
     {
         return IGPv2SettlementLike.Interaction({
-            target: account,
-            value: 0,
-            callData: abi.encodeCall(IStockAccountLike.payFees, (feeToken))
+            target: account, value: 0, callData: abi.encodeCall(IStockAccountLike.payFees, (feeToken))
         });
     }
 
@@ -232,8 +227,7 @@ contract SettlementHelper {
             value: 0,
             callData: abi.encodeCall(
                 ISwapRouter.exactInputSingle,
-                (
-                    ISwapRouter.ExactInputSingleParams({
+                (ISwapRouter.ExactInputSingleParams({
                         tokenIn: address(order.sellToken),
                         tokenOut: address(order.buyToken),
                         tickSpacing: _tickSpacing(address(order.sellToken), address(order.buyToken)),
@@ -242,8 +236,7 @@ contract SettlementHelper {
                         amountIn: order.sellAmount,
                         amountOutMinimum: buyOwed,
                         sqrtPriceLimitX96: 0
-                    })
-                )
+                    }))
             )
         });
     }

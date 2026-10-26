@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 interface IWormholeTrustedSender {
     /// ------------- VIEW ONLY API -------------
-
     /// @notice returns whether or not the address is in the trusted senders list for a given chain
     /// @param chainId The wormhole chain id to check
     /// @param addr The address to check

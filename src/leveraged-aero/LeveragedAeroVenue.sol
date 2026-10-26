@@ -389,9 +389,8 @@ library LeveragedAeroVenue {
     /// @dev The `address(0)` → `msg.sender` substitution keeps the stored `recipient` never zero.
     function requestRedeemImpl(uint256 shares, uint256 minAssetsOut, address recipient) public returns (uint256 id) {
         if (recipient == address(0)) recipient = msg.sender;
-        IERC20(LeveragedAerodromeCLStrategy(payable(address(this))).vault()).safeTransferFrom(
-            msg.sender, address(this), shares
-        );
+        IERC20(LeveragedAerodromeCLStrategy(payable(address(this))).vault())
+            .safeTransferFrom(msg.sender, address(this), shares);
         Layout storage $ = _layout();
         id = $.nextRedeemRequestId++;
         $.redeemRequests[id] = RedeemRequest({
@@ -523,14 +522,14 @@ library LeveragedAeroVenue {
         // than an assumed 1.00 — below peg a lax floor, above peg an UNCLEARABLE one that bricks `flatten`.
         uint256 pUsdc8 = LeveragedAeroValuation.readUsd8($.usdcFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod);
         uint256 floor = Math.mulDiv(
-            Math.mulDiv(
-                sellAmt,
-                LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod),
-                1e18
-            ),
-            1e6,
-            pUsdc8
-        ) * (10000 - uint256($.maxSlippageBps)) / 10000;
+                Math.mulDiv(
+                    sellAmt,
+                    LeveragedAeroValuation.readUsd8($.aeroUsdFeed, $.sequencerFeed, $.maxDelay, $.gracePeriod),
+                    1e18
+                ),
+                1e6,
+                pUsdc8
+            ) * (10000 - uint256($.maxSlippageBps)) / 10000;
         if (floor == 0) return; // dust: unsellable, and worth strictly less than one NAV unit
         if (callerFloorRequired && minRewardUsdcOut == 0) revert ZeroMinOut();
         // Behind both gates, as `compoundImpl` keeps its own: a no-op sale must pay nothing. A plain

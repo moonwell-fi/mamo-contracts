@@ -152,14 +152,12 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         entries[0] = IStockAccountStrategy.BasketEntry({token: CBBTC, targetBps: TOTAL_BPS});
 
         strategy = StockAccountStrategy(
-            payable(
-                address(
+            payable(address(
                     new ERC1967Proxy(
                         address(implementation),
                         abi.encodeCall(
                             StockAccountStrategy.initialize,
-                            (
-                                StockAccountStrategy.InitParams({
+                            (StockAccountStrategy.InitParams({
                                     asset: USDC,
                                     cashTargetBps: 0,
                                     cowSettlement: COWSWAP_SETTLEMENT,
@@ -168,12 +166,10 @@ contract StockAccountRouterSwapIntegrationTest is Test {
                                     owner: user,
                                     stockRegistry: address(stockRegistry),
                                     strategyTypeId: strategyTypeId
-                                })
-                            )
+                                }))
                         )
                     )
-                )
-            )
+                ))
         );
 
         vm.prank(backend);
@@ -189,14 +185,10 @@ contract StockAccountRouterSwapIntegrationTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_BTC_USD,
-            reverse: false,
-            heartbeat: BTC_USD_HEARTBEAT
+            chainlinkFeed: CHAINLINK_BTC_USD, reverse: false, heartbeat: BTC_USD_HEARTBEAT
         });
         cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_USDC_USD,
-            reverse: true,
-            heartbeat: USDC_USD_HEARTBEAT
+            chainlinkFeed: CHAINLINK_USDC_USD, reverse: true, heartbeat: USDC_USD_HEARTBEAT
         });
 
         address owner = IERC5313(CHAINLINK_SWAP_CHECKER_PROXY).owner();

@@ -171,14 +171,10 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory cfgs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         cfgs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_BTC_USD,
-            reverse: false,
-            heartbeat: BTC_USD_HEARTBEAT
+            chainlinkFeed: CHAINLINK_BTC_USD, reverse: false, heartbeat: BTC_USD_HEARTBEAT
         });
         cfgs[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: CHAINLINK_USDC_USD,
-            reverse: true,
-            heartbeat: 86_400
+            chainlinkFeed: CHAINLINK_USDC_USD, reverse: true, heartbeat: 86_400
         });
         proxy.addTokenConfiguration(CBBTC, USDC, cfgs);
         proxy.setMaxTimePriceValid(CBBTC, CBBTC_MAX_TIME_PRICE_VALID);
@@ -330,9 +326,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(checkerData, existingData, string.concat(label, ": direct revert data differs"));
         emit log_named_string(string.concat(label, " revert"), string(_errorReason(existingData)));
 
-        (bool okComposed, bytes memory composedData) = address(checker).staticcall(
-            abi.encodeCall(ISlippagePriceChecker.getExpectedOut, (uint256(1e8), NVDAC, CBBTC))
-        );
+        (bool okComposed, bytes memory composedData) = address(checker)
+            .staticcall(abi.encodeCall(ISlippagePriceChecker.getExpectedOut, (uint256(1e8), NVDAC, CBBTC)));
         assertFalse(okComposed, string.concat(label, ": composed quote did not revert"));
         assertEq(composedData, existingData, string.concat(label, ": composed revert data differs"));
     }
@@ -384,9 +379,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         deal(USDC, address(this), PUMP_USDC_IN);
         MockERC20Decimals(NVDAC).mint(NVDAC_USDC_POOL, PUMP_NVDAC_RESERVE);
-        ICLPoolSwap(NVDAC_USDC_POOL).swap(
-            address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * sqrtFactorBps) / 10_000), ""
-        );
+        ICLPoolSwap(NVDAC_USDC_POOL)
+            .swap(address(this), true, int256(PUMP_USDC_IN), uint160((uint256(sqrtP) * sqrtFactorBps) / 10_000), "");
     }
 
     function _pumpNvdac() internal {
@@ -397,9 +391,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     function _dumpNvdacTo(uint256 sqrtFactorBps) internal {
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         MockERC20Decimals(NVDAC).mint(address(this), DUMP_NVDAC_IN);
-        ICLPoolSwap(NVDAC_USDC_POOL).swap(
-            address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * sqrtFactorBps) / 10_000), ""
-        );
+        ICLPoolSwap(NVDAC_USDC_POOL)
+            .swap(address(this), false, int256(DUMP_NVDAC_IN), uint160((uint256(sqrtP) * sqrtFactorBps) / 10_000), "");
     }
 
     function _dumpNvdac() internal {
@@ -474,9 +467,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         uint256 sold = before + DUMP_NVDAC_IN - afterDump;
         uint256 usdcOut = IERC20(USDC).balanceOf(address(this));
         (uint160 sqrtP,,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
-        ICLPoolSwap(NVDAC_USDC_POOL).swap(
-            address(this), true, int256(usdcOut), uint160((uint256(sqrtP) * 30) / 100), ""
-        );
+        ICLPoolSwap(NVDAC_USDC_POOL)
+            .swap(address(this), true, int256(usdcOut), uint160((uint256(sqrtP) * 30) / 100), "");
         uint256 bought = MockERC20Decimals(NVDAC).balanceOf(address(this)) - afterDump;
         committed = Math.mulDiv(sold, usdcPerNvdac, 1e8);
         lost = Math.mulDiv(sold - bought, usdcPerNvdac, 1e8);
@@ -557,8 +549,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         uint256 bought = MockERC20Decimals(NVDAC).balanceOf(address(this));
         vm.revertToState(snap);
 
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "pool: ",
                 vm.toString(poolUsdc),
                 " raw USDC, tick ",
@@ -573,8 +564,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 vm.toString(int256(tickAfter)),
                 ", liquidity ",
                 vm.toString(uint256(liquidityAfter))
-            )
-        );
+            ));
         assertEq(ICLPool(NVDAC_USDC_POOL).token0(), USDC, "USDC is not token0");
         assertEq(ICLPool(NVDAC_USDC_POOL).token1(), NVDAC, "NVDAc is not token1");
         assertEq(ICLPool(NVDAC_USDC_POOL).tickSpacing(), 10, "tick spacing moved");
@@ -643,8 +633,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             uint256 measured = _driftBpsAfterHold(MAX_PUMP_SQRT_BPS, holds[i]);
             uint256 predicted = _driftBpsForTickDelta((fullTicks * holds[i]) / WINDOW);
             uint256 linear = (full * holds[i]) / WINDOW;
-            emit log_string(
-                string.concat(
+            emit log_string(string.concat(
                     "  hold ",
                     vm.toString(holds[i]),
                     "s  drift ",
@@ -654,8 +643,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                     " bps  linear ",
                     vm.toString(linear),
                     " bps"
-                )
-            );
+                ));
             assertApproxEqAbs(measured, predicted, 3, "drift does not follow (1 + D)^(h/W) - 1");
         }
     }
@@ -666,8 +654,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         uint24 fee = ICLPoolFee(NVDAC_USDC_POOL).fee();
         (uint256 committed, uint256 lost) = _roundTripCost(MAX_PUMP_SQRT_BPS);
         uint256 costTenthBps = (lost * 100_000) / committed;
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "round trip: committed ",
                 vm.toString(committed),
                 " raw USDC, lost ",
@@ -678,8 +665,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 vm.toString(costTenthBps % 10),
                 " bps at a fee tier of ",
                 vm.toString(uint256(fee))
-            )
-        );
+            ));
         assertEq(fee, 500, "fee tier moved");
         assertGt(lost, 0, "vacuous: the round trip was free");
         assertLe(costTenthBps, (2 * uint256(fee)) / 10, "round trip cost more than two crossings of the fee");
@@ -698,8 +684,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         for (uint256 i = 0; i < factors.length; i++) {
             uint256 drift = _driftBpsAfterHold(factors[i], WINDOW);
             (uint256 committed, uint256 lost) = _roundTripCost(factors[i]);
-            emit log_string(
-                string.concat(
+            emit log_string(string.concat(
                     "  sqrtP x0.",
                     vm.toString(factors[i]),
                     "  full-hold drift ",
@@ -709,8 +694,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                     " raw USDC  round trip ",
                     vm.toString(lost),
                     " raw USDC"
-                )
-            );
+                ));
             assertGt(drift, previousDrift, "a larger pump did not drift further");
             assertGt(lost, previousLost, "a larger pump did not cost more");
             previousDrift = drift;
@@ -733,15 +717,13 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         uint256 maxOrders;
 
         assertEq(registry.maxDeviationBps(), 1_000, "grid assumes the deployed deviation band");
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "break-even grid: window 180s, budget 100 bps, exposure ",
                 vm.toString(concentrated),
                 " raw USDC concentrated / ",
                 vm.toString(diversified),
                 " raw USDC diversified"
-            )
-        );
+            ));
         for (uint256 i = 0; i < factors.length; i++) {
             uint256 drift = _driftBpsAfterHold(factors[i], WINDOW);
             (, uint256 cost) = _roundTripCost(factors[i]);
@@ -749,8 +731,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             uint256 gain = (concentrated * edge) / 10_000;
             uint256 gainDiversified = (diversified * edge) / 10_000;
             uint256 orders = (cost + gainDiversified - 1) / gainDiversified;
-            emit log_string(
-                string.concat(
+            emit log_string(string.concat(
                     "  sqrtP x0.",
                     vm.toString(factors[i]),
                     "  drift ",
@@ -766,8 +747,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                     " diversified raw USDC  orders to break even 1 concentrated / ",
                     vm.toString(orders),
                     " diversified"
-                )
-            );
+                ));
             assertGt(edge, drift, "edge did not compound the slippage budget");
             assertGt(edge, MAX_BACKEND_SLIPPAGE_BPS, "edge fell below the slippage budget alone");
             assertGt(gain, cost, "a concentrated basket did not pay for the manipulation on the first order");
@@ -799,8 +779,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             uint256 fullTicks = _tickDeltaForDriftBps(full);
             uint32 openAt = _holdToOpenBudget(windows[i]);
             uint32 predicted = _predictedHoldToOpenBudget(windows[i], fullTicks);
-            emit log_string(
-                string.concat(
+            emit log_string(string.concat(
                     "  window ",
                     vm.toString(windows[i]),
                     "s  full-hold drift ",
@@ -812,8 +791,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                     "s  closed form ",
                     vm.toString(uint256(predicted)),
                     "s"
-                )
-            );
+                ));
             assertApproxEqAbs(full, 2_346, 5, "the pool's sqrt-price limit no longer bounds drift at ~2346 bps");
             assertEq(openAt, predicted, "budget did not open when the closed form says it should");
         }
@@ -835,8 +813,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 uint256 required = _requiredDriftBps(windows[j] / holds[i]);
                 uint256 factor = _cheapestPumpToOpenBudget(holds[i]);
                 if (factor == 0) {
-                    emit log_string(
-                        string.concat(
+                    emit log_string(string.concat(
                             "  window ",
                             vm.toString(windows[j]),
                             "s hold ",
@@ -844,15 +821,13 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                             "s  needs ",
                             vm.toString(required),
                             " bps  UNREACHABLE at this pool's sqrt-price limit"
-                        )
-                    );
+                        ));
                     assertGt(required, 2_400, "an unreachable cell needed less drift than the pool can supply");
                     continue;
                 }
                 uint256 achieved = _driftBpsAfterHold(factor, windows[j]);
                 (, uint256 cost) = _roundTripCost(factor);
-                emit log_string(
-                    string.concat(
+                emit log_string(string.concat(
                         "  window ",
                         vm.toString(windows[j]),
                         "s hold ",
@@ -864,8 +839,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                         " bps  costing ",
                         vm.toString(cost),
                         " raw USDC"
-                    )
-                );
+                    ));
                 assertApproxEqRel(achieved, required, 0.02e18, "measured manipulation is off the exponent law");
                 if (holds[i] == 30 && windows[j] == 60) thirtySecondCostAtSixty = cost;
                 if (holds[i] == 30 && windows[j] == 180) thirtySecondCostAtOneEighty = cost;
@@ -901,8 +875,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         (, int24 tickFar,,,,) = ICLPool(NVDAC_USDC_POOL).slot0();
         vm.revertToState(snap);
 
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "dump: sqrtP x1.1 moves ",
                 vm.toString(uint256(int256(tickNear - tickBefore))),
                 " ticks for ",
@@ -914,8 +887,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 " ticks for ",
                 vm.toString(farSold),
                 " raw NVDAc"
-            )
-        );
+            ));
         assertGt(drained * 10_000 / poolUsdcBefore, 9_000, "vacuous: the near dump left most of the USDC");
         assertGt(tickFar - tickBefore, 13_000, "the x2.0 dump did not move the price far");
         assertLt(farSold, (nearSold * 102) / 100, "the far dump cost materially more than the near one");
@@ -929,8 +901,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         (, uint256 pumpMaximal) = _roundTripCost(MAX_PUMP_SQRT_BPS);
         (, uint256 dumpMaximal) = _dumpRoundTripCost(11_000);
 
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "operative (sqrtP 0.5%): pump ",
                 vm.toString(pumpOperative),
                 " vs dump ",
@@ -940,8 +911,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 " vs dump ",
                 vm.toString(dumpMaximal),
                 " raw USDC"
-            )
-        );
+            ));
         assertLt(pumpOperative, dumpOperative, "the pump no longer understates an operative dump");
         assertGt(pumpMaximal, dumpMaximal, "the pump no longer overstates a maximal dump");
     }
@@ -951,9 +921,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     function _swapUsdcForCbbtc() internal {
         (uint160 sqrtP,,,,,) = ICLPool(CBBTC_USDC_POOL).slot0();
         deal(USDC, address(this), CBBTC_POOL_SWAP_USDC_IN);
-        ICLPoolSwap(CBBTC_USDC_POOL).swap(
-            address(this), true, int256(CBBTC_POOL_SWAP_USDC_IN), uint160((uint256(sqrtP) * 90) / 100), ""
-        );
+        ICLPoolSwap(CBBTC_USDC_POOL)
+            .swap(address(this), true, int256(CBBTC_POOL_SWAP_USDC_IN), uint160((uint256(sqrtP) * 90) / 100), "");
     }
 
     /// @notice A pool that keeps a single observation cannot be quoted at all, and growing its buffer is
@@ -992,8 +961,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
 
         uint256 quoted = poolChecker.getExpectedOut(1e8, CBBTC, USDC);
         uint256 manipulatedSpot = _spotUsdcPerStock(CBBTC_USDC_POOL);
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "fresh pool: feed ",
                 vm.toString(feedPrice),
                 " raw USDC, quote ",
@@ -1003,8 +971,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
                 " bps off the feed, ",
                 vm.toString(_bps(quoted, manipulatedSpot)),
                 " bps off the manipulated spot)"
-            )
-        );
+            ));
         assertEq(_bps(quoted, manipulatedSpot), 0, "the quote is not the manipulated spot");
         assertGt(_bps(quoted, feedPrice), 5_000, "the quote is not far off the feed");
 
@@ -1013,15 +980,13 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         vm.warp(vm.getBlockTimestamp() + 10);
 
         uint256 mixed = poolChecker.getExpectedOut(1e8, CBBTC, USDC);
-        emit log_string(
-            string.concat(
+        emit log_string(string.concat(
                 "  with one observation inside the window: quote ",
                 vm.toString(mixed),
                 " raw USDC, ",
                 vm.toString(_bps(mixed, _spotUsdcPerStock(CBBTC_USDC_POOL))),
                 " bps off spot"
-            )
-        );
+            ));
         assertGt(_bps(mixed, _spotUsdcPerStock(CBBTC_USDC_POOL)), 100, "the quote is still exactly spot");
     }
 }
