@@ -59,10 +59,10 @@ RELAYER=$(book COWSWAP_VAULT_RELAYER)
 COW_AUTHENTICATOR=0x2c4c28DDBdAc9C5E7055b4C863b72eA0149D8aFE
 COW_AUTH_MANAGER=0xA03be496e67Ec29bC62F01a428683D7F9c204930
 
-# The stock token the scenarios trade, one of the four the deploy lists; its Slipstream pool against
+# The stock token the scenarios trade, one of the four the deploy lists; its Slipstream V3 pool against
 # USDC, tick spacing 10.
 NVDA=0xb20000000000000000000078ee7ce2fE4908108C
-NVDA_POOL=0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9
+NVDA_POOL=0xF668e21993f0ACd7ab00BB1cFbAeD0df28A3C8EC
 
 # The order signer prepare.sh points the registry at, from the public test key
 # `cast keccak "mamo stock accounts order signer"`. The anvil accounts cannot be used: all of them
