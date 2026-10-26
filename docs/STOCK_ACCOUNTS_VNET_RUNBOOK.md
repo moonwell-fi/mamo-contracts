@@ -293,9 +293,10 @@ That is 37 calls. The batch is built from the difference between the config and 
 second run builds nothing. Accounts keep their holdings throughout; the batch is atomic, so no
 account ever sees a halted stock.
 
-**021 executes before the stock drop's 017.** 017 reads each stock's pool and the router from the
-stock registry, so its staking routes follow whatever the registry holds when it runs. Run before
-021, it would route staking compounds through the old pools.
+**021 executes before the stock drop's 017 is deployed, not only before its batch.** 017's deploy
+script, not its Safe batch, adds each stock's staking route, reading the stock's pool and the router
+from the stock registry at that moment. Deployed before 021 executes, the staking registry would route
+every compound through the old pools.
 
 The fork rehearsal is `test/StockAccountRepoint.integration.t.sol` (`make stock-accounts-repoint`).
 
