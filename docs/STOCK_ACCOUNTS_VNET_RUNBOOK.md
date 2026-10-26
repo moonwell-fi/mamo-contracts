@@ -230,8 +230,8 @@ settlement.
 
 `multisig/mamo-multisig/019_RedeployStockAccountSystem.sol` redeploys the whole system with the
 external-audit fixes under strategy type id **7** and retires v1. v1 accounts are not upgraded. It
-reads `deploy/stock-accounts/8453_PROD.json` and `config/stock-accounts/8453.json` (the twelve
-PoolTwap stocks). Its contracts were deployed on 2026-10-19 (Base blocks 52,827,362 to 52,827,366) and
+reads `deploy/stock-accounts/8453_PROD-019.json` and `config/stock-accounts/8453-018.json` (the twelve
+PoolTwap stocks on the pools they executed with, frozen when proposal 021 moved them to Slipstream V3). Its contracts were deployed on 2026-10-19 (Base blocks 52,827,362 to 52,827,366) and
 hold the unsuffixed keys `STOCK_ACCOUNT_REGISTRY`, `STOCK_ACCOUNT_PRICE_CHECKER`,
 `STOCK_ACCOUNT_STRATEGY_IMPL` and `STOCK_ACCOUNT_STRATEGY_FACTORY`. The v1 contracts moved to the same
 names with a `_DEPRECATED` suffix; the batch acts on them too.
@@ -272,6 +272,33 @@ Before signing, run `make stock-pool-readiness`, and if it names any pool as sho
 fork rehearsal is `test/StockAccountRedeploy.integration.t.sol` (`make stock-accounts-redeploy`):
 019 hook by hook, a v2 account lifecycle, and a v1 account exiting after the pause.
 
+## Mainnet: proposal 021
+
+Aerodrome moved its stock liquidity, and its emissions, to a new Slipstream V3 deployment (factory
+`AERODROME_SLIPSTREAM_V3_CL_FACTORY`, router `AERODROME_SLIPSTREAM_V3_SWAP_ROUTER`). The pools 019 listed
+on the old factory were left with about 2% of their liquidity, so the registry priced every stock and
+sold every withdrawal leg through near-empty pools.
+
+`multisig/mamo-multisig/021_RepointStocksToSlipstreamV3.sol` moves all twelve stocks. The batch, all
+from `MAMO_MULTISIG` to `STOCK_ACCOUNT_REGISTRY`, in order:
+
+1. `setAerodromeRouter(AERODROME_SLIPSTREAM_V3_SWAP_ROUTER)`. It goes first because `setTokenPool`
+   only takes a pool from the router's factory.
+2. For each stock in `config/stock-accounts/8453.json`, three calls:
+   `setTokenStatus(token, Halted)`, `setTokenPool(token, v3Pool)`, `setTokenStatus(token, Active)`.
+   The pool can only change while the token is halted, and reactivating it re-runs the registry's
+   pricing check on the new pool.
+
+That is 37 calls. The batch is built from the difference between the config and the registry, so a
+second run builds nothing. Accounts keep their holdings throughout; the batch is atomic, so no
+account ever sees a halted stock.
+
+**021 executes before the stock drop's 017.** 017 reads each stock's pool and the router from the
+stock registry, so its staking routes follow whatever the registry holds when it runs. Run before
+021, it would route staking compounds through the old pools.
+
+The fork rehearsal is `test/StockAccountRepoint.integration.t.sol` (`make stock-accounts-repoint`).
+
 ## Configuration
 
 `deploy/stock-accounts/8453_PROD.json` and `deploy/stock-accounts/8453_TESTING.json` hold the registry
@@ -294,7 +321,7 @@ vnet run needs no impersonation for the stock registry itself — step 3 and ste
 
 `config/stock-accounts/8453.json` is the token list. It holds twelve stocks — the four launch stocks
 AAPLc, GOOGLc, METAc, NVDAc, and the eight proposal 018 lists, AMZNc, MSFTc, MSTRc, MUc, PLTRc, SNDKc,
-SPCXc, TSLAc — each priced from its Aerodrome CL pool against USDC. cbBTC was withdrawn from it until
+SPCXc, TSLAc — each priced from its Aerodrome Slipstream V3 pool against USDC. cbBTC was withdrawn from it until
 crypto baskets launch, and 018 halts it on the registry; `8453-016.json` keeps the five-entry list
 proposal 016 executed with, which is the shape a Chainlink-priced entry takes. One of each kind:
 

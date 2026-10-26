@@ -97,7 +97,7 @@ contract StockAccountFeeHookGasTest is Test {
         proposal.simulate();
 
         registry = StockAccountRegistry(addresses.getAddress("STOCK_ACCOUNT_REGISTRY"));
-        StockAccountsConfig.TokenListEntry[] memory list = proposal.deployConfig().loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory list = proposal.deployConfig().loadTokenList(proposal.TOKEN_LIST());
         for (uint256 i = 0; i < list.length; i++) {
             entries.push(list[i]);
             (,, uint16 index,,,) = ICLPool(list[i].pool).slot0();

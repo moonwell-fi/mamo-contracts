@@ -39,6 +39,9 @@ contract RedeployStockAccountSystem is MultisigProposal {
     string internal constant V1_REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_DEPRECATED";
     string internal constant V1_FACTORY_KEY = "STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED";
 
+    /// @notice The list this proposal executed with, frozen so later list edits do not rewrite it
+    string public constant TOKEN_LIST = "./config/stock-accounts/8453-018.json";
+
     /// @notice The mamo-queues app, which creates accounts on users' behalf through the factory
     string internal constant QUEUES_KEY = "MAMO_BACKEND";
 
@@ -58,7 +61,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
     bool internal _slotsSnapshotted;
 
     constructor() {
-        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD.json");
+        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD-019.json");
         vm.makePersistent(address(deployConfig));
 
         strategyTypeId = deployConfig.getConfig().strategyTypeId;
@@ -85,8 +88,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return
-        "Redeploy the stock accounts system (registry, price checker, account implementation, factory) under strategy type id 7, list the twelve stocks, move BACKEND_ROLE from the v1 factory to the new one, let the queues app create accounts on the new factory, and retire v1 by setting its order signer to a dead address and pausing its registry";
+        return "Redeploy the stock accounts system (registry, price checker, account implementation, factory) under strategy type id 7, list the twelve stocks, move BACKEND_ROLE from the v1 factory to the new one, let the queues app create accounts on the new factory, and retire v1 by setting its order signer to a dead address and pausing its registry";
     }
 
     // ─── deploy: four contracts, each skipped when the address book already holds it ──────────────
@@ -246,7 +248,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
 
     /// @dev Same stand-in as proposal 016: the B20 stocks' code is 0xEF, which revm cannot execute
     function _standInForNodeNativeTokens(StockAccountRegistry stockRegistry) internal {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
 
         for (uint256 i = 0; i < entries.length; i++) {
             assertEq(entries[i].source, "PoolTwap", string.concat(entries[i].symbol, " should be PoolTwap"));
@@ -285,7 +287,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
         StockAccountStrategyFactory factory = StockAccountStrategyFactory(addresses.getAddress(FACTORY_KEY));
         factory.grantRole(factory.BACKEND_ROLE(), addresses.getAddress(QUEUES_KEY));
 
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         for (uint256 i = 0; i < entries.length; i++) {
             stockRegistry.listToken(entries[i].token, _poolTwapConfig(entries[i].pool));
         }
@@ -443,7 +445,7 @@ contract RedeployStockAccountSystem is MultisigProposal {
     }
 
     function _validateTokenList() internal view {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(REGISTRY_KEY));
         ISlippagePriceChecker checker = ISlippagePriceChecker(addresses.getAddress(PRICE_CHECKER_KEY));
         address asset = stockRegistry.asset();

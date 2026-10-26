@@ -134,7 +134,8 @@ contract StockAccountRedeployTest is Test {
 
     function _proveRecordedBatch() internal view {
         (address[] memory targets, uint256[] memory values, bytes[] memory args) = proposal.getProposalActions();
-        StockAccountsConfig.TokenListEntry[] memory entries = proposal.deployConfig().loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries =
+            proposal.deployConfig().loadTokenList(proposal.TOKEN_LIST());
 
         address registryV2 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY");
         address registryV1 = addresses.getAddress("STOCK_ACCOUNT_REGISTRY_DEPRECATED");

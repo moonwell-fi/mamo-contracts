@@ -1,6 +1,6 @@
 {
   "admin": "DEPLOYER_EOA",
-  "aerodromeRouter": "AERODROME_STOCKS_SWAP_ROUTER",
+  "aerodromeRouter": "AERODROME_SLIPSTREAM_V3_SWAP_ROUTER",
   "asset": "USDC",
   "backend": "STRATEGY_MULTICALL",
   "chainId": 8453,

@@ -405,6 +405,16 @@
     "isContract": true
   },
   {
+    "addr": "0x9CB220581b91b0C83223012FE69688b92aD07a76",
+    "name": "AERODROME_SLIPSTREAM_V3_CL_FACTORY",
+    "isContract": true
+  },
+  {
+    "addr": "0x9Ee35Bf1bd69a03c6F0393582030fCe8Bb93D418",
+    "name": "AERODROME_SLIPSTREAM_V3_SWAP_ROUTER",
+    "isContract": true
+  },
+  {
     "addr": "0x514c8B5f54112481E28028F1166Bd78501089259",
     "name": "AERODROME_STOCKS_QUOTER",
     "isContract": true

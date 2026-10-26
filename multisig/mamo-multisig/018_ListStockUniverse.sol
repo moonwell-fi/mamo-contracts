@@ -16,12 +16,15 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 /**
  * @title ListStockUniverse
  * @notice Multisig proposal that halts cbBTC on the live stock registry and lists every token in
- *         `config/stock-accounts/8453.json` the registry does not know yet, all as PoolTwap
+ *         `config/stock-accounts/8453-018.json` the registry does not know yet, all as PoolTwap
  * @dev Built from the diff between the config and the registry, so it is idempotent. B20 stocks are
  *      stood in for exactly as in proposal 016, so their `decimals()` probes can execute in revm.
  */
 contract ListStockUniverse is MultisigProposal {
     string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY_DEPRECATED";
+
+    /// @notice The list this proposal executed with, frozen so later list edits do not rewrite it
+    string public constant TOKEN_LIST = "./config/stock-accounts/8453-018.json";
 
     StockAccountsConfig public immutable deployConfig;
 
@@ -52,8 +55,7 @@ contract ListStockUniverse is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return
-        "Halt cbBTC on the stock registry and list every configured stock it does not list yet, priced from its Aerodrome CL pool TWAP against USDC";
+        return "Halt cbBTC on the stock registry and list every configured stock it does not list yet, priced from its Aerodrome CL pool TWAP against USDC";
     }
 
     function preBuildMock() public override {
@@ -71,7 +73,7 @@ contract ListStockUniverse is MultisigProposal {
             _configsBefore.push(stockRegistry.tokenConfig(_tokensBefore[i]));
         }
 
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         for (uint256 i = 0; i < entries.length; i++) {
             assertEq(entries[i].source, "PoolTwap", string.concat(entries[i].symbol, " should be PoolTwap"));
             if (stockRegistry.tokenConfig(entries[i].token).status == IStockAccountRegistry.TokenStatus.None) {
@@ -99,7 +101,7 @@ contract ListStockUniverse is MultisigProposal {
             stockRegistry.setTokenStatus(cbBTC, IStockAccountRegistry.TokenStatus.Halted);
         }
 
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         for (uint256 i = 0; i < entries.length; i++) {
             if (stockRegistry.tokenConfig(entries[i].token).status != IStockAccountRegistry.TokenStatus.None) continue;
 
@@ -137,7 +139,7 @@ contract ListStockUniverse is MultisigProposal {
             "cbBTC should be Halted"
         );
 
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(TOKEN_LIST);
         for (uint256 i = 0; i < entries.length; i++) {
             assertEq(
                 keccak256(abi.encode(stockRegistry.tokenConfig(entries[i].token))),
