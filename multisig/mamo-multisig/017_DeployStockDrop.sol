@@ -58,9 +58,17 @@ contract DeployStockDrop is MultisigProposal {
 
     StockAccountsConfig public immutable deployConfig;
 
+    /// @notice The stock list the V2 stock registry must already list every stock on, pool for pool
+    string public tokenList = "./config/stock-accounts/8453.json";
+
     constructor() {
         deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD.json");
         vm.makePersistent(address(deployConfig));
+    }
+
+    /// @notice Points a rehearsal pinned before mamo-multisig/021 at the list the registry held then
+    function setTokenList(string calldata path) external {
+        tokenList = path;
     }
 
     function run() public override {
@@ -440,17 +448,23 @@ contract DeployStockDrop is MultisigProposal {
 
     // ─── helpers ─────────────────────────────────────────────────────────────────────────────────
 
-    /// @dev The pool-priced entries of the stock list, i.e. the B20 stocks, each on the pool the V2 stock registry
-    ///      lists it on rather than the configured one, so routes follow a pool repoint (mamo-multisig/021)
+    /// @dev The pool-priced entries of the stock list, i.e. the B20 stocks. Each must already be listed on its
+    ///      configured pool, so the deploy refuses to bake routes on pools mamo-multisig/021 is about to retire
     function _stocks() internal view returns (StockAccountsConfig.TokenListEntry[] memory stocks) {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(tokenList);
         StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY));
         stocks = new StockAccountsConfig.TokenListEntry[](entries.length);
 
         uint256 count;
         for (uint256 i = 0; i < entries.length; i++) {
             if (keccak256(bytes(entries[i].source)) != keccak256("PoolTwap")) continue;
-            entries[i].pool = stockRegistry.tokenConfig(entries[i].token).pool;
+            assertEq(
+                stockRegistry.tokenConfig(entries[i].token).pool,
+                entries[i].pool,
+                string.concat(
+                    entries[i].symbol, " is not listed on its configured pool; execute mamo-multisig/021 first"
+                )
+            );
             stocks[count++] = entries[i];
         }
 

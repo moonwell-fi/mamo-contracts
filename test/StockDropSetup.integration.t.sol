@@ -76,6 +76,8 @@ contract StockDropSetupTest is Test {
         oracleProposal = new SlippagePriceCheckerOracleHardening();
         redeployProposal = new RedeployStockAccountSystem();
         deployProposal = new DeployStockDrop();
+        // Pinned before Slipstream V3 and mamo-multisig/021: 019 lists the stocks on the pools it executed with
+        deployProposal.setTokenList(redeployProposal.TOKEN_LIST());
         cutoverProposal = new StockDropCutover();
         stockRewardsProposal = new AddStockRewards();
         oracleProposal.setAddresses(addresses);
@@ -103,6 +105,26 @@ contract StockDropSetupTest is Test {
         _proveDropTopsUpRunningStreams();
         _proveCompound(account);
         _proveStockAccountPaysDropAutomation();
+    }
+
+    /// @dev Against the current list, 017 refuses to deploy while the registry still lists the 019 pools (021 pending)
+    function test_stockDrop_cannotDeployBefore021() public {
+        _run(oracleProposal, 10);
+        _run(redeployProposal, 19);
+        deployProposal.setTokenList("./config/stock-accounts/8453.json");
+        deployProposal.setPrimaryForkId(vm.activeFork());
+
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "AAPLc is not listed on its configured pool; execute mamo-multisig/021 first: ",
+                    vm.toString(0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0),
+                    " != ",
+                    vm.toString(0xF5FCB9CDAFcE67d50AfEf298F88E709d2B946BA6)
+                )
+            )
+        );
+        deployProposal.deploy();
     }
 
     /// @dev Aerodrome killed v1's gauge after the pinned block: 006 then leaves its stake with F-MAMO, deposits nothing

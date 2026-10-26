@@ -295,8 +295,8 @@ account ever sees a halted stock.
 
 **021 executes before the stock drop's 017 is deployed, not only before its batch.** 017's deploy
 script, not its Safe batch, adds each stock's staking route, reading the stock's pool and the router
-from the stock registry at that moment. Deployed before 021 executes, the staking registry would route
-every compound through the old pools.
+from the stock registry at that moment. 017 enforces this: its deploy reverts unless the registry already lists
+every stock on its pool in `config/stock-accounts/8453.json`, i.e. until 021 has executed.
 
 The fork rehearsal is `test/StockAccountRepoint.integration.t.sol` (`make stock-accounts-repoint`).
 
