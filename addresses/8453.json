@@ -415,6 +415,11 @@
     "isContract": true
   },
   {
+    "addr": "0x1dDfeC5058180C207F55BB77D95AcDd0d8227868",
+    "name": "AERODROME_SLIPSTREAM_V3_METAQUOTER",
+    "isContract": true
+  },
+  {
     "addr": "0x514c8B5f54112481E28028F1166Bd78501089259",
     "name": "AERODROME_STOCKS_QUOTER",
     "isContract": true

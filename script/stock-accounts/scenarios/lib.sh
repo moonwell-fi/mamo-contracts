@@ -50,7 +50,7 @@ CHECKER=$(mani STOCK_ACCOUNT_PRICE_CHECKER)
 FACTORY=$(mani STOCK_ACCOUNT_STRATEGY_FACTORY)
 CL_FACTORY=$(mani AERODROME_STOCKS_CL_FACTORY)
 ROUTER=$(mani AERODROME_STOCKS_SWAP_ROUTER)
-QUOTER=$(mani AERODROME_STOCKS_QUOTER)
+QUOTER=$(mani AERODROME_STOCKS_METAQUOTER)
 USDC=$(book USDC)
 SETTLEMENT=$(book COWSWAP_SETTLEMENT)
 RELAYER=$(book COWSWAP_VAULT_RELAYER)
@@ -441,9 +441,11 @@ fees_paid_credited() { # fees_paid_credited <receipt-json> <account>
   bn "0x${data:2:64}"
 }
 
+# The Slipstream V3 MetaQuoter quotes against a pool, not a pair.
 quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
-  call "$QUOTER" 'quoteExactInputSingle((address,address,uint256,int24,uint160))(uint256,uint160,uint32,uint256)' \
-    "($1,$2,$4,$3,0)"
+  local pool
+  pool=$(call "$CL_FACTORY" 'getPool(address,address,int24)(address)' "$1" "$2" "$3") || return 1
+  call "$QUOTER" 'quoteExactInputSingleV3(address,address,uint256,uint160)(uint256,uint160,uint32)' "$pool" "$1" "$4" 0
 }
 
 # getWeights covers every registry-listed token, in registry order, so a token's own row has to be

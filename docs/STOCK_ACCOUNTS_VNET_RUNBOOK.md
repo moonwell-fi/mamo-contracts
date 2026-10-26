@@ -599,7 +599,8 @@ so an order cannot settle unless its hook takes the fee in the token that order 
 `script/stock-accounts/vnet-manifest.json` (gitignored) is written by the smoke script and is what the
 backend or a follow-up script reads to pick the vnet up: the admin `rpc`, `chainId`, every
 `STOCK_ACCOUNT_*` and `AERODROME_STOCKS_*` address (unsuffixed: a vnet holds only the system this tree
-deployed, read from the book's `STOCK_ACCOUNT_*` keys), the `strategyTypeId`, the test user with the
+deployed, read from the book's `STOCK_ACCOUNT_*` keys; the `AERODROME_STOCKS_*` entries are the Slipstream V3
+CL factory, swap router and MetaQuoter), the `strategyTypeId`, the test user with the
 account created for them, and that account's USDC document as `appDataHashUsdc` and
 `appDataDocumentUsdc` — the cash leg, since documents are per buy token and the smoke account is all
 cash. Forge writes the document inlined as JSON rather than as a string, so `jq -c` is what reproduces
