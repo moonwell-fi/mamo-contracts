@@ -142,6 +142,9 @@ contract StockAccountSystemSetupTest is Test {
                     || name == keccak256("STOCK_ACCOUNT_PRICE_CHECKER_DEPRECATED")
                     || name == keccak256("STOCK_ACCOUNT_STRATEGY_IMPL_DEPRECATED")
                     || name == keccak256("STOCK_ACCOUNT_STRATEGY_FACTORY_DEPRECATED")
+                    || name == keccak256("AERODROME_SLIPSTREAM_V3_CL_FACTORY")
+                    || name == keccak256("AERODROME_SLIPSTREAM_V3_SWAP_ROUTER")
+                    || name == keccak256("AERODROME_SLIPSTREAM_V3_METAQUOTER")
             ) continue;
 
             json = string.concat(

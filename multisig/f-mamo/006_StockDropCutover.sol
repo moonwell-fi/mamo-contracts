@@ -8,6 +8,7 @@ import {FeeSplitter} from "@contracts/FeeSplitter.sol";
 import {RewardsDistributorSafeModule} from "@contracts/RewardsDistributorSafeModule.sol";
 import {TransferAndEarn} from "@contracts/TransferAndEarn.sol";
 import {IAerodromeGauge} from "@interfaces/IAerodromeGauge.sol";
+import {IAerodromeVoter} from "@interfaces/IAerodromeVoter.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -30,7 +31,7 @@ interface ISafeModules {
  * @title StockDropCutover
  * @notice F-MAMO batch moving the Mamo Drop from DropAutomation v1 and its Safe module to {DropAutomationV2}:
  *         repoints the fee lockers (the VIRTUAL/MAMO one through a new splitter with the live split), moves
- *         v1's gauge stake, sweeps v1's balances, makes v2 the MultiRewards distributor of MAMO and cbBTC, and
+ *         v1's gauge stake (to F-MAMO for a gauge Aerodrome has killed), sweeps v1's balances, makes v2 the MultiRewards distributor of MAMO and cbBTC, and
  *         disables the old module. Stakers see no change; stock rewards follow in f-mamo/007.
  * @dev Runs after mamo-multisig/017, which deploys DropAutomationV2. The old module must have nothing staged, and
  *      a last v1 drop (claimGaugeRewards + createDrop + notifyRewards) should run first so nothing is left behind.
@@ -46,6 +47,8 @@ contract StockDropCutover is MultisigProposal {
     /// @dev What the batch moves, read when it is built
     address[] internal _gauges;
     uint256[] internal _stakes;
+    bool[] internal _alive;
+    uint256[] internal _safeLpBefore;
 
     function run() public override {
         _initializeAddresses();
@@ -68,8 +71,7 @@ contract StockDropCutover is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return
-        "Move the Mamo Drop to DropAutomationV2: repoint the fee lockers, move the gauge stake and v1 balances, make DropAutomationV2 the MultiRewards distributor of MAMO and cbBTC, and disable the old rewards module";
+        return "Move the Mamo Drop to DropAutomationV2: repoint the fee lockers, move the gauge stake and v1 balances, make DropAutomationV2 the MultiRewards distributor of MAMO and cbBTC, and disable the old rewards module";
     }
 
     /// @dev The live splitter's recipients are immutable, so the VIRTUAL/MAMO leg gets a copy paying v2
@@ -122,11 +124,10 @@ contract StockDropCutover is MultisigProposal {
         // 1. Fees go to v2 from here on
         TransferAndEarn(addresses.getAddress("TRANSFER_AND_EARN")).setFeeCollector(drop);
         BurnAndEarn(addresses.getAddress("BURN_AND_EARN")).setFeeCollector(drop);
-        BurnAndEarn(addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP")).setFeeCollector(
-            addresses.getAddress(SPLITTER_KEY)
-        );
+        BurnAndEarn(addresses.getAddress("BURN_AND_EARN_VIRTUAL_MAMO_LP"))
+            .setFeeCollector(addresses.getAddress(SPLITTER_KEY));
 
-        // 2. v1's gauge stake, deposited for v2
+        // 2. v1's gauge stake, deposited for v2 where the gauge is still alive
         _moveGauges(drop);
 
         // 3. Whatever v1 still holds
@@ -147,6 +148,7 @@ contract StockDropCutover is MultisigProposal {
         ISafeModules(safe).disableModule(_previousModule(safe, module), module);
     }
 
+    /// @dev A gauge Aerodrome has killed refuses deposits, so its stake stays with F-MAMO and v2 does not claim it
     function _moveGauges(address drop) internal {
         DropAutomation v1 = DropAutomation(addresses.getAddress("DROP_AUTOMATION"));
         address safe = addresses.getAddress("F-MAMO");
@@ -154,16 +156,21 @@ contract StockDropCutover is MultisigProposal {
         for (uint256 i = 0; i < v1.getGaugeCount(); i++) {
             IAerodromeGauge gauge = v1.aerodromeGauges(i);
             uint256 stake = gauge.balanceOf(address(v1));
+            bool alive = IAerodromeVoter(gauge.voter()).isAlive(address(gauge));
+            _safeLpBefore.push(IERC20(gauge.stakingToken()).balanceOf(safe));
 
             if (stake > 0) {
                 v1.withdrawGauge(address(gauge), stake, safe);
-                IERC20(gauge.stakingToken()).approve(address(gauge), stake);
-                gauge.deposit(stake, drop);
+                if (alive) {
+                    IERC20(gauge.stakingToken()).approve(address(gauge), stake);
+                    gauge.deposit(stake, drop);
+                }
             }
-            DropAutomationV2(drop).addGauge(address(gauge));
+            if (alive) DropAutomationV2(drop).addGauge(address(gauge));
 
             _gauges.push(address(gauge));
             _stakes.push(stake);
+            _alive.push(alive);
         }
     }
 
@@ -207,8 +214,17 @@ contract StockDropCutover is MultisigProposal {
         for (uint256 i = 0; i < _gauges.length; i++) {
             IAerodromeGauge gauge = IAerodromeGauge(_gauges[i]);
             assertEq(gauge.balanceOf(v1), 0, "v1 gauge stake moved");
-            assertEq(gauge.balanceOf(drop), _stakes[i], "v2 holds the gauge stake");
-            assertTrue(DropAutomationV2(drop).isGauge(address(gauge)), "v2 claims the gauge");
+            if (_alive[i]) {
+                assertEq(gauge.balanceOf(drop), _stakes[i], "v2 holds the gauge stake");
+                assertTrue(DropAutomationV2(drop).isGauge(address(gauge)), "v2 claims the gauge");
+            } else {
+                assertEq(
+                    IERC20(gauge.stakingToken()).balanceOf(addresses.getAddress("F-MAMO")),
+                    _safeLpBefore[i] + _stakes[i],
+                    "F-MAMO holds a killed gauge's stake"
+                );
+                assertFalse(DropAutomationV2(drop).isGauge(address(gauge)), "v2 does not claim a killed gauge");
+            }
         }
 
         for (uint256 i = 0; i < SWEPT_TOKENS.length; i++) {
@@ -222,9 +238,8 @@ contract StockDropCutover is MultisigProposal {
         assertEq(cbBtcDistributor, drop, "v2 distributes cbBTC");
 
         assertFalse(
-            ISafeModules(addresses.getAddress("F-MAMO")).isModuleEnabled(
-                addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC")
-            ),
+            ISafeModules(addresses.getAddress("F-MAMO"))
+                .isModuleEnabled(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC")),
             "Old module disabled"
         );
     }

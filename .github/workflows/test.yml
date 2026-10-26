@@ -589,6 +589,34 @@ jobs:
       - name: Run stock accounts redeploy proposal tests (019, on a Base fork)
         run: make stock-accounts-redeploy
 
+  stock-accounts-repoint:
+    name: Stock Accounts Repoint Proposal Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      # Self-forking Base test (see the make target's comment for why there is no --fork-url).
+      # BASE_RPC_URL comes from the workflow-level env and is read via vm.envString in setUp.
+      - name: Run stock accounts repoint proposal tests (021, on a Base fork)
+        run: make stock-accounts-repoint
+
   stock-fee-hook-gas:
     name: Stock Accounts Fee Hook Gas Tests
     runs-on: ubuntu-latest

@@ -58,9 +58,17 @@ contract DeployStockDrop is MultisigProposal {
 
     StockAccountsConfig public immutable deployConfig;
 
+    /// @notice The stock list the V2 stock registry must already list every stock on, pool for pool
+    string public tokenList = "./config/stock-accounts/8453.json";
+
     constructor() {
         deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD.json");
         vm.makePersistent(address(deployConfig));
+    }
+
+    /// @notice Points a rehearsal pinned before mamo-multisig/021 at the list the registry held then
+    function setTokenList(string calldata path) external {
+        tokenList = path;
     }
 
     function run() public override {
@@ -84,8 +92,7 @@ contract DeployStockDrop is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return
-        "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), require the sequencer-guarded price checker (proposal 013), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory from the old and deprecated ones, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
+        return "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), require the sequencer-guarded price checker (proposal 013), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory from the old and deprecated ones, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
     }
 
     // ─── deploy ──────────────────────────────────────────────────────────────────────────────────
@@ -246,9 +253,8 @@ contract DeployStockDrop is MultisigProposal {
         bytes32 backendRole = mamoRegistry.BACKEND_ROLE();
 
         // 1. Reverts unless 013's checker is live, so the pairs below are never priced without the sequencer guard
-        SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY")).setSequencerUptimeFeed(
-            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), SEQUENCER_GRACE_PERIOD
-        );
+        SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"))
+            .setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), SEQUENCER_GRACE_PERIOD);
 
         // 2. The upgrade target for live staking accounts, under the existing type id
         mamoRegistry.whitelistImplementation(addresses.getAddress(STAKING_IMPL_KEY), STAKING_TYPE_ID);
@@ -289,14 +295,10 @@ contract DeployStockDrop is MultisigProposal {
     {
         feeds = new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress(feed),
-            reverse: false,
-            heartbeat: heartbeat
+            chainlinkFeed: addresses.getAddress(feed), reverse: false, heartbeat: heartbeat
         });
         feeds[1] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"),
-            reverse: true,
-            heartbeat: MAMO_USD_HEARTBEAT
+            chainlinkFeed: addresses.getAddress("CHAINLINK_MAMO_USD"), reverse: true, heartbeat: MAMO_USD_HEARTBEAT
         });
     }
 
@@ -399,7 +401,7 @@ contract DeployStockDrop is MultisigProposal {
             assertEq(route[0].pool, stocks[i].pool, string.concat(stocks[i].symbol, " route pool"));
             assertEq(
                 address(route[0].router),
-                addresses.getAddress("AERODROME_STOCKS_SWAP_ROUTER"),
+                address(stockRegistry.aerodromeRouter()),
                 string.concat(stocks[i].symbol, " route router")
             );
             assertEq(
@@ -413,7 +415,6 @@ contract DeployStockDrop is MultisigProposal {
             IStockAccountRegistry.TokenConfig memory listing = stockRegistry.tokenConfig(stocks[i].token);
             assertEq(uint256(listing.status), uint256(IStockAccountRegistry.TokenStatus.Active), "Stock listed");
             assertEq(uint256(listing.source), uint256(IStockAccountRegistry.PriceSource.PoolTwap), "Stock source");
-            assertEq(listing.pool, stocks[i].pool, string.concat(stocks[i].symbol, " listed pool"));
         }
     }
 
@@ -447,14 +448,24 @@ contract DeployStockDrop is MultisigProposal {
 
     // ─── helpers ─────────────────────────────────────────────────────────────────────────────────
 
-    /// @dev The pool-priced entries of the stock list, i.e. the B20 stocks
+    /// @dev The pool-priced entries of the stock list, i.e. the B20 stocks. Each must already be listed on its
+    ///      configured pool, so the deploy refuses to bake routes on pools mamo-multisig/021 is about to retire
     function _stocks() internal view returns (StockAccountsConfig.TokenListEntry[] memory stocks) {
-        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList(tokenList);
+        StockAccountRegistry stockRegistry = StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY));
         stocks = new StockAccountsConfig.TokenListEntry[](entries.length);
 
         uint256 count;
         for (uint256 i = 0; i < entries.length; i++) {
-            if (keccak256(bytes(entries[i].source)) == keccak256("PoolTwap")) stocks[count++] = entries[i];
+            if (keccak256(bytes(entries[i].source)) != keccak256("PoolTwap")) continue;
+            assertEq(
+                stockRegistry.tokenConfig(entries[i].token).pool,
+                entries[i].pool,
+                string.concat(
+                    entries[i].symbol, " is not listed on its configured pool; execute mamo-multisig/021 first"
+                )
+            );
+            stocks[count++] = entries[i];
         }
 
         assembly ("memory-safe") {
@@ -468,7 +479,9 @@ contract DeployStockDrop is MultisigProposal {
         route = new MamoStakingRegistryV2.Hop[](2);
         route[0] = MamoStakingRegistryV2.Hop({
             pool: stockPool,
-            router: ISwapRouter(addresses.getAddress("AERODROME_STOCKS_SWAP_ROUTER")),
+            router: ISwapRouter(
+                address(StockAccountRegistry(addresses.getAddress(STOCK_REGISTRY_KEY)).aerodromeRouter())
+            ),
             checker: ISlippagePriceChecker(addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER"))
         });
         route[1] = MamoStakingRegistryV2.Hop({

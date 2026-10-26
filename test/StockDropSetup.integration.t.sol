@@ -21,6 +21,8 @@ import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
+import {IAerodromeGauge} from "@interfaces/IAerodromeGauge.sol";
+import {IAerodromeVoter} from "@interfaces/IAerodromeVoter.sol";
 import {IMultiRewards} from "@interfaces/IMultiRewards.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
 
@@ -74,6 +76,8 @@ contract StockDropSetupTest is Test {
         oracleProposal = new SlippagePriceCheckerOracleHardening();
         redeployProposal = new RedeployStockAccountSystem();
         deployProposal = new DeployStockDrop();
+        // Pinned before Slipstream V3 and mamo-multisig/021: 019 lists the stocks on the pools it executed with
+        deployProposal.setTokenList(redeployProposal.TOKEN_LIST());
         cutoverProposal = new StockDropCutover();
         stockRewardsProposal = new AddStockRewards();
         oracleProposal.setAddresses(addresses);
@@ -101,6 +105,42 @@ contract StockDropSetupTest is Test {
         _proveDropTopsUpRunningStreams();
         _proveCompound(account);
         _proveStockAccountPaysDropAutomation();
+    }
+
+    /// @dev Against the current list, 017 refuses to deploy while the registry still lists the 019 pools (021 pending)
+    function test_stockDrop_cannotDeployBefore021() public {
+        _run(oracleProposal, 10);
+        _run(redeployProposal, 19);
+        deployProposal.setTokenList("./config/stock-accounts/8453.json");
+        deployProposal.setPrimaryForkId(vm.activeFork());
+
+        vm.expectRevert(
+            bytes(
+                string.concat(
+                    "AAPLc is not listed on its configured pool; execute mamo-multisig/021 first: ",
+                    vm.toString(0xA3b1E3f9747065e2073722Ff4c9027d3eA4994F0),
+                    " != ",
+                    vm.toString(0xF5FCB9CDAFcE67d50AfEf298F88E709d2B946BA6)
+                )
+            )
+        );
+        deployProposal.deploy();
+    }
+
+    /// @dev Aerodrome killed v1's gauge after the pinned block: 006 then leaves its stake with F-MAMO, deposits nothing
+    function test_stockDropCutover_killedGauge() public {
+        address gauge = addresses.getAddress("AERODROME_USDC_AERO_GAUGE");
+        address voter = IAerodromeGauge(gauge).voter();
+        (, bytes memory council) = voter.staticcall(abi.encodeWithSignature("emergencyCouncil()"));
+        vm.prank(abi.decode(council, (address)));
+        (bool killed,) = voter.call(abi.encodeWithSignature("killGauge(address)", gauge));
+        assertTrue(killed && !IAerodromeVoter(voter).isAlive(gauge), "gauge killed");
+
+        _run(oracleProposal, 10);
+        _run(redeployProposal, 19);
+        _run(deployProposal, 9);
+        // 006: 3 lockers, the gauge withdrawal, 2 distributors, the module
+        _run(cutoverProposal, 7);
     }
 
     /// @dev 017 before 013: FPS runs build() live as the multisig, so action 1 reverts there and no batch is produced

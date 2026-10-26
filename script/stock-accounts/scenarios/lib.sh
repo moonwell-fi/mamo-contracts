@@ -50,7 +50,7 @@ CHECKER=$(mani STOCK_ACCOUNT_PRICE_CHECKER)
 FACTORY=$(mani STOCK_ACCOUNT_STRATEGY_FACTORY)
 CL_FACTORY=$(mani AERODROME_STOCKS_CL_FACTORY)
 ROUTER=$(mani AERODROME_STOCKS_SWAP_ROUTER)
-QUOTER=$(mani AERODROME_STOCKS_QUOTER)
+QUOTER=$(mani AERODROME_STOCKS_METAQUOTER)
 USDC=$(book USDC)
 SETTLEMENT=$(book COWSWAP_SETTLEMENT)
 RELAYER=$(book COWSWAP_VAULT_RELAYER)
@@ -59,10 +59,10 @@ RELAYER=$(book COWSWAP_VAULT_RELAYER)
 COW_AUTHENTICATOR=0x2c4c28DDBdAc9C5E7055b4C863b72eA0149D8aFE
 COW_AUTH_MANAGER=0xA03be496e67Ec29bC62F01a428683D7F9c204930
 
-# The stock token the scenarios trade, one of the four the deploy lists; its Slipstream pool against
+# The stock token the scenarios trade, one of the four the deploy lists; its Slipstream V3 pool against
 # USDC, tick spacing 10.
 NVDA=0xb20000000000000000000078ee7ce2fE4908108C
-NVDA_POOL=0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9
+NVDA_POOL=0xF668e21993f0ACd7ab00BB1cFbAeD0df28A3C8EC
 
 # The order signer prepare.sh points the registry at, from the public test key
 # `cast keccak "mamo stock accounts order signer"`. The anvil accounts cannot be used: all of them
@@ -441,9 +441,11 @@ fees_paid_credited() { # fees_paid_credited <receipt-json> <account>
   bn "0x${data:2:64}"
 }
 
+# The Slipstream V3 MetaQuoter quotes against a pool, not a pair.
 quote_out() { # quote_out <tokenIn> <tokenOut> <tick-spacing> <amount-in>
-  call "$QUOTER" 'quoteExactInputSingle((address,address,uint256,int24,uint160))(uint256,uint160,uint32,uint256)' \
-    "($1,$2,$4,$3,0)"
+  local pool
+  pool=$(call "$CL_FACTORY" 'getPool(address,address,int24)(address)' "$1" "$2" "$3") || return 1
+  call "$QUOTER" 'quoteExactInputSingleV3(address,address,uint256,uint160)(uint256,uint160,uint32)' "$pool" "$1" "$4" 0
 }
 
 # getWeights covers every registry-listed token, in registry order, so a token's own row has to be
