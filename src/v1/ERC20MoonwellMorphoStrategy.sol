@@ -15,7 +15,6 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
 interface IMerkleDistributor {
     function claim(
@@ -59,6 +58,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /// @notice The address of the WETH token
     address public constant WETH = 0x4200000000000000000000000000000000000006;
+
+    /// @notice The CoW order appData this strategy signs for (no hooks)
+    string internal constant EXPECTED_APP_DATA = '{"appCode":"Mamo","metadata":{},"version":"1.3.0"}';
 
     // @notice Reference to the Moonwell mToken contract
     IMToken public mToken;
@@ -114,6 +116,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when rewards are claimed
     event RewardsClaimed(address[] rewardTokens, uint256[] rewardAmounts);
 
+    // @notice Emitted when the compound fee is taken from claimed rewards
+    event CompoundFeeCollected(address indexed feeRecipient, address[] rewardTokens, uint256[] feeAmounts);
+
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
@@ -136,15 +141,20 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
     /**
-     * @notice Restricts function access to the backend address only
-     * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
+     * @notice Restricts function access to any BACKEND_ROLE member
+     * @dev Uses the MamoStrategyRegistry to verify the caller holds BACKEND_ROLE
      */
     modifier onlyBackend() {
-        require(msg.sender == mamoStrategyRegistry.getBackendAddress(), "Not backend");
+        require(_isBackend(msg.sender), "Not backend");
         _;
     }
 
     // ==================== INITIALIZER ====================
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
     /**
      * @notice Initializer function that sets all the parameters and grants appropriate roles
@@ -309,21 +319,23 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         }
 
         uint256 totalTokenBalance = token.balanceOf(address(this));
-        require(totalTokenBalance > 0, "Nothing to rebalance");
 
         // Update the split parameters
         splitMToken = splitMoonwell;
         splitVault = splitMorpho;
 
         // Deposit into MetaMorpho Vault and Moonwell MToken after update split parameters
-        depositInternal(totalTokenBalance);
+        if (totalTokenBalance > 0) {
+            depositInternal(totalTokenBalance);
+        }
 
         emit PositionUpdated(splitMoonwell, splitMorpho);
     }
 
     /**
      * @notice Claims rewards from Merkle protocol distributor on behalf of a user
-     * @dev Only callable by the backend address
+     * @dev Only callable by any BACKEND_ROLE member
+     * @dev Merkl only lets this contract claim for itself, so the fee is not user-skippable
      * @param rewardTokens The addresses of the reward tokens
      * @param rewardAmounts The amounts of the reward tokens
      * @param proofs The proofs of the reward tokens
@@ -337,18 +349,32 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(rewardTokens.length == proofs.length, "Reward tokens and proofs length mismatch");
 
         address[] memory accounts = new address[](rewardTokens.length);
+        uint256[] memory feeAmounts = new uint256[](rewardTokens.length);
         for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (i > 0) require(rewardTokens[i] > rewardTokens[i - 1], "Reward tokens must be strictly ascending");
             accounts[i] = address(this);
+            feeAmounts[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
 
         IMerkleDistributor(MERKLE_PROTOCOL_DISTRIBUTOR).claim(accounts, rewardTokens, rewardAmounts, proofs);
+
+        // Fee on what the claim paid out: Merkl amounts are cumulative, so use the balance delta
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            feeAmounts[i] =
+                ((IERC20(rewardTokens[i]).balanceOf(address(this)) - feeAmounts[i]) * compoundFee) / SPLIT_TOTAL;
+            if (feeAmounts[i] > 0) {
+                IERC20(rewardTokens[i]).safeTransfer(feeRecipient, feeAmounts[i]);
+            }
+        }
+
+        emit CompoundFeeCollected(feeRecipient, rewardTokens, feeAmounts);
 
         emit RewardsClaimed(rewardTokens, rewardAmounts);
     }
 
     /**
      * @notice Sets a new fee recipient address
-     * @dev Only callable by the backend address
+     * @dev Only callable by any BACKEND_ROLE member
      * @param _newFeeRecipient The new fee recipient address
      */
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
@@ -431,37 +457,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         require(_order.receiver == address(this), "Order receiver must be this strategy contract");
 
-        // The pre-hook must target the sellToken contract and execute a transferFrom call
-        // that moves the fee amount from this strategy contract to the fee recipient.
-
-        uint256 feeAmount = (_order.sellAmount * compoundFee) / SPLIT_TOTAL;
-
-        // Convert bytes to hex string
-        bytes memory preHookCalldata =
-            abi.encodeWithSelector(IERC20.transferFrom.selector, address(this), feeRecipient, feeAmount);
-
-        // Add the 0x prefix to the callData
-        string memory preHookCalldataStr = string.concat("0x", _bytesToHexString(preHookCalldata));
-
-        // Use lowercase for addresses to match what's generated by the TypeScript code
-        string memory targetAddress = Strings.toHexString(uint160(address(_order.sellToken)), 20);
-
-        // Construct the expected appData JSON with keys in alphabetical order
-        string memory expectedAppData = string(
-            abi.encodePacked(
-                '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
-                preHookCalldataStr,
-                '","gasLimit":"',
-                Strings.toString(hookGasLimit),
-                '","target":"',
-                targetAddress,
-                '"}],"version":"0.1.0"}},"version":"1.3.0"}'
-            )
-        );
-
-        bytes32 expectedAppDataBytes = keccak256(bytes(expectedAppData));
-
-        require(_order.appData == expectedAppDataBytes, "Invalid app data");
+        require(_order.appData == keccak256(bytes(EXPECTED_APP_DATA)), "Invalid app data");
 
         require(
             slippagePriceChecker.checkPrice(
@@ -475,6 +471,11 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         );
 
         return MAGIC_VALUE;
+    }
+
+    /// @notice The appData document isValidSignature accepts, and its hash
+    function expectedAppData() external pure returns (string memory doc, bytes32 hash) {
+        return (EXPECTED_APP_DATA, keccak256(bytes(EXPECTED_APP_DATA)));
     }
 
     // ==================== INTERNAL FUNCTIONS ====================
@@ -526,26 +527,6 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Approve the vault relayer unlimited
         IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
-    }
-
-    /**
-     * @notice Converts bytes to a hex string
-     * @param _bytes The bytes to convert
-     * @return A string representation of the bytes in hex format
-     */
-    function _bytesToHexString(bytes memory _bytes) internal pure returns (string memory) {
-        // Create a new bytes array for the hex string (each byte becomes 2 hex chars)
-        bytes memory hexString = new bytes(_bytes.length * 2);
-        bytes memory hexChars = "0123456789abcdef";
-
-        // Convert all bytes to their hex representation
-        for (uint256 i = 0; i < _bytes.length; i++) {
-            uint8 value = uint8(_bytes[i]);
-            hexString[i * 2] = hexChars[value >> 4];
-            hexString[i * 2 + 1] = hexChars[value & 0xf];
-        }
-
-        return string(hexString);
     }
 
     /**
