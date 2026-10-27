@@ -161,6 +161,25 @@ contract StrategyV1UpgradeTest is BaseTest {
         s.updatePosition(0, 10_000);
     }
 
+    function test_setSplit_pointsAFundedLegacyProxyAtTheVaultWithoutMovingFunds() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
+        vm.prank(FUNDED_OWNER);
+        vm.expectRevert("Not backend");
+        s.setSplit(0, 10_000);
+        vm.prank(backend);
+        vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
+        s.setSplit(1, 10_000);
+        vm.prank(backend);
+        s.setSplit(0, 10_000);
+        assertEq(s.splitMToken(), 0);
+        assertEq(s.splitVault(), 10_000);
+        assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "nothing moved");
+        _deposit(s, FUNDED_OWNER, 100e6);
+        assertGt(vault.balanceOf(FUNDED_PROXY), 0, "new deposit lands in the vault");
+        assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "Moonwell share untouched");
+    }
+
     function test_implementation_refusesInitialize() public {
         ERC20MoonwellMorphoStrategy.InitParams memory params;
         vm.expectRevert(Initializable.InvalidInitialization.selector);

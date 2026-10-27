@@ -333,6 +333,19 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
+     * @notice Sets the split without moving funds; deposits follow it from now on
+     * @dev Only callable by any BACKEND_ROLE member
+     */
+    function setSplit(uint256 splitMoonwell, uint256 splitMorpho) external onlyBackend {
+        require(splitMoonwell + splitMorpho == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
+
+        splitMToken = splitMoonwell;
+        splitVault = splitMorpho;
+
+        emit PositionUpdated(splitMoonwell, splitMorpho);
+    }
+
+    /**
      * @notice Claims rewards from Merkle protocol distributor on behalf of a user
      * @dev Only callable by any BACKEND_ROLE member
      * @dev Merkl only lets this contract claim for itself, so the fee is not user-skippable
