@@ -16,7 +16,7 @@ The other hooks default to true, so the same run builds, simulates and validates
 
 ## 2. Address book commit
 
-From this commit on, `v1-usdc-strategy`, `v1-cbbtc-strategy` and `v1-weth-strategy` test the NEW factories (they take `*_STRATEGY_FACTORY` from the book); `v1-upgrade` keeps rehearsing against the frozen pre-020 book in `addresses/rehearsal-020/`.
+From this commit on, `v1-usdc-strategy`, `v1-cbbtc-strategy` and `v1-weth-strategy` test the NEW factories (they take `*_STRATEGY_FACTORY` from the book); `v1-upgrade` keeps rehearsing against the frozen pre-020 book in `addresses/rehearsal-020/`. Between this commit and the Safe execution, the unpinned suites that read `*_STRATEGY_FACTORY` at chain head (`v1-*-strategy`, `ERC20StrategyV2Test.test_FactoryCanCreateStrategy`) fail because the new factories hold no `BACKEND_ROLE` yet: expect that window red.
 
 The new contracts already sit under the plain keys `MOONWELL_MORPHO_STRATEGY_IMPL`, `MOONWELL_MORPHO_STRATEGY_IMPL_V2`, `USDC_STRATEGY_FACTORY`, `cbBTC_STRATEGY_FACTORY` and `WETH_STRATEGY_FACTORY`. Add the retired ones by hand:
 
@@ -65,7 +65,7 @@ forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc
 - The factory addresses flip at execution: the app and backend create accounts through the new keys from then on.
 - An existing USDC account must be upgraded by its owner (`registry.upgradeStrategy(proxy, newImpl)`) and then re-split by the backend with `updatePosition(0, 10000)` before it accepts a USDC deposit.
 - On the new implementation `onlyBackend` is `BACKEND_ROLE` membership: any member listed in §3 may call `updatePosition`, `claimRewards` and `setFeeRecipient`. `MAMO_BACKEND` is not a member, so the backend keeps sending through `STRATEGY_MULTICALL` (index 0), which un-upgraded proxies require anyway.
-- `withdrawAll` and `updatePosition` no longer revert when Moonwell cannot redeem: they take the cash there is and emit `MoonwellRedeemLimited(cashRedeemed, mTokenLeft, underlyingLeft)`. The backend indexes it and re-runs `updatePosition(0, 10000)` for flagged accounts as `getCash()` recovers; the app reads `mToken.balanceOf(proxy) > 0` after `withdrawAll` and shows the amount still in Moonwell.
+- `withdrawAll` and `updatePosition` no longer revert when Moonwell cannot redeem: they take the cash there is and emit `MoonwellRedeemLimited(cashRedeemed, mTokenLeft, underlyingLeft)`. Likewise, when MetaMorpho is short they redeem up to `maxRedeem` and emit `VaultRedeemLimited(sharesRedeemed, sharesLeft)`. The backend indexes both and re-runs `updatePosition(0, 10000)` for flagged accounts as liquidity recovers; the app reads `mToken.balanceOf(proxy) > 0` or vault shares > 0 after `withdrawAll` and shows the amount still held.
 - `withdraw(amount)` on an upgraded account takes from whichever venue can pay, so the app's available balance is idle + vault `maxWithdraw` + min(Moonwell cash, Moonwell balance), not the raw total.
 - Merkl's distributor only lets the proxy claim for itself, so rewards on these accounts are claimable only through backend `claimRewards`, where the compound fee is taken; users cannot skip it. The reward token list must be strictly ascending by address.
 - Reward-swap orders on an upgraded account use the hook-free appData from `expectedAppData()`. Accounts not yet upgraded keep the old hooked appData.

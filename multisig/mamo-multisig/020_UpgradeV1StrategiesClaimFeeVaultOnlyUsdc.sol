@@ -50,25 +50,26 @@ contract UpgradeV1Strategies is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return
-        "Whitelist a new v1 ERC20MoonwellMorphoStrategy for type ids 1 and 4 and move BACKEND_ROLE from the USDC, cbBTC and WETH factories to new ones, the USDC factory defaulting to the vault only";
+        return "Whitelist a new v1 ERC20MoonwellMorphoStrategy for type ids 1 and 4 and move BACKEND_ROLE from the USDC, cbBTC and WETH factories to new ones, the USDC factory defaulting to the vault only";
     }
 
     function deploy() public override {
-        if (addresses.getAddress("MOONWELL_MORPHO_STRATEGY_IMPL") != OLD_IMPL) return; // already deployed
-
         address deployer = addresses.getAddress("DEPLOYER_EOA");
-        vm.startBroadcast(deployer);
         // Same bytecode twice: implementationToId maps each address to a single type id
-        address impl = address(new ERC20MoonwellMorphoStrategy());
-        address implV2 = address(new ERC20MoonwellMorphoStrategy());
-        vm.stopBroadcast();
-        addresses.changeAddress("MOONWELL_MORPHO_STRATEGY_IMPL", impl, true);
-        addresses.changeAddress("MOONWELL_MORPHO_STRATEGY_IMPL_V2", implV2, true);
+        string[2] memory implKeys = ["MOONWELL_MORPHO_STRATEGY_IMPL", "MOONWELL_MORPHO_STRATEGY_IMPL_V2"];
+        address[2] memory oldImpls = [OLD_IMPL, OLD_IMPL_V2];
+        for (uint256 i; i < 2; i++) {
+            if (_deployed(implKeys[i], oldImpls[i])) continue;
+            vm.startBroadcast(deployer);
+            address impl = address(new ERC20MoonwellMorphoStrategy());
+            vm.stopBroadcast();
+            addresses.changeAddress(implKeys[i], impl, true);
+        }
 
         // Each factory pins the impl its config names and takes the key <token>_STRATEGY_FACTORY
         StrategyFactoryDeployer factoryDeployer = new StrategyFactoryDeployer();
         for (uint256 i; i < 3; i++) {
+            if (_deployed(string.concat(assets[i], "_STRATEGY_FACTORY"), oldFactories[i])) continue;
             string memory path = string.concat("./config/strategies/", assets[i], "StrategyConfig.json");
             factoryDeployer.deployStrategyFactory(addresses, new DeployAssetConfig(path).getConfig(), deployer);
         }
@@ -172,6 +173,12 @@ contract UpgradeV1Strategies is MultisigProposal {
                 abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, oldFactories[0], role)
             );
         }
+    }
+
+    // A rerun skips what the book already names as a new, deployed contract
+    function _deployed(string memory key, address retired) internal view returns (bool) {
+        address a = addresses.getAddress(key);
+        return a != retired && a.code.length > 0;
     }
 
     // UUPS embeds address(this) as an immutable, so blank it out before comparing

@@ -37,6 +37,16 @@ contract MockMerkl {
     }
 }
 
+interface IMetaMorphoQueue {
+    function MORPHO() external view returns (address);
+    function withdrawQueueLength() external view returns (uint256);
+    function withdrawQueue(uint256) external view returns (bytes32);
+}
+
+interface IMorphoMarket {
+    function market(bytes32 id) external view returns (uint128, uint128, uint128, uint128, uint128, uint128);
+}
+
 contract StrategyV1UpgradeTest is BaseTest {
     using GPv2Order for GPv2Order.Data;
 
@@ -85,6 +95,7 @@ contract StrategyV1UpgradeTest is BaseTest {
         UpgradeV1Strategies upgrade = new UpgradeV1Strategies();
         vm.makePersistent(address(upgrade));
         upgrade.run();
+        vm.setEnv("ADDRESSES_PATH", "./addresses");
         newImpl = ERC20MoonwellMorphoStrategy(payable(upgrade.addresses().getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
         factory = StrategyFactory(upgrade.addresses().getAddress("USDC_STRATEGY_FACTORY"));
     }
@@ -246,15 +257,43 @@ contract StrategyV1UpgradeTest is BaseTest {
         ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
         uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
         uint256 underlying = mToken.balanceOfUnderlying(FUNDED_PROXY);
+        vm.recordLogs();
         vm.expectEmit(true, true, true, true);
         emit ERC20MoonwellMorphoStrategy.MoonwellRedeemLimited(0, mBalance, underlying);
         vm.prank(FUNDED_OWNER);
         s.withdrawAll();
         assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "position stays until Moonwell has cash");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            bool isWithdraw = logs[i].topics[0] == ERC20MoonwellMorphoStrategy.Withdraw.selector;
+            assertFalse(logs[i].emitter == FUNDED_PROXY && isWithdraw, "no transfer, no Withdraw event");
+        }
     }
 
     function test_wethDustCash_skipsARedeemThatWouldBurnZeroMTokens() public {
-        // A type-4 account on the new implementation, 10000 / 0 like the live WETH factory
+        // 10000 / 0 like the live WETH factory
+        (ERC20MoonwellMorphoStrategy s, IERC20 weth, IMToken mweth) = _wethAccount(10_000);
+        deal(address(weth), address(mweth), 1e8); // 0.1 gwei of cash burns zero mTokens at WETH's exchange rate
+        vm.prank(backend);
+        s.updatePosition(0, 10_000);
+        assertEq(s.splitVault(), 10_000);
+        assertGt(mweth.balanceOf(address(s)), 0, "dust cash is skipped, position stays");
+    }
+
+    function test_withdraw_wethDustMoonwellLegShiftsToTheVault() public {
+        (ERC20MoonwellMorphoStrategy s, IERC20 weth, IMToken mweth) = _wethAccount(5_000);
+        uint256 mBalance = mweth.balanceOf(address(s));
+        vm.prank(s.owner());
+        s.withdraw(3e8); // the 1.5e8 Moonwell half would burn zero mTokens
+        assertEq(mweth.balanceOf(address(s)), mBalance);
+        assertEq(weth.balanceOf(s.owner()), 3e8);
+    }
+
+    /// @dev A type-4 account on the new implementation with 1 ether deposited at the given Moonwell split
+    function _wethAccount(uint256 splitMToken)
+        internal
+        returns (ERC20MoonwellMorphoStrategy s, IERC20 weth, IMToken mweth)
+    {
         StrategyFactory live = StrategyFactory(addresses.getAddress("WETH_STRATEGY_FACTORY"));
         address[] memory rewardTokens = new address[](2);
         rewardTokens[0] = xwell;
@@ -268,8 +307,8 @@ contract StrategyV1UpgradeTest is BaseTest {
             live.slippagePriceChecker(),
             registry.latestImplementationById(4),
             live.feeRecipient(),
-            10_000,
-            0,
+            splitMToken,
+            10_000 - splitMToken,
             4,
             live.hookGasLimit(),
             live.allowedSlippageInBps(),
@@ -281,19 +320,57 @@ contract StrategyV1UpgradeTest is BaseTest {
         registry.grantRole(role, address(wethFactory));
         address user = makeAddr("wethUser");
         vm.prank(user);
-        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(wethFactory.createStrategyForUser(user)));
-        IERC20 weth = IERC20(live.token());
-        IMToken mweth = IMToken(live.mToken());
+        s = ERC20MoonwellMorphoStrategy(payable(wethFactory.createStrategyForUser(user)));
+        weth = IERC20(live.token());
+        mweth = IMToken(live.mToken());
         deal(address(weth), user, 1 ether);
         vm.startPrank(user);
         weth.approve(address(s), 1 ether);
         s.deposit(1 ether);
         vm.stopPrank();
-        deal(address(weth), address(mweth), 1e8); // 0.1 gwei of cash burns zero mTokens at WETH's exchange rate
+    }
+
+    function test_vaultShort_withdrawAllAndUpdatePositionTakeWhatTheVaultCanPay() public {
+        address user = makeAddr("user");
+        vm.prank(user);
+        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(user)));
+        _deposit(s, user, 1_000e6);
+
+        // Leave 100 USDC of liquidity in each market as MetaMorpho sees it, for both maxRedeem and redeem
+        IMetaMorphoQueue mm = IMetaMorphoQueue(address(vault));
+        IMorphoMarket morpho = IMorphoMarket(mm.MORPHO());
+        for (uint256 i; i < mm.withdrawQueueLength(); i++) {
+            bytes32 id = mm.withdrawQueue(i);
+            (uint128 supply, uint128 supplyShares,, uint128 borrowShares,, uint128 fee) = morpho.market(id);
+            vm.mockCall(
+                address(morpho),
+                abi.encodeCall(IMorphoMarket.market, (id)),
+                abi.encode(supply, supplyShares, supply - 100e6, borrowShares, block.timestamp, fee)
+            );
+        }
+        IERC4626 v = IERC4626(address(vault));
+        assertLt(v.maxWithdraw(address(s)), 600e6);
+
+        uint256 shares = vault.balanceOf(address(s));
+        uint256 redeemable = v.maxRedeem(address(s));
+        vm.expectEmit(address(s));
+        emit ERC20MoonwellMorphoStrategy.VaultRedeemLimited(redeemable, shares - redeemable);
         vm.prank(backend);
         s.updatePosition(0, 10_000);
-        assertEq(s.splitVault(), 10_000);
-        assertGt(mweth.balanceOf(address(s)), 0, "dust cash is skipped, position stays");
+
+        uint256 maxOut = v.maxWithdraw(address(s));
+        shares = vault.balanceOf(address(s));
+        redeemable = v.maxRedeem(address(s));
+        uint256 paid = v.previewRedeem(redeemable);
+        assertLt(maxOut, 600e6);
+        vm.expectEmit(address(s));
+        emit ERC20MoonwellMorphoStrategy.VaultRedeemLimited(redeemable, shares - redeemable);
+        vm.prank(user);
+        s.withdrawAll();
+        assertEq(usdc.balanceOf(user), paid);
+        assertApproxEqAbs(usdc.balanceOf(user), maxOut, 1); // redeem floors maxRedeem's shares once more
+        assertEq(vault.balanceOf(address(s)), shares - redeemable);
+        assertGt(shares - redeemable, 0);
     }
 
     function test_implementation_refusesInitialize() public {

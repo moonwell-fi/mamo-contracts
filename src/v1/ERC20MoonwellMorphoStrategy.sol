@@ -123,6 +123,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     // @notice Emitted when Moonwell's cash could not cover the whole mToken position
     event MoonwellRedeemLimited(uint256 cashRedeemed, uint256 mTokenLeft, uint256 underlyingLeft);
 
+    // @notice Emitted when MetaMorpho's liquidity could not cover the whole vault position
+    event VaultRedeemLimited(uint256 sharesRedeemed, uint256 sharesLeft);
+
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
         address mamoStrategyRegistry;
@@ -145,8 +148,8 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     address public constant MERKLE_PROTOCOL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
     /**
-     * @notice Restricts function access to the backend address only
-     * @dev Uses the MamoStrategyRegistry to verify the caller is the backend
+     * @notice Restricts function access to any BACKEND_ROLE member
+     * @dev Uses the MamoStrategyRegistry to verify the caller holds BACKEND_ROLE
      */
     modifier onlyBackend() {
         require(_isBackend(msg.sender), "Not backend");
@@ -261,6 +264,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
                 fromVault = vaultMax;
             }
             require(fromMoonwell <= moonwellMax, "Moonwell cannot pay the remainder now");
+            // A leg that burns zero mTokens reverts in Moonwell; balanceOfUnderlying just refreshed the rate
+            if (fromMoonwell != 0 && fromMoonwell * 1e18 / mToken.exchangeRateStored() == 0) {
+                fromVault += fromMoonwell;
+                fromMoonwell = 0;
+                require(fromVault <= vaultMax, "Vault cannot pay the remainder now");
+            }
 
             // Withdraw from Moonwell if needed
             if (fromMoonwell > 0) {
@@ -287,21 +296,20 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      */
     function withdrawAll() external onlyOwner {
-        // Get current balances
-        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
-
         // Withdraw from Moonwell if needed
         _redeemMTokenUpToCash();
 
         // Withdraw from MetaMorpho if needed
-        if (vaultBalance > 0) {
-            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
-        }
+        _redeemVaultUpToLiquidity();
 
         // Get final token balance
         uint256 finalBalance = token.balanceOf(address(this));
-        // Nothing redeemable right now is not an error when Moonwell still holds the position
-        require(finalBalance > 0 || IERC20(address(mToken)).balanceOf(address(this)) > 0, "No tokens to withdraw");
+        // Nothing redeemable right now is not an error when a venue still holds the position
+        require(
+            finalBalance > 0 || IERC20(address(mToken)).balanceOf(address(this)) > 0
+                || metaMorphoVault.balanceOf(address(this)) > 0,
+            "No tokens to withdraw"
+        );
         if (finalBalance == 0) return;
 
         // Transfer all tokens to the owner
@@ -325,10 +333,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         _redeemMTokenUpToCash();
 
         // Withdraw from MetaMorpho
-        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
-        if (vaultBalance > 0) {
-            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
-        }
+        _redeemVaultUpToLiquidity();
 
         uint256 totalTokenBalance = token.balanceOf(address(this));
 
@@ -346,7 +351,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Claims rewards from Merkle protocol distributor on behalf of a user
-     * @dev Only callable by the backend address
+     * @dev Only callable by any BACKEND_ROLE member
      * @dev Merkl only lets this contract claim for itself, so the fee is not user-skippable
      * @param rewardTokens The addresses of the reward tokens
      * @param rewardAmounts The amounts of the reward tokens
@@ -386,7 +391,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Sets a new fee recipient address
-     * @dev Only callable by the backend address
+     * @dev Only callable by any BACKEND_ROLE member
      * @param _newFeeRecipient The new fee recipient address
      */
     function setFeeRecipient(address _newFeeRecipient) external onlyBackend {
@@ -558,6 +563,21 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
             if (cash > 0) require(mToken.redeemUnderlying(cash) == 0, "Failed to redeem mToken");
             emit MoonwellRedeemLimited(cash, IERC20(address(mToken)).balanceOf(address(this)), underlying - cash);
         }
+    }
+
+    /**
+     * @notice Redeems the vault position up to what MetaMorpho can pay now
+     */
+    function _redeemVaultUpToLiquidity() internal {
+        uint256 shares = metaMorphoVault.balanceOf(address(this));
+        if (shares == 0) return;
+
+        // maxRedeem floors a fully liquid position below its share count, so redeem it whole when the assets cover it
+        uint256 redeemable = metaMorphoVault.maxWithdraw(address(this)) >= metaMorphoVault.previewRedeem(shares)
+            ? shares
+            : Math.min(shares, metaMorphoVault.maxRedeem(address(this)));
+        if (redeemable > 0) metaMorphoVault.redeem(redeemable, address(this), address(this));
+        if (redeemable < shares) emit VaultRedeemLimited(redeemable, shares - redeemable);
     }
 
     /**
