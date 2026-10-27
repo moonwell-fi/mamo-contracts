@@ -38,13 +38,12 @@ import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
  * @dev Used for testing the failure case in recoverETH function
  */
 contract MockRejectETH {
-// This contract has no receive or fallback function,
-// so it will reject all ETH transfers
-
-// Alternatively, we could have a receive function that explicitly reverts
-// receive() external payable {
-//     revert("ETH transfer rejected");
-// }
+    // This contract has no receive or fallback function,
+    // so it will reject all ETH transfers
+    // Alternatively, we could have a receive function that explicitly reverts
+    // receive() external payable {
+    //     revert("ETH transfer rejected");
+    // }
 }
 
 contract MoonwellMorphoStrategyV1Test is Test {
@@ -1029,7 +1028,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
             string[] memory headers = new string[](1);
             headers[0] = "Content-Type: application/json";
 
-            (uint256 status, bytes memory data) = "https://api.cow.fi/base/api/v1/quote".post(
+            (uint256 status, bytes memory data) = "https://api.cow.fi/base/api/v1/quote"
+            .post(
                 headers,
                 string(
                     abi.encodePacked(
