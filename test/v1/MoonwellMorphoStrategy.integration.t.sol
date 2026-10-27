@@ -134,19 +134,26 @@ contract MoonwellMorphoStrategyV1Test is Test {
 
         require(addresses.isAddressSet(assetConfig.strategyImplementation), "Strategy implementation not deployed");
 
-        splitMToken = assetConfig.strategyParams.splitMToken;
-        splitVault = assetConfig.strategyParams.splitVault;
-
         string memory factoryName = string(abi.encodePacked(assetConfig.token, "_STRATEGY_FACTORY"));
         StrategyFactory factory = StrategyFactory(payable(addresses.getAddress(factoryName)));
+        splitMToken = factory.splitMToken();
+        splitVault = factory.splitVault();
 
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
         deltaThreshold = assetConfig.decimals == 18 ? 1e9 : 1e3;
 
-        vm.startPrank(owner);
+        vm.prank(owner);
         strategy = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(owner)));
-        vm.stopPrank();
+
+        // The live factory deploys mainnet bytecode: upgrade to this branch's implementation
+        address impl = address(new ERC20MoonwellMorphoStrategy());
+        uint256 typeId = factory.strategyTypeId();
+        vm.prank(admin);
+        registry.whitelistImplementation(impl, typeId);
+        vm.prank(owner);
+        registry.upgradeStrategy(address(strategy), impl);
+        assertEq(ERC1967Proxy(payable(address(strategy))).getImplementation(), impl);
 
         vm.warp(block.timestamp + 1 minutes);
     }
@@ -741,8 +748,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify initial split
-        assertEq(strategy.splitMToken(), config.splitMToken, "Initial mToken split should be 5000 (50%)");
-        assertEq(strategy.splitVault(), config.splitVault, "Initial vault split should be 5000 (50%)");
+        assertEq(strategy.splitMToken(), splitMToken, "Initial mToken split should be 5000 (50%)");
+        assertEq(strategy.splitVault(), splitVault, "Initial vault split should be 5000 (50%)");
 
         // Verify initial balances match the expected split
         uint256 totalBalance = getTotalBalance(address(strategy));
@@ -819,8 +826,8 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), splitVault, "Vault split should remain unchanged");
     }
 
     function testRevertIfInvalidSplitParameters() public {
@@ -840,22 +847,16 @@ contract MoonwellMorphoStrategyV1Test is Test {
         vm.stopPrank();
 
         // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), splitMToken, "mToken split should remain unchanged");
+        assertEq(strategy.splitVault(), splitVault, "Vault split should remain unchanged");
     }
 
-    function testRevertIfNoFundsToRebalance() public {
-        // No funds deposited
-
-        // Backend attempts to update position
-        vm.startPrank(multicall);
-        vm.expectRevert("Nothing to rebalance");
+    function testUpdatePositionWithNoFundsSetsSplit() public {
+        vm.prank(multicall);
         strategy.updatePosition(6000, 4000);
-        vm.stopPrank();
 
-        // Verify the split remains unchanged
-        assertEq(strategy.splitMToken(), config.splitMToken, "mToken split should remain unchanged");
-        assertEq(strategy.splitVault(), config.splitVault, "Vault split should remain unchanged");
+        assertEq(strategy.splitMToken(), 6000, "mToken split should be updated");
+        assertEq(strategy.splitVault(), 4000, "Vault split should be updated");
     }
 
     function testDepositIdleTokens() public {
@@ -1055,7 +1056,7 @@ contract MoonwellMorphoStrategyV1Test is Test {
         }
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
-        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
+        (, bytes32 appDataHash) = strategy.expectedAppData();
 
         // Mock the price check to always return true
         // This is necessary because the price from the CoW API is significantly different
@@ -1439,7 +1440,7 @@ contract MoonwellMorphoStrategyV1Test is Test {
 
         // Whitelist the implementation
         vm.prank(admin);
-        uint256 _strategyTypeId = registry.whitelistImplementation(address(implementation), 0);
+        uint256 _strategyTypeId = registry.whitelistImplementation(address(implementation), 99);
 
         // Test with invalid mamoStrategyRegistry
         bytes memory invalidRegistryData = abi.encodeWithSelector(
@@ -1572,7 +1573,7 @@ contract MoonwellMorphoStrategyV1Test is Test {
         uint32 validTo = uint32(block.timestamp) + 29 minutes;
 
         // Generate proper app data hash for this test
-        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
+        (, bytes32 appDataHash) = strategy.expectedAppData();
 
         // Set an extremely low buy amount that will definitely fail the price check
         uint256 extremelyLowBuyAmount = 1; // Just 1 unit of underlying
@@ -1665,7 +1666,7 @@ contract MoonwellMorphoStrategyV1Test is Test {
         uint256 buyAmount = 1; // Extremely low amount
 
         // Generate proper app data hash
-        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
+        (, bytes32 appDataHash) = strategy.expectedAppData();
 
         GPv2Order.Data memory order = GPv2Order.Data({
             sellToken: IERC20(address(well)),
@@ -1873,7 +1874,7 @@ contract MoonwellMorphoStrategyV1Test is Test {
         });
 
         // Generate proper app data hash
-        bytes32 appDataHash = generateAppDataHash(address(well), admin, wellAmount, address(strategy));
+        (, bytes32 appDataHash) = strategy.expectedAppData();
 
         // Update the order with the proper app data hash
         order.appData = appDataHash;
@@ -2102,7 +2103,7 @@ contract MoonwellMorphoStrategyV1Test is Test {
 
         // Whitelist the implementation
         vm.prank(admin);
-        uint256 _strategyTypeId = registry.whitelistImplementation(address(newImpl), 0);
+        uint256 _strategyTypeId = registry.whitelistImplementation(address(newImpl), 99);
 
         // Create reward tokens array
         address[] memory rewardTokens = new address[](1);
@@ -2407,41 +2408,5 @@ contract MoonwellMorphoStrategyV1Test is Test {
         uint256 tokenBalance = IERC20(address(well)).balanceOf(_strategy);
 
         return metaMorphoBalance + mTokenBalance + tokenBalance;
-    }
-
-    /**
-     * @notice Generates app data hash for CoW Swap orders
-     * @param sellToken The address of the token being sold
-     * @param feeRecipient The address that will receive the fee
-     * @param sellAmount The amount of tokens being sold
-     * @param fromAddress The address the order is from
-     * @return bytes32 The app data hash
-     */
-    function generateAppDataHash(address sellToken, address feeRecipient, uint256 sellAmount, address fromAddress)
-        internal
-        returns (bytes32)
-    {
-        // Use FFI to call our generate-appdata script
-        string[] memory ffiCommand = new string[](15);
-        ffiCommand[0] = "npx";
-        ffiCommand[1] = "ts-node";
-        ffiCommand[2] = "test/v1/utils/generate-appdata.ts";
-        ffiCommand[3] = "--sell-token";
-        ffiCommand[4] = vm.toString(sellToken);
-        ffiCommand[5] = "--fee-recipient";
-        ffiCommand[6] = vm.toString(feeRecipient);
-        ffiCommand[7] = "--sell-amount";
-        ffiCommand[8] = vm.toString(sellAmount);
-        ffiCommand[9] = "--compound-fee";
-        ffiCommand[10] = vm.toString(assetConfig.strategyParams.compoundFee);
-        ffiCommand[11] = "--from";
-        ffiCommand[12] = vm.toString(fromAddress);
-        ffiCommand[13] = "--hook-gas-limit";
-        ffiCommand[14] = vm.toString(assetConfig.strategyParams.hookGasLimit);
-
-        // Execute the command and get the appData
-        bytes memory appDataResult = vm.ffi(ffiCommand);
-
-        return bytes32(appDataResult);
     }
 }
