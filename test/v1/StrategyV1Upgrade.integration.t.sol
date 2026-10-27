@@ -145,7 +145,7 @@ contract StrategyV1UpgradeTest is BaseTest {
         uint256[] memory amounts = new uint256[](2);
         (amounts[0], amounts[1]) = (100e18, 200e18);
         vm.prank(backend);
-        vm.expectRevert("Reward tokens must be strictly ascending");
+        vm.expectRevert("Duplicate reward token");
         s.claimRewards(tokens, amounts, new bytes32[][](2));
     }
 

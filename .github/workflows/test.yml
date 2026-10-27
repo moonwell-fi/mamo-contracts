@@ -531,3 +531,6 @@ jobs:
 
       - name: Run LPAutoBalancerV2 setup-proposal test
         run: make lp-v2-setup
+
+      - name: Run LPAutoBalancerV2 integration test
+        run: make lp-auto-balancer-v2

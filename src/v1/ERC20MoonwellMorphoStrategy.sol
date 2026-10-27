@@ -364,7 +364,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         address[] memory accounts = new address[](rewardTokens.length);
         uint256[] memory feeAmounts = new uint256[](rewardTokens.length);
         for (uint256 i = 0; i < rewardTokens.length; i++) {
-            if (i > 0) require(rewardTokens[i] > rewardTokens[i - 1], "Reward tokens must be strictly ascending");
+            for (uint256 j = 0; j < i; j++) {
+                require(rewardTokens[j] != rewardTokens[i], "Duplicate reward token");
+            }
             accounts[i] = address(this);
             feeAmounts[i] = IERC20(rewardTokens[i]).balanceOf(address(this));
         }
