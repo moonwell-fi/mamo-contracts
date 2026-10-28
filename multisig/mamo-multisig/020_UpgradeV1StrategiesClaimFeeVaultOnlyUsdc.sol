@@ -15,6 +15,7 @@ import {StrategyFactoryDeployer} from "@script/v1/StrategyFactoryDeployer.s.sol"
  * @notice Whitelists a new v1 implementation for type ids 1 and 4 and moves BACKEND_ROLE to three new factories.
  * @dev New contracts take the plain address-book keys; at deployment the retired ones are renamed by hand to
  *      {USDC,cbBTC}_STRATEGY_FACTORY_DEPRECATED_2, WETH_STRATEGY_FACTORY_DEPRECATED, MOONWELL_MORPHO_STRATEGY_IMPL{_DEPRECATED_2,_V2_DEPRECATED}.
+ * @dev Proposal 011 must not be executed after this one without being reworked for the v1 fleet.
  */
 contract UpgradeV1Strategies is MultisigProposal {
     address internal constant OLD_IMPL = 0x4007EFfCE837701Fdd90017Ab747fefD58aAD98B;
@@ -26,6 +27,8 @@ contract UpgradeV1Strategies is MultisigProposal {
         0xf8CFdEf5068929e022a50315983043b61E9987f8,
         0x14bA47Ef0286B345E2B74d26243767268290eE28
     ];
+    // Type-7 stock factory, not in main's address book
+    address internal constant STOCK_FACTORY = 0x54fa54F8bDE08A5718022ec878044EdcF97eD144;
 
     function run() public override {
         uint256[] memory chainIds = new uint256[](1);
@@ -85,6 +88,22 @@ contract UpgradeV1Strategies is MultisigProposal {
             "BACKEND_ROLE index 0 should be the strategy multicall before this proposal"
         );
         assertFalse(registry.paused(), "registry should not be paused");
+        assertFalse(addresses.isAddressSet("MARKET_REGISTRY"), "proposal 011 must not have run");
+
+        bytes32 role = registry.BACKEND_ROLE();
+        assertEq(registry.getRoleMemberCount(role), 7, "BACKEND_ROLE should have seven members");
+        address[7] memory members = [
+            addresses.getAddress("STRATEGY_MULTICALL"),
+            oldFactories[0],
+            oldFactories[1],
+            oldFactories[2],
+            addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED"),
+            addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"),
+            STOCK_FACTORY
+        ];
+        for (uint256 i; i < 7; i++) {
+            assertTrue(registry.hasRole(role, members[i]), "expected BACKEND_ROLE member missing");
+        }
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
@@ -160,6 +179,10 @@ contract UpgradeV1Strategies is MultisigProposal {
             registry.getBackendAddress(),
             addresses.getAddress("STRATEGY_MULTICALL"),
             "BACKEND_ROLE index 0 must not move"
+        );
+        assertEq(registry.getRoleMemberCount(role), 7, "BACKEND_ROLE should still have seven members");
+        assertFalse(
+            registry.hasRole(role, addresses.getAddress("MAMO_BACKEND")), "MAMO_BACKEND must not hold BACKEND_ROLE"
         );
 
         // The revoke trips before the implementation check ("Not latest implementation")

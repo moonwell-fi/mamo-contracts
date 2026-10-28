@@ -50,6 +50,8 @@ forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc
 | 5 | `WETH_STRATEGY_FACTORY` 0x14bA47Ef0286B345E2B74d26243767268290eE28 | new `USDC_STRATEGY_FACTORY` |
 | 6 | type-7 stock factory 0x54fa54F8bDE08A5718022ec878044EdcF97eD144 (not in main's book) | unchanged |
 
+- Proposal 011 (`011_DeployMultiMarketSystem`, never executed) whitelists a different implementation under type ids 1 and 4 and revokes `BACKEND_ROLE` from whatever `<token>_STRATEGY_FACTORY` names: it must not be executed after 020 without being reworked for the v1 fleet. `preBuildMock()` refuses to run if the book already has `MARKET_REGISTRY`.
+
 ## 4. After execution
 
 `DO_DEPLOY=false DO_PRE_BUILD_MOCK=false DO_BUILD=false DO_SIMULATE=false DO_PRINT=false` with the command above runs `validate()` on chain:

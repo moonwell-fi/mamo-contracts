@@ -14,6 +14,8 @@ import {DeployAssetConfig} from "@script/DeployAssetConfig.sol";
 
 /**
  * @title DeployMultiMarketSystem
+ * @dev Superseded for type ids 1 and 4 by proposal 020; executing this after 020 would revoke the v1 factories' role
+ *      and point v1 proxies at a different layout. Rework before use.
  * @notice Multisig proposal to deploy the multi-market strategy system for all assets:
  *         MarketRegistry, new strategy implementations, and MultiMarketStrategyFactories
  *         for USDC, cbBTC, and WETH. Revokes BACKEND_ROLE from all old factories.
@@ -303,9 +305,7 @@ contract DeployMultiMarketSystem is MultisigProposal {
             // Verify markets are registered
             for (uint256 j = 0; j < cfg.markets.length; j++) {
                 address target = addresses.getAddress(cfg.markets[j].target);
-                assertTrue(
-                    marketReg.isMarketActive(addresses.getAddress(cfg.token), target), "Market should be active"
-                );
+                assertTrue(marketReg.isMarketActive(addresses.getAddress(cfg.token), target), "Market should be active");
             }
 
             // Verify factory configuration
