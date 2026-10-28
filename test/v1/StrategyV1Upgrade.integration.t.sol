@@ -412,12 +412,11 @@ contract StrategyV1UpgradeTest is BaseTest {
 
         uint256 maxOut = IERC4626(address(vault)).maxWithdraw(FUNDED_PROXY);
         vm.startPrank(FUNDED_OWNER);
-        vm.expectRevert();
+        vm.expectRevert("Moonwell cannot pay the remainder now"); // the vault is drained, Moonwell has no cash
         s.withdraw(maxOut + 1);
         s.withdraw(maxOut);
-        // #126 lifts both: withdraw past the vault balance and withdrawAll at zero Moonwell cash
-        vm.expectRevert("Failed to redeem mToken");
-        s.withdrawAll();
+        s.withdrawAll(); // best-effort: pays nothing more, leaves the Moonwell share in place
+        assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "Moonwell share still in place");
         vm.stopPrank();
     }
 
@@ -478,7 +477,7 @@ contract StrategyV1UpgradeTest is BaseTest {
         uint256 ownerBefore = usdc.balanceOf(FUNDED_OWNER);
         vm.startPrank(FUNDED_OWNER);
         s.withdraw(10_000);
-        vm.expectRevert("Failed to redeem mToken");
+        vm.expectRevert("Moonwell cannot pay the remainder now"); // no vault balance to shift the excess to
         s.withdraw(10_001);
         vm.stopPrank();
         assertEq(usdc.balanceOf(FUNDED_OWNER) - ownerBefore, 10_000);
