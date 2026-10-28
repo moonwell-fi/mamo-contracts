@@ -531,7 +531,7 @@ jobs:
           version: v1.7.1
 
       # Self-forking Base test; BASE_RPC_URL comes from the workflow-level env.
-      - name: Run stock drop proposal tests (013, 019 then 017, f-mamo 006 and 007, on a Base fork)
+      - name: Run stock drop proposal tests (017 then f-mamo 006, on a Base fork)
         run: make stock-drop-setup
 
   stock-universe-listing:

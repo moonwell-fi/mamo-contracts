@@ -35,9 +35,9 @@ import {SlippagePriceCheckerHardening} from "./013_SlippagePriceCheckerOracleHar
  *             the deprecated factory's, points the V2 stock registry's fee recipient at DropAutomationV2, and
  *             configures the USDC, cbBTC and WETH -> MAMO pairs on the Chainlink checker.
  * @dev 013 is not executed on its own; if it ever were, this batch skips the upgrade and the rest of its steps
- *      re-apply harmlessly. Runs after mamo-multisig/019, which redeploys the stock accounts system this reads.
- *      F-MAMO owns MultiRewards, DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO
- *      proposal (f-mamo/006), and the in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
+ *      re-apply harmlessly. Runs after mamo-multisig/019, which redeploys the stock accounts system this reads,
+ *      and 021, which lists the stocks on the pools the routes use. F-MAMO owns MultiRewards, DropAutomation v1 and
+ *      the fee lockers, so the drop cutover and the in-kind streams are a separate F-MAMO proposal (f-mamo/006).
  */
 contract DeployStockDrop is SlippagePriceCheckerHardening {
     string internal constant DROP_KEY = "DROP_AUTOMATION_V2";
