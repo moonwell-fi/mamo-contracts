@@ -9,7 +9,7 @@ The system is designed with a clear separation of concerns:
 - **Swapping**: Convert collected tokens to MAMO/cbBTC with flexible routing
 - **Distribution**: Forward rewards to the F-MAMO Safe for staker distribution
 
-`DropAutomationV2` replaces `DropAutomation` at the stock drop cutover (`multisig/f-mamo/006_StockDropCutover`): it funds MultiRewards directly as the distributor of each reward token instead of going through the Safe module. The drop flow below still describes `DropAutomation`; the gauge management section describes `DropAutomationV2` and notes where V1 differs.
+`DropAutomationV2` replaces `DropAutomation` at the stock drop cutover (`multisig/f-mamo/006_StockDropCutover`): it funds MultiRewards directly as the distributor of each reward token instead of going through the Safe module. The same batch adds WETH, USDC and the B20 stocks as MultiRewards reward tokens distributed by `DropAutomationV2`, which pays them out as they are. The drop flow below still describes `DropAutomation`; the gauge management section describes `DropAutomationV2` and notes where V1 differs.
 
 ## Core Components
 

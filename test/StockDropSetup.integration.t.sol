@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {StockDropCutover} from "../multisig/f-mamo/006_StockDropCutover.sol";
-import {AddStockRewards} from "../multisig/f-mamo/007_AddStockRewards.sol";
 import {
     SlippagePriceCheckerOracleHardening
 } from "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
@@ -31,7 +30,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 /// @notice Base-fork rehearsal of the stock drop proposals in mainnet order (mamo-multisig/013, the sequencer-guarded
-///         price checker 017 requires, and 019, which redeploys the stock accounts system, then mamo-multisig/017, f-mamo/006 and f-mamo/007) through the real Safes, followed by the lifecycle on the result: a live-style staking account
+///         price checker 017 requires, and 019, which redeploys the stock accounts system, then mamo-multisig/017 and f-mamo/006) through the real Safes, followed by the lifecycle on the result: a live-style staking account
 ///         upgrades and migrates, a drop tops up the running streams and starts WETH and USDC ones, the account
 ///         compounds all three through the live pools,
 ///         and a new stock account pays its fee to DropAutomationV2.
@@ -58,7 +57,6 @@ contract StockDropSetupTest is Test {
     RedeployStockAccountSystem internal redeployProposal;
     DeployStockDrop internal deployProposal;
     StockDropCutover internal cutoverProposal;
-    AddStockRewards internal stockRewardsProposal;
 
     function setUp() public {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
@@ -79,12 +77,10 @@ contract StockDropSetupTest is Test {
         // Pinned before Slipstream V3 and mamo-multisig/021: 019 lists the stocks on the pools it executed with
         deployProposal.setTokenList(redeployProposal.TOKEN_LIST());
         cutoverProposal = new StockDropCutover();
-        stockRewardsProposal = new AddStockRewards();
         oracleProposal.setAddresses(addresses);
         redeployProposal.setAddresses(addresses);
         deployProposal.setAddresses(addresses);
         cutoverProposal.setAddresses(addresses);
-        stockRewardsProposal.setAddresses(addresses);
     }
 
     function test_stockDropSetup_andLifecycle() public {
@@ -96,10 +92,9 @@ contract StockDropSetupTest is Test {
         _run(redeployProposal, 19);
         // 017: sequencer feed, whitelist, grant, 2 revokes, fee recipient, 3 pairs
         _run(deployProposal, 9);
-        // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module
-        _run(cutoverProposal, 10);
-        // 007: addReward and addRewardToken for WETH, USDC and each stock
-        _run(stockRewardsProposal, 28);
+        // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module, then
+        // addReward and addRewardToken for WETH, USDC and each of the 12 stocks
+        _run(cutoverProposal, 38);
 
         _upgradeAndMigrate(account);
         _proveDropTopsUpRunningStreams();
@@ -139,8 +134,8 @@ contract StockDropSetupTest is Test {
         _run(oracleProposal, 10);
         _run(redeployProposal, 19);
         _run(deployProposal, 9);
-        // 006: 3 lockers, the gauge withdrawal, 2 distributors, the module
-        _run(cutoverProposal, 7);
+        // 006: 3 lockers, the gauge withdrawal, 2 distributors, the module, 28 reward-token actions
+        _run(cutoverProposal, 35);
     }
 
     /// @dev 017 before 013: FPS runs build() live as the multisig, so action 1 reverts there and no batch is produced

@@ -15,6 +15,10 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+
+import {StockAccountsConfig} from "@script/StockAccountsConfig.sol";
+import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 
 interface ISafeModules {
     function getModulesPaginated(address start, uint256 pageSize)
@@ -31,15 +35,23 @@ interface ISafeModules {
  * @title StockDropCutover
  * @notice F-MAMO batch moving the Mamo Drop from DropAutomation v1 and its Safe module to {DropAutomationV2}:
  *         repoints the fee lockers (the VIRTUAL/MAMO one through a new splitter with the live split), moves
- *         v1's gauge stake (to F-MAMO for a gauge Aerodrome has killed), sweeps v1's balances, makes v2 the MultiRewards distributor of MAMO and cbBTC, and
- *         disables the old module. Stakers see no change; stock rewards follow in f-mamo/007.
+ *         v1's gauge stake (to F-MAMO for a gauge Aerodrome has killed), sweeps v1's balances, makes v2 the MultiRewards distributor of MAMO and cbBTC,
+ *         disables the old module, and starts the in-kind streams: WETH, USDC and each B20 stock become MultiRewards
+ *         reward tokens distributed by v2, which pays them out as they are.
  * @dev Runs after mamo-multisig/017, which deploys DropAutomationV2. The old module must have nothing staged, and
  *      a last v1 drop (claimGaugeRewards + createDrop + notifyRewards) should run first so nothing is left behind.
+ *      A staking account still on V1 parks the new tokens on itself when compounded; the first compound after its
+ *      upgrade to MamoStakingStrategyV2 sweeps them, so the streams do not wait for accounts to upgrade.
+ *      A token removed from MultiRewards must never be re-added: its stale per-user checkpoints make `earned`
+ *      underflow and lock every earlier staker's withdrawals. {preBuildMock} can only check the token is not listed
+ *      now, so this rule is operational.
  */
 contract StockDropCutover is MultisigProposal {
     string internal constant SPLITTER_KEY = "FEE_SPLITTER_VIRTUAL_MAMO_V2";
 
     address internal constant SENTINEL_MODULES = address(0x1);
+
+    uint256 internal constant REWARDS_DURATION = 7 days;
 
     /// @notice The fee tokens v1 may hold, swept to v2
     string[8] internal SWEPT_TOKENS = ["MAMO", "cbBTC", "WETH", "USDC", "AERO", "VIRTUALS", "ZORA", "EDGE"];
@@ -49,6 +61,13 @@ contract StockDropCutover is MultisigProposal {
     uint256[] internal _stakes;
     bool[] internal _alive;
     uint256[] internal _safeLpBefore;
+
+    StockAccountsConfig public immutable deployConfig;
+
+    constructor() {
+        deployConfig = new StockAccountsConfig("./deploy/stock-accounts/8453_PROD.json");
+        vm.makePersistent(address(deployConfig));
+    }
 
     function run() public override {
         _initializeAddresses();
@@ -71,7 +90,7 @@ contract StockDropCutover is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Move the Mamo Drop to DropAutomationV2: repoint the fee lockers, move the gauge stake and v1 balances, make DropAutomationV2 the MultiRewards distributor of MAMO and cbBTC, and disable the old rewards module";
+        return "Move the Mamo Drop to DropAutomationV2: repoint the fee lockers, move the gauge stake and v1 balances, make DropAutomationV2 the MultiRewards distributor of MAMO and cbBTC, disable the old rewards module, and add WETH, USDC and the B20 stocks as MultiRewards reward tokens distributed by DropAutomationV2";
     }
 
     /// @dev The live splitter's recipients are immutable, so the VIRTUAL/MAMO leg gets a copy paying v2
@@ -114,6 +133,26 @@ contract StockDropCutover is MultisigProposal {
         (address cbBtcDistributor,,,,,) = multiRewards.rewardData(addresses.getAddress("cbBTC"));
         assertEq(mamoDistributor, safe, "MAMO distributor should be F-MAMO");
         assertEq(cbBtcDistributor, safe, "cbBTC distributor should be F-MAMO");
+
+        address[] memory tokens = _rewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            (, uint256 duration,,,,) = multiRewards.rewardData(tokens[i]);
+            assertEq(duration, 0, "Token is already a reward token");
+        }
+
+        _standInForNodeNativeTokens(_stocks());
+    }
+
+    /// @dev `addReward` reads `decimals()`, which revm cannot execute on a B20 stock (code 0xEF). The stand-in only
+    ///      lets the call be recorded; the Safe sends the same calldata to the real token.
+    function _standInForNodeNativeTokens(StockAccountsConfig.TokenListEntry[] memory stocks) internal {
+        for (uint256 i = 0; i < stocks.length; i++) {
+            bytes memory code = stocks[i].token.code;
+            if (code.length != 1 || code[0] != 0xEF) continue;
+
+            vm.etch(stocks[i].token, address(new MockERC20Decimals(stocks[i].symbol, stocks[i].decimals)).code);
+            assertEq(IERC20Metadata(stocks[i].token).decimals(), stocks[i].decimals, "Stand-in decimals");
+        }
     }
 
     // ─── the batch ───────────────────────────────────────────────────────────────────────────────
@@ -146,6 +185,13 @@ contract StockDropCutover is MultisigProposal {
         address safe = addresses.getAddress("F-MAMO");
         address module = addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC");
         ISafeModules(safe).disableModule(_previousModule(safe, module), module);
+
+        // 6. v2 streams WETH, USDC and the stocks as they are
+        address[] memory tokens = _rewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            multiRewards.addReward(tokens[i], drop, REWARDS_DURATION);
+            DropAutomationV2(drop).addRewardToken(tokens[i]);
+        }
     }
 
     /// @dev A gauge Aerodrome has killed refuses deposits, so its stake stays with F-MAMO and v2 does not claim it
@@ -242,6 +288,40 @@ contract StockDropCutover is MultisigProposal {
                 .isModuleEnabled(addresses.getAddress("REWARDS_DISTRIBUTOR_MAMO_CBBTC")),
             "Old module disabled"
         );
+
+        address[] memory tokens = _rewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            (address distributor, uint256 duration,,,,) = multiRewards.rewardData(tokens[i]);
+            assertEq(distributor, drop, "Distributor should be DropAutomationV2");
+            assertEq(duration, REWARDS_DURATION, "Rewards duration");
+            assertTrue(DropAutomationV2(drop).isRewardToken(tokens[i]), "Paid out as it is");
+        }
+    }
+
+    /// @dev WETH, USDC, then the stocks
+    function _rewardTokens() internal view returns (address[] memory tokens) {
+        StockAccountsConfig.TokenListEntry[] memory stocks = _stocks();
+        tokens = new address[](2 + stocks.length);
+        tokens[0] = addresses.getAddress("WETH");
+        tokens[1] = addresses.getAddress("USDC");
+        for (uint256 i = 0; i < stocks.length; i++) {
+            tokens[2 + i] = stocks[i].token;
+        }
+    }
+
+    /// @dev The pool-priced entries of the stock list, i.e. the B20 stocks
+    function _stocks() internal view returns (StockAccountsConfig.TokenListEntry[] memory stocks) {
+        StockAccountsConfig.TokenListEntry[] memory entries = deployConfig.loadTokenList();
+        stocks = new StockAccountsConfig.TokenListEntry[](entries.length);
+
+        uint256 count;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (keccak256(bytes(entries[i].source)) == keccak256("PoolTwap")) stocks[count++] = entries[i];
+        }
+
+        assembly ("memory-safe") {
+            mstore(stocks, count)
+        }
     }
 
     function _initializeAddresses() internal {
