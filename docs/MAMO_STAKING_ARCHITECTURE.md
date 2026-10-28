@@ -706,8 +706,10 @@ new strategy must be pointed at the new registry.
 `SlippagePriceChecker`'s sequencer-uptime check is a no-op while `sequencerUptimeFeed` is
 `address(0)`, which is deliberately the state an in-place upgrade lands in — so the implementation
 on its own leaves MOO-741 exactly as unmitigated as before. Proposal
-`013_SlippagePriceCheckerOracleHardening` batches the four steps that make the fix real, and its
-`validate()` asserts the guard ends up enabled:
+`013_SlippagePriceCheckerOracleHardening` defines the four steps that make the fix real, and its
+`validate()` asserts the guard ends up enabled. 013 is not executed on its own: it ships inside
+`017_DeployStockDrop`, whose MAMO_MULTISIG batch runs the same steps (and validation) first and skips
+the upgrade if the proxy already runs the hardened implementation:
 
 1. `upgradeToAndCall` the proxy to the new implementation.
 2. `setSequencerUptimeFeed(CHAINLINK_L2_SEQUENCER_UPTIME_FEED, 3600)` — Base's Chainlink
@@ -737,7 +739,7 @@ code delivers:
   believed. This is inherent to the pattern and matches `ChainlinkReader` elsewhere in the repo.
 - **`setSequencerUptimeFeed` does not probe the address it is given.** Any contract is accepted;
   pointing it at something that is not a Chainlink aggregator bricks every quote until the owner
-  fixes it. It is owner-only and the value is asserted by `013`'s `validate()`.
+  fixes it. It is owner-only and the value is asserted by `013`'s `validate()`, which `017` runs.
 - **Two single-hop pairs have a 24h heartbeat.** `xWELL → USDC` (WELL/USD) and `MORPHO → USDC`
   (MORPHO/USD) both configure 86400s, so once the 3600s grace expires either can serve a pre-outage
   answer up to 24h old. Multi-hop pairs are bounded by their second leg. This is a
