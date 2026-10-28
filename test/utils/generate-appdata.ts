@@ -10,7 +10,7 @@ export const metadataApi = new MetadataApi();
  * Generates appData for Mamo strategy orders.
  *
  * Mamo orders carry NO hooks, so the document depends on nothing about the order. The compound fee
- * is settled on-chain by MamoMultiMarketStrategy.sweepRewardFees before any order can be signed,
+ * is settled on-chain before any order can be signed (v1: claimRewards; multi-market: sweepRewardFees),
  * so the balance an order is allowed to sell is already net of fees. The previous version pinned a
  * `transferFrom(strategy, feeRecipient, fee)` pre-hook, which could never execute — for
  * transferFrom the spender is the caller (HooksTrampoline), and the strategy only approves the CoW

@@ -122,7 +122,7 @@ leveraged-aero-setup:
 	forge test --ffi --match-path "test/LeveragedAeroSystemSetup.integration.t.sol" -vvv
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory v1-usdc-strategy v1-cbbtc-strategy v1-weth-strategy v1-strategy-factory v1-upgrade strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory v1-usdc-strategy v1-cbbtc-strategy v1-weth-strategy v1-strategy-factory v1-upgrade strategy-v2-upgrade strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role

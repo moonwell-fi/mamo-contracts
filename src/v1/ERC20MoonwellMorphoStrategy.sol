@@ -158,7 +158,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     /**
      * @notice Initializer function that sets all the parameters and grants appropriate roles
-     * @dev This is used instead of a constructor since the contract is designed to be used with proxies
+     * @dev Proxies initialize through this; the constructor only locks the implementation
      * @dev Only the backend address specified in params can call this function
      * @param params The initialization parameters struct
      */
