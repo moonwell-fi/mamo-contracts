@@ -2,9 +2,6 @@
 pragma solidity 0.8.28;
 
 import {StockDropCutover} from "../multisig/f-mamo/006_StockDropCutover.sol";
-import {
-    SlippagePriceCheckerOracleHardening
-} from "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
 import {DeployStockDrop} from "../multisig/mamo-multisig/017_DeployStockDrop.sol";
 import {RedeployStockAccountSystem} from "../multisig/mamo-multisig/019_RedeployStockAccountSystem.sol";
 
@@ -29,8 +26,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
-/// @notice Base-fork rehearsal of the stock drop proposals in mainnet order (mamo-multisig/013, the sequencer-guarded
-///         price checker 017 requires, and 019, which redeploys the stock accounts system, then mamo-multisig/017 and f-mamo/006) through the real Safes, followed by the lifecycle on the result: a live-style staking account
+/// @notice Base-fork rehearsal of the stock drop proposals in mainnet order (mamo-multisig/019, which redeploys the stock
+///         accounts system, then mamo-multisig/017 with the price checker hardening of 013 inside it, and f-mamo/006, which
+///         also starts the streams) through the real Safes, followed by the lifecycle on the result: a live-style staking account
 ///         upgrades and migrates, a drop tops up the running streams and starts WETH and USDC ones, the account
 ///         compounds all three through the live pools,
 ///         and a new stock account pays its fee to DropAutomationV2.
@@ -53,7 +51,6 @@ contract StockDropSetupTest is Test {
     Addresses internal addresses;
     address internal user = makeAddr("stockDropUser");
 
-    SlippagePriceCheckerOracleHardening internal oracleProposal;
     RedeployStockAccountSystem internal redeployProposal;
     DeployStockDrop internal deployProposal;
     StockDropCutover internal cutoverProposal;
@@ -71,13 +68,11 @@ contract StockDropSetupTest is Test {
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", makeAddr("stockDropDeployer"), false);
 
-        oracleProposal = new SlippagePriceCheckerOracleHardening();
         redeployProposal = new RedeployStockAccountSystem();
         deployProposal = new DeployStockDrop();
         // Pinned before Slipstream V3 and mamo-multisig/021: 019 lists the stocks on the pools it executed with
         deployProposal.setTokenList(redeployProposal.TOKEN_LIST());
         cutoverProposal = new StockDropCutover();
-        oracleProposal.setAddresses(addresses);
         redeployProposal.setAddresses(addresses);
         deployProposal.setAddresses(addresses);
         cutoverProposal.setAddresses(addresses);
@@ -86,12 +81,10 @@ contract StockDropSetupTest is Test {
     function test_stockDropSetup_andLifecycle() public {
         address account = _createLiveStakingAccount();
 
-        // 013: upgrade, sequencer feed, 6 backfills, 2 WETH pairs
-        _run(oracleProposal, 10);
         // 019: 5 wiring actions, 12 listings, 2 v1 retirements
         _run(redeployProposal, 19);
-        // 017: sequencer feed, whitelist, grant, 2 revokes, fee recipient, 3 pairs
-        _run(deployProposal, 9);
+        // 017: 013's upgrade, sequencer feed, 6 backfills and 2 WETH pairs; whitelist, grant, 2 revokes, fee recipient, 3 pairs
+        _run(deployProposal, 18);
         // 006: 3 lockers, the gauge (withdraw, approve, deposit, addGauge), 2 distributors, the module, then
         // addReward and addRewardToken for WETH, USDC and each of the 12 stocks
         _run(cutoverProposal, 38);
@@ -104,7 +97,6 @@ contract StockDropSetupTest is Test {
 
     /// @dev Against the current list, 017 refuses to deploy while the registry still lists the 019 pools (021 pending)
     function test_stockDrop_cannotDeployBefore021() public {
-        _run(oracleProposal, 10);
         _run(redeployProposal, 19);
         deployProposal.setTokenList("./config/stock-accounts/8453.json");
         deployProposal.setPrimaryForkId(vm.activeFork());
@@ -131,26 +123,10 @@ contract StockDropSetupTest is Test {
         (bool killed,) = voter.call(abi.encodeWithSignature("killGauge(address)", gauge));
         assertTrue(killed && !IAerodromeVoter(voter).isAlive(gauge), "gauge killed");
 
-        _run(oracleProposal, 10);
         _run(redeployProposal, 19);
-        _run(deployProposal, 9);
+        _run(deployProposal, 18);
         // 006: 3 lockers, the gauge withdrawal, 2 distributors, the module, 28 reward-token actions
         _run(cutoverProposal, 35);
-    }
-
-    /// @dev 017 before 013: FPS runs build() live as the multisig, so action 1 reverts there and no batch is produced
-    function test_stockDrop_cannotBuildBefore013() public {
-        address checker = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        (bool guarded,) = checker.staticcall(abi.encodeWithSignature("sequencerUptimeFeed()"));
-        assertFalse(guarded, "pinned checker should predate 013");
-
-        _run(redeployProposal, 19);
-        deployProposal.setPrimaryForkId(vm.activeFork());
-        deployProposal.deploy();
-
-        // Empty returndata: the pre-013 implementation has no setSequencerUptimeFeed selector
-        vm.expectRevert(bytes(""));
-        deployProposal.build();
     }
 
     // ─── stages ──────────────────────────────────────────────────────────────────────────────────

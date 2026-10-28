@@ -11,7 +11,6 @@ import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
-import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
@@ -21,21 +20,26 @@ import {IERC5313} from "@openzeppelin/contracts/interfaces/IERC5313.sol";
 
 import {StockAccountsConfig} from "@script/StockAccountsConfig.sol";
 
+import {SlippagePriceCheckerHardening} from "./013_SlippagePriceCheckerOracleHardening.sol";
+
 /**
  * @title DeployStockDrop
  * @notice First of the stock drop proposals, the MAMO_MULTISIG batch:
+ *           - ships the price checker hardening of proposal 013 itself: deploys the new SlippagePriceChecker
+ *             implementation, then upgrades the proxy, enables the sequencer guard, backfills the pair counts and
+ *             corrects the WETH pairs' heartbeat before anything below prices through it;
  *           - deploys {DropAutomationV2}, {MamoStakingRegistryV2} (the cbBTC, WETH and USDC pools and
  *             the stock routes to MAMO), the {MamoStakingStrategyV2} implementation and a staking factory for it;
  *           - as the multisig: whitelists the staking implementation under the existing staking type id so
  *             live accounts can upgrade, moves BACKEND_ROLE from the old staking factory to the new one and revokes
  *             the deprecated factory's, points the V2 stock registry's fee recipient at DropAutomationV2, and
  *             configures the USDC, cbBTC and WETH -> MAMO pairs on the Chainlink checker.
- * @dev Runs after mamo-multisig/013, whose sequencer guard the batch requires (its first action reverts on the old
- *      checker), and mamo-multisig/019, which redeploys the stock accounts system this reads. F-MAMO owns MultiRewards,
- *      DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO proposal (f-mamo/006), and the
- *      in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
+ * @dev 013 is not executed on its own; if it ever were, this batch skips the upgrade and the rest of its steps
+ *      re-apply harmlessly. Runs after mamo-multisig/019, which redeploys the stock accounts system this reads.
+ *      F-MAMO owns MultiRewards, DropAutomation v1 and the fee lockers, so the drop cutover is a separate F-MAMO
+ *      proposal (f-mamo/006), and the in-kind rewards a later one (f-mamo/007) once staking accounts have upgraded.
  */
-contract DeployStockDrop is MultisigProposal {
+contract DeployStockDrop is SlippagePriceCheckerHardening {
     string internal constant DROP_KEY = "DROP_AUTOMATION_V2";
     string internal constant STAKING_REGISTRY_KEY = "MAMO_STAKING_REGISTRY_V2";
     string internal constant STAKING_IMPL_KEY = "MAMO_STAKING_STRATEGY_V2";
@@ -47,8 +51,9 @@ contract DeployStockDrop is MultisigProposal {
 
     uint256 internal constant DEFAULT_SLIPPAGE_IN_BPS = 100;
 
-    /// @notice Same as proposal 013
-    uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
+    /// @dev bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)
+    bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
+        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
     /// @dev Above the nominal 86,400: the USDC/USD node fires late most cycles (see 016)
     uint256 internal constant USDC_USD_HEARTBEAT = 90_000;
@@ -92,15 +97,26 @@ contract DeployStockDrop is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), require the sequencer-guarded price checker (proposal 013), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory from the old and deprecated ones, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
+        return "Deploy the stock drop contracts (DropAutomationV2, staking registry V2 with the reward pools and stock routes, staking strategy V2 and its factory), upgrade the Chainlink price checker with the sequencer guard, pair-count backfill and corrected WETH pair heartbeats (proposal 013, shipped in this batch), whitelist the staking implementation under type id 3, move BACKEND_ROLE to the new staking factory from the old and deprecated ones, point the V2 stock registry's fee recipient at DropAutomationV2, and configure the USDC, cbBTC and WETH to MAMO pairs on the Chainlink checker";
     }
 
     // ─── deploy ──────────────────────────────────────────────────────────────────────────────────
 
     function deploy() public override {
+        _deployCheckerImplementation();
         _deployDropAutomation();
         _deployStakingRegistry();
         _deployStakingStrategy();
+    }
+
+    function _deployCheckerImplementation() internal {
+        if (_checkerHardened()) return;
+
+        vm.startBroadcast(addresses.getAddress("DEPLOYER_EOA"));
+        SlippagePriceChecker implementation = new SlippagePriceChecker();
+        vm.stopBroadcast();
+
+        addresses.changeAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION", address(implementation), true);
     }
 
     function _deployDropAutomation() internal {
@@ -205,11 +221,19 @@ contract DeployStockDrop is MultisigProposal {
             multisig,
             "Price checker owner should be MAMO_MULTISIG"
         );
-        assertEq(
-            SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY")).sequencerUptimeFeed(),
-            addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
-            "013 should have enabled the sequencer guard"
-        );
+        // The pre-013 checker this batch upgrades, or 013's already live with its guard on
+        if (_checkerHardened()) {
+            assertEq(
+                SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY")).sequencerUptimeFeed(),
+                addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
+                "A hardened checker should already have its sequencer guard on"
+            );
+        } else {
+            assertTrue(
+                _checkerImplementation() != addresses.getAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION"),
+                "deploy() should have staged the hardened checker implementation"
+            );
+        }
 
         // Live accounts upgrade from the implementation type id 3 points at today
         assertEq(
@@ -252,9 +276,8 @@ contract DeployStockDrop is MultisigProposal {
         MamoStrategyRegistry mamoRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         bytes32 backendRole = mamoRegistry.BACKEND_ROLE();
 
-        // 1. Reverts unless 013's checker is live, so the pairs below are never priced without the sequencer guard
-        SlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"))
-            .setSequencerUptimeFeed(addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), SEQUENCER_GRACE_PERIOD);
+        // 1. Proposal 013: upgrade, sequencer guard, pair-count backfill, WETH pair heartbeats
+        _buildOracleHardening();
 
         // 2. The upgrade target for live staking accounts, under the existing type id
         mamoRegistry.whitelistImplementation(addresses.getAddress(STAKING_IMPL_KEY), STAKING_TYPE_ID);
@@ -309,6 +332,7 @@ contract DeployStockDrop is MultisigProposal {
     // ─── post-conditions ─────────────────────────────────────────────────────────────────────────
 
     function validate() public view override {
+        _validateOracleHardening();
         _validateRegistryWiring();
         _validateDropAutomation();
         _validateStakingRegistry();
@@ -435,11 +459,11 @@ contract DeployStockDrop is MultisigProposal {
         ISlippagePriceChecker checker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
         address mamo = addresses.getAddress("MAMO");
 
-        SlippagePriceChecker guarded = SlippagePriceChecker(address(checker));
         assertEq(
-            guarded.sequencerUptimeFeed(), addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"), "Sequencer feed"
+            _checkerImplementation(),
+            addresses.getAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION"),
+            "Checker should run the recorded implementation"
         );
-        assertEq(guarded.sequencerGracePeriod(), SEQUENCER_GRACE_PERIOD, "Sequencer grace period");
 
         assertGt(checker.getExpectedOut(1e6, addresses.getAddress("USDC"), mamo), 0, "USDC should price in MAMO");
         assertGt(checker.getExpectedOut(1e8, addresses.getAddress("cbBTC"), mamo), 0, "cbBTC should price in MAMO");
@@ -447,6 +471,12 @@ contract DeployStockDrop is MultisigProposal {
     }
 
     // ─── helpers ─────────────────────────────────────────────────────────────────────────────────
+
+    function _checkerImplementation() internal view returns (address) {
+        return address(
+            uint160(uint256(vm.load(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"), ERC1967_IMPLEMENTATION_SLOT)))
+        );
+    }
 
     /// @dev The pool-priced entries of the stock list, i.e. the B20 stocks. Each must already be listed on its
     ///      configured pool, so the deploy refuses to bake routes on pools mamo-multisig/021 is about to retire
