@@ -5,6 +5,7 @@ import {DeployLPAutoBalancerV2} from "../script/DeployLPAutoBalancerV2.s.sol";
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 /// @notice Deploy-script smoke test for LPAutoBalancerV2. Verifies the deploy wires the
 ///         F-MAMO Safe as admin, the Aerodrome NFPM + AERO immutables, and that the
@@ -26,10 +27,7 @@ contract DeployLPAutoBalancerV2Test is Test {
         vm.txGasPrice(0);
         vm.fee(0);
 
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        addresses = PinnedAddresses.load("./addresses");
         vm.makePersistent(address(addresses));
 
         deployScript = new DeployLPAutoBalancerV2();

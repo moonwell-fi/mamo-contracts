@@ -1,57 +1,69 @@
 ## SlippagePriceChecker
 
-This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISlippagePriceChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders. The contract is upgradeable using the UUPS (Universal Upgradeable Proxy Standard) pattern.
+This contract validates swap prices against Chainlink price feeds and applies a slippage tolerance. It implements the ISlippagePriceChecker interface and is used by MamoMultiMarketStrategy, among others, to validate the CoW Swap orders that sell its rewards. It is upgradeable through UUPS.
 
 ### Storage
 
 - `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
-- `mapping(address token => TokenFeedConfiguration[]) public tokenOracleData`: Maps token addresses to their oracle configurations
+- `uint256 internal constant INTERNAL_DECIMALS`: Quotes are carried at 36 decimals and converted to the output token's units once, at the end
+- `mapping(address fromToken => mapping(address toToken => TokenFeedConfiguration[])) public tokenPairOracleData`: The oracle path for each fromToken -> toToken pair
+- `mapping(address token => uint256) public maxTimePriceValid`: The longest lifetime, in seconds, of an order selling `token`; also the legacy reward-token flag
+- `mapping(address fromToken => uint256) public configuredPairCount` and `mapping(address fromToken => mapping(address toToken => bool)) public pairCounted`: How many pairs are configured for a sell token, and which ones are counted; `isRewardToken` reads the count
+- `address public sequencerUptimeFeed` and `uint256 public sequencerGracePeriod`: The L2 sequencer guard
+- `mapping(address chainlinkFeed => FeedBounds) public feedBounds`: Optional per-feed `minAnswer`/`maxAnswer`; a zero `maxAnswer` means no bounds
+- `mapping(address token => TokenFeedConfiguration[]) public tokenOracleData`: Deprecated single-token storage, kept for the storage layout
 
 ### TokenFeedConfiguration
 
 - `address chainlinkFeed`: The address of the Chainlink price feed
 - `bool reverse`: Whether to reverse the price calculation (divide instead of multiply)
+- `uint256 heartbeat`: The longest time, in seconds, since the feed's last update before its answer is refused
 
 ### Functions
 
 - `function initialize(address _owner) external initializer`: Initializes the contract with the given owner
-- `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Function that authorizes an upgrade to a new implementation, only callable by the owner
-- `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks if a swap meets the price requirements with the provided slippage
-- `function addTokenConfiguration(address token, TokenFeedConfiguration[] calldata configurations, uint256 maxTimePriceValid) external`: Adds a configuration for a token with price checker data and sets the maximum time a price is considered valid. Only callable by the owner.
-- `function removeTokenConfiguration(address token) external`: Removes all configurations for a token. Only callable by the owner.
-- `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap
-- `function maxTimePriceValid(address token) external view returns (uint256)`: Gets the maximum time a price is considered valid for a token.
+- `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Authorizes an upgrade, only callable by the owner
+- `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks that a swap of a configured pair meets the price with the provided slippage
+- `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output of a configured pair. Reverts while the sequencer is down or inside its grace period, on a stale feed, and on an answer outside the feed's bounds
+- `function addTokenConfiguration(address fromToken, address toToken, TokenFeedConfiguration[] calldata configurations) external`: Sets the oracle path for a pair and counts the pair the first time. It does not set `maxTimePriceValid`. Only callable by the owner.
+- `function removeTokenConfiguration(address fromToken, address toToken) external`: Removes the oracle path for a pair. When the sell token's last counted pair goes, it also clears `maxTimePriceValid[fromToken]`. Only callable by the owner.
+- `function setMaxTimePriceValid(address fromToken, uint256 _maxTimePriceValid) external`: Sets the order lifetime for a sell token; zero clears it. Only callable by the owner.
+- `function clearRewardToken(address fromToken) external`: Clears a residual `maxTimePriceValid` flag once the token has no counted pair. Only callable by the owner.
+- `function backfillPairCount(address fromToken, address[] calldata toTokens) external`: Counts pairs configured before `configuredPairCount` existed. Only callable by the owner.
+- `function setSequencerUptimeFeed(address _sequencerUptimeFeed, uint256 _gracePeriod) external`: Sets the sequencer guard; `address(0)` disables it. Only callable by the owner.
+- `function setFeedBounds(address chainlinkFeed, uint256 minAnswer, uint256 maxAnswer) external`: Sets the accepted answer range for a feed; a zero `maxAnswer` clears it. Only callable by the owner.
+- `function isRewardToken(address token) external view returns (bool)`: True when the token has a counted pair or a non-zero `maxTimePriceValid`
+- `function isTokenPairConfigured(address fromToken, address toToken) external view returns (bool)`: True when the pair has an oracle path
+- `function tokenPairOracleInformation(address fromToken, address toToken) external view returns (TokenFeedConfiguration[] memory)`: The oracle path for a pair
 
-## ERC20MoonwellMorphoStrategy
+A token configured only through `addTokenConfiguration` is reported by `isRewardToken` as a reward token, but no CoW order selling it passes `GPv2OrderChecks.validate()` until `setMaxTimePriceValid` sets a lifetime of at least 5 minutes: an order must expire between 5 minutes and `maxTimePriceValid` seconds from now.
 
-A generic implementation of a Strategy Contract for ERC20 tokens that splits deposits between Moonwell core market and Morpho Vaults. This contract is designed to be used as an implementation for proxies.
+## MamoMultiMarketStrategy
+
+A strategy contract for ERC20 tokens that splits deposits across the Moonwell markets and ERC4626 vaults listed for its token in the MarketRegistry. It is used as an implementation behind proxies, and it sells reward tokens for its token through CoW Swap orders that this price checker validates.
 
 ### Storage
 
-
 - `bytes32 public constant DOMAIN_SEPARATOR`: The settlement contract's EIP-712 domain separator for Cow Swap
 - `uint256 public constant SPLIT_TOTAL`: The total basis points for split calculations (10,000)
+- `address public constant VAULT_RELAYER`: The Cow Protocol Vault Relayer, approved for the fee-settled reward balance only
 - `IMamoStrategyRegistry public mamoStrategyRegistry`: Reference to the Mamo Strategy Registry contract
-- `IMToken public mToken`: The Moonwell mToken contract
-- `IERC4626 public metaMorphoVault`: The MetaMorpho Vault contract
 - `IERC20 public token`: The ERC20 token
-- `ISlippagePriceChecker public SlippagePriceChecker`: Reference to the swap checker contract used to validate swap prices
-- `address public vaultRelayer`: The address of the Cow Protocol Vault Relayer contract that needs token approval for executing trades
-- `uint256 public splitMToken`: Percentage of funds allocated to Moonwell mToken in basis points
-- `uint256 public splitVault`: Percentage of funds allocated to MetaMorpho Vault in basis points
+- `ISlippagePriceChecker public slippagePriceChecker`: The price checker used to validate swap prices
+- `IMarketRegistry public marketRegistry`: The registry listing the markets for `token`
+- `mapping(address => uint256) public marketSplitBps`: Each market's share of deposits in basis points
 - `uint256 public allowedSlippageInBps`: The allowed slippage in basis points (e.g., 100 = 1%) used for swap price validation
+- `uint256 public compoundFee` and `address public feeRecipient`: The fee charged on reward tokens and its recipient
+- `mapping(address => uint256) public rewardFeeCharged`: How much of a reward token's balance has already been charged the fee
+- `IMToken public mToken`, `IERC4626 public metaMorphoVault`, `uint256 public splitMToken`, `uint256 public splitVault`: Deprecated v1 slots, kept for migration
 
 ### Functions
 
-- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes mamoStrategyRegistry, mamoBackend, mToken, metaMorphoVault, token, SlippagePriceChecker, vaultRelayer, splitMToken, and splitVault.
+- `struct InitParams`: A struct containing all initialization parameters to avoid stack too deep errors. Includes mamoStrategyRegistry, token, slippagePriceChecker, feeRecipient, strategyTypeId, rewardTokens, owner, hookGasLimit, allowedSlippageInBps, compoundFee, marketRegistry and defaultSplitBps.
 
-- `modifier onlyStrategyRegistry()`: Modifier to ensure the caller is the Mamo Strategy Registry contract.
+- `modifier onlyOwner()`: Modifier to ensure the caller is the user who owns this strategy.
 
-- `modifier onlyStrategyOwner()`: Modifier to ensure the caller is the user who owns this strategy, as verified by the Mamo Strategy Registry.
-
-- `modifier onlyBackend()`: Modifier to ensure the caller is the backend address from the Mamo Strategy Registry.
-
-- `modifier onlyBackendOrStrategyOwner()`: Modifier to ensure the caller is either the backend address from the Mamo Strategy Registry or the user who owns this strategy.
+- `modifier onlyBackend()`: Modifier to ensure the caller holds BACKEND_ROLE on the Mamo Strategy Registry.
 
 # Mamo Contracts Specification
 
@@ -110,24 +122,4 @@ This approach simplifies the ID system while still allowing for type-safe upgrad
 
 ## SlippagePriceChecker
 
-This contract is responsible for validating swap prices using Chainlink price feeds and applying slippage tolerance. It implements the ISlippagePriceChecker interface and is used by the ERC20MoonwellMorphoStrategy contract to validate swap prices for CowSwap orders. The contract is upgradeable using the UUPS (Universal Upgradeable Proxy Standard) pattern.
-
-### Storage
-
-- `uint256 internal constant MAX_BPS`: The maximum basis points value (10,000 = 100%)
-- `mapping(address token => TokenFeedConfiguration[]) public tokenOracleData`: Maps token addresses to their oracle configurations
-
-### TokenFeedConfiguration
-
-- `address chainlinkFeed`: The address of the Chainlink price feed
-- `bool reverse`: Whether to reverse the price calculation (divide instead of multiply)
-
-### Functions
-
-- `function initialize(address _owner) external initializer`: Initializes the contract with the given owner
-- `function _authorizeUpgrade(address newImplementation) internal override onlyOwner`: Function that authorizes an upgrade to a new implementation, only callable by the owner
-- `function checkPrice(uint256 _amountIn, address _fromToken, address _toToken, uint256 _minOut, uint256 _slippageInBps) external view returns (bool)`: Checks if a swap meets the price requirements with the provided slippage
-- `function addTokenConfiguration(address token, TokenFeedConfiguration[] calldata configurations, uint256 maxTimePriceValid) external`: Adds a configuration for a token with price checker data and sets the maximum time a price is considered valid. Only callable by the owner.
-- `function removeTokenConfiguration(address token) external`: Removes all configurations for a token. Only callable by the owner.
-- `function getExpectedOut(uint256 _amountIn, address _fromToken, address _toToken) public view returns (uint256)`: Gets the expected output amount for a swap
-- `function maxTimePriceValid(address token) external view returns (uint256)`: Gets the maximum time a price is considered valid for a token.
+See the SlippagePriceChecker section at the top of this document.

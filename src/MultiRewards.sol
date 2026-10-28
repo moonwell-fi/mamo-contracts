@@ -487,11 +487,11 @@ contract MultiRewards is ReentrancyGuard, Pausable {
 
         uint256 precision = _calculateDecimalPrecision(_rewardsToken);
 
-        return rewardData[_rewardsToken].rewardPerTokenStored.add(
-            lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime).mul(
-                rewardData[_rewardsToken].rewardRate
-            ).mul(precision).div(_totalSupply)
-        );
+        return rewardData[_rewardsToken].rewardPerTokenStored
+            .add(
+                lastTimeRewardApplicable(_rewardsToken).sub(rewardData[_rewardsToken].lastUpdateTime)
+                    .mul(rewardData[_rewardsToken].rewardRate).mul(precision).div(_totalSupply)
+            );
     }
 
     function earned(address account, address _rewardsToken) public view returns (uint256) {

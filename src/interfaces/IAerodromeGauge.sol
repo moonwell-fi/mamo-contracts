@@ -15,4 +15,6 @@ interface IAerodromeGauge {
     function rewardToken() external view returns (address);
 
     function stakingToken() external view returns (address);
+
+    function voter() external view returns (address);
 }

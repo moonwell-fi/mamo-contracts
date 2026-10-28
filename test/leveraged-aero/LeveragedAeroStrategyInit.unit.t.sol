@@ -169,10 +169,7 @@ contract LeveragedAeroStrategyInitUnitTest is Test {
     }
 
     /// @dev The UNBOUND init path: `cloneAndBind` is set-once, so the vault-only `initialize` is pranked.
-    function _init(LeveragedAerodromeCLStrategy.InitParams memory p)
-        internal
-        returns (LeveragedAerodromeCLStrategy s)
-    {
+    function _init(LeveragedAerodromeCLStrategy.InitParams memory p) internal returns (LeveragedAerodromeCLStrategy s) {
         s = _clone();
         vm.prank(address(vault));
         s.initialize(address(vault), proposer, abi.encode(p));

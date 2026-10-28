@@ -358,6 +358,7 @@ contract ForceEther {
 }
 
 contract MockCLPoolV2 is ICLPool {
+    address public factory;
     uint160 public sqrtPX96;
     int24 public currentTick;
     int56 public tickCumulative0;
@@ -378,6 +379,8 @@ contract MockCLPoolV2 is ICLPool {
         tickCumulative0 = cum0;
         tickCumulative1 = cum1;
     }
+
+    function increaseObservationCardinalityNext(uint16) external {}
 
     function setTokens(address t0, address t1) external {
         _token0 = t0;
