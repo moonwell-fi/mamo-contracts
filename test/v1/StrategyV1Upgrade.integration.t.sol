@@ -392,17 +392,11 @@ contract StrategyV1UpgradeTest is BaseTest {
         assertGt(shares - redeemable, 0);
     }
 
-    function test_setSplit_pointsAFundedLegacyProxyAtTheVaultWithoutMovingFunds() public {
+    function test_initializeVaultSplit_pointsAFundedLegacyProxyAtTheVault() public {
         ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
         uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
-        vm.prank(FUNDED_OWNER);
-        vm.expectRevert("Not backend");
-        s.setSplit(0, 10_000);
-        vm.prank(backend);
-        vm.expectRevert("Split parameters must add up to SPLIT_TOTAL");
-        s.setSplit(1, 10_000);
-        vm.prank(backend);
-        s.setSplit(0, 10_000);
+        vm.prank(FUNDED_OWNER); // the app sends this right after the upgrade
+        s.initializeVaultSplit();
         assertEq(s.splitMToken(), 0);
         assertEq(s.splitVault(), 10_000);
         assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "nothing moved");
@@ -423,8 +417,33 @@ contract StrategyV1UpgradeTest is BaseTest {
         vm.stopPrank();
     }
 
+    function test_initializeVaultSplit_ownerOnly_runsOnce_usdcOnly() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        address stranger = makeAddr("stranger");
+        address[2] memory notOwners = [stranger, backend];
+        for (uint256 i; i < 2; i++) {
+            vm.prank(notOwners[i]);
+            vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", notOwners[i]));
+            s.initializeVaultSplit();
+        }
+        vm.prank(EMPTY_OWNER);
+        s.initializeVaultSplit();
+        assertEq(s.splitVault(), 10_000);
+        vm.prank(EMPTY_OWNER);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        s.initializeVaultSplit();
+
+        StrategyFactory f = StrategyFactory(upgrade.addresses().getAddress("cbBTC_STRATEGY_FACTORY"));
+        address user = makeAddr("cbBTC");
+        vm.startPrank(user);
+        ERC20MoonwellMorphoStrategy c = ERC20MoonwellMorphoStrategy(payable(f.createStrategyForUser(user)));
+        vm.expectRevert("Not a USDC account");
+        c.initializeVaultSplit();
+        vm.stopPrank();
+    }
+
     function test_unupgradedLegacyProxy_depositStillGoesToMoonwell() public {
-        // Why the app gates deposits until upgrade + setSplit
+        // Why the app gates deposits until upgrade + initializeVaultSplit
         ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(FUNDED_PROXY));
         uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
         _deposit(s, FUNDED_OWNER, 100e6);
@@ -472,7 +491,7 @@ contract StrategyV1UpgradeTest is BaseTest {
         }
     }
 
-    function test_fundedLegacyProxy_withdrawUpToMoonwellCash_beforeSetSplit() public {
+    function test_fundedLegacyProxy_withdrawUpToMoonwellCash_beforeVaultSplit() public {
         // The deployed withdraw path is intact for accounts still on 10000/0
         ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
         assertEq(s.splitMToken(), 10_000);
@@ -486,10 +505,10 @@ contract StrategyV1UpgradeTest is BaseTest {
         assertEq(usdc.balanceOf(FUNDED_OWNER) - ownerBefore, 10_000);
     }
 
-    function test_fundedLegacyProxy_setSplit_thenCashReturns_compounderMigratesAndOwnerExits() public {
+    function test_fundedLegacyProxy_vaultSplit_thenCashReturns_compounderMigratesAndOwnerExits() public {
         ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
-        vm.prank(backend);
-        s.setSplit(0, 10_000);
+        vm.prank(FUNDED_OWNER);
+        s.initializeVaultSplit();
         _deposit(s, FUNDED_OWNER, 100e6);
         uint256 total = mToken.balanceOfUnderlying(FUNDED_PROXY) + IERC4626(address(vault)).maxWithdraw(FUNDED_PROXY);
         deal(address(usdc), address(mToken), 1e6); // Moonwell can now pay the whole share
