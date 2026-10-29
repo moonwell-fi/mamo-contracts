@@ -473,14 +473,30 @@ contract StrategyV1UpgradeTest is BaseTest {
         // The deployed withdraw path is intact for accounts still on 10000/0
         ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
         assertEq(s.splitMToken(), 10_000);
-        deal(address(usdc), address(mToken), 10_000);
+        deal(address(usdc), address(mToken), 10_000); // sets the balance: equals adding only because setUp pins cash at 0
         uint256 ownerBefore = usdc.balanceOf(FUNDED_OWNER);
         vm.startPrank(FUNDED_OWNER);
-        s.withdraw(10_000);
         vm.expectRevert("Moonwell cannot pay the remainder now"); // no vault balance to shift the excess to
         s.withdraw(10_001);
+        s.withdraw(10_000);
         vm.stopPrank();
         assertEq(usdc.balanceOf(FUNDED_OWNER) - ownerBefore, 10_000);
+    }
+
+    function test_fundedLegacyProxy_setSplit_thenCashReturns_compounderMigratesAndOwnerExits() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        vm.prank(backend);
+        s.setSplit(0, 10_000);
+        _deposit(s, FUNDED_OWNER, 100e6);
+        uint256 total = mToken.balanceOfUnderlying(FUNDED_PROXY) + IERC4626(address(vault)).maxWithdraw(FUNDED_PROXY);
+        deal(address(usdc), address(mToken), 1e6); // Moonwell can now pay the whole share
+        vm.prank(backend);
+        s.updatePosition(0, 10_000);
+        assertEq(mToken.balanceOf(FUNDED_PROXY), 0, "Moonwell share moved to the vault");
+        uint256 ownerBefore = usdc.balanceOf(FUNDED_OWNER);
+        vm.prank(FUNDED_OWNER);
+        s.withdrawAll();
+        assertApproxEqAbs(usdc.balanceOf(FUNDED_OWNER) - ownerBefore, total, 3);
     }
 
     function test_implementation_refusesInitialize() public {
