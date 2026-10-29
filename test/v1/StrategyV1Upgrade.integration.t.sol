@@ -204,10 +204,19 @@ contract StrategyV1UpgradeTest is BaseTest {
         vm.expectRevert();
         s.withdraw(maxOut + 1);
         s.withdraw(maxOut);
-        // #126 lifts both: withdraw past the vault balance and withdrawAll at zero Moonwell cash
+        // #126 lifts these: withdraw past the vault balance and withdrawAll before Moonwell can pay the share
         vm.expectRevert("Failed to redeem mToken");
         s.withdrawAll();
+        // Some Moonwell cash back, below the share: still out of reach while the split points at the vault
+        deal(address(usdc), address(mToken), 10_000);
+        vm.expectRevert();
+        s.withdraw(1);
         vm.stopPrank();
+        // The owner cannot change the split, the backend can: pointed back at Moonwell, its cash is reachable
+        vm.prank(backend);
+        s.setSplit(10_000, 0);
+        vm.prank(FUNDED_OWNER);
+        s.withdraw(10_000);
     }
 
     function test_unupgradedLegacyProxy_depositStillGoesToMoonwell() public {
