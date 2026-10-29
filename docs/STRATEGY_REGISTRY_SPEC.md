@@ -121,7 +121,7 @@ sites, all of them deployed fresh by this change:
 - `MamoMultiMarketStrategy.onlyBackend` (`updatePosition`, `claimRewards`, `setFeeRecipient`)
 - `MamoMultiMarketStrategy.migrateV1ToMarketRegistry`
 - `MamoLeveragedAeroStrategy.depositIdle`
-- `ERC20MoonwellMorphoStrategy.onlyBackend` (`src/v1`, proposal 020: `updatePosition`, `setSplit`, `claimRewards`, `setFeeRecipient`)
+- `ERC20MoonwellMorphoStrategy.onlyBackend` (`src/v1`, proposal 020: `updatePosition`, `claimRewards`, `setFeeRecipient`)
 
 **Scope, precisely.** The fix lives in the implementation, not in the deployed proxies. Verified
 against live type-1 strategy `0xc2f496d5…2938`: `updatePosition` succeeds only from

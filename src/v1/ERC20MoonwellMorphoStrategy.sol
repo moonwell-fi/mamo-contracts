@@ -59,6 +59,9 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     /// @notice The address of the WETH token
     address public constant WETH = 0x4200000000000000000000000000000000000006;
 
+    /// @notice The address of the USDC token
+    address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+
     /// @notice The CoW order appData this strategy signs for (no hooks)
     string internal constant EXPECTED_APP_DATA = '{"appCode":"Mamo","metadata":{},"version":"1.3.0"}';
 
@@ -333,16 +336,16 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
     }
 
     /**
-     * @notice Sets the split without moving funds; deposits follow it from now on
-     * @dev Only callable by any BACKEND_ROLE member
+     * @notice One-time switch of an upgraded USDC account to the vault, without moving funds
+     * @dev Owner only, once; the app sends it right after the upgrade, and updatePosition moves the money later
      */
-    function setSplit(uint256 splitMoonwell, uint256 splitMorpho) external onlyBackend {
-        require(splitMoonwell + splitMorpho == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
+    function initializeVaultSplit() external onlyOwner reinitializer(2) {
+        require(address(token) == USDC, "Not a USDC account");
 
-        splitMToken = splitMoonwell;
-        splitVault = splitMorpho;
+        splitMToken = 0;
+        splitVault = SPLIT_TOTAL;
 
-        emit PositionUpdated(splitMoonwell, splitMorpho);
+        emit PositionUpdated(0, SPLIT_TOTAL);
     }
 
     /**
