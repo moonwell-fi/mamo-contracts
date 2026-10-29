@@ -417,6 +417,9 @@ contract StrategyV1UpgradeTest is BaseTest {
         s.withdraw(maxOut);
         s.withdrawAll(); // best-effort: pays nothing more, leaves the Moonwell share in place
         assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "Moonwell share still in place");
+        // Some Moonwell cash back, below the share: part 2 reaches it without a re-split
+        deal(address(usdc), address(mToken), 10_000);
+        s.withdraw(10_000);
         vm.stopPrank();
     }
 
