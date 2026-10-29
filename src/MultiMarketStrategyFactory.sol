@@ -132,8 +132,9 @@ contract MultiMarketStrategyFactory {
         ERC1967Proxy proxy = new ERC1967Proxy(implementation, "");
         strategy = address(proxy);
 
-        MamoMultiMarketStrategy(payable(strategy)).initialize(
-            MamoMultiMarketStrategy.InitParams({
+        MamoMultiMarketStrategy(payable(strategy))
+            .initialize(
+                MamoMultiMarketStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 token: token,
                 slippagePriceChecker: slippagePriceChecker,
@@ -147,7 +148,7 @@ contract MultiMarketStrategyFactory {
                 marketRegistry: marketRegistry,
                 defaultSplitBps: _splitsForCurrentMarkets()
             })
-        );
+            );
 
         // The implementation is whatever the registry publishes for this type id, and type ids are
         // assigned by hand (see docs/STRATEGY_REGISTRY_SPEC.md on the collision risk). Assert the

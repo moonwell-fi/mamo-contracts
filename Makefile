@@ -1,7 +1,7 @@
 # The excluded suites self-fork at a PINNED block in setUp: a CLI --fork-url on top of that panics
 # on the Isthmus L1Block and doubles the RPC load. Each has its own target (and CI job) below.
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "ERC20StrategyV2Test|LPAutoBalancerV2Integration|MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|StrategyFactoryIntegrationV1Test|StrategyV1UpgradeTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
@@ -20,13 +20,13 @@ deploy-broadcast:
 	export DEPLOY_ENV="8453_PROD" && forge script script/DeploySystem.s.sol:DeploySystem --fork-url base --account mamo-test --verify --slow -vvvvv --broadcast --sender   0xDca82E03057329f53Ed4173429D46B0511E46Fb8
 
 usdc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy -vvv
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategyTest -vvv
 
 cbbtc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyTest  -vvv
 
 weth-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
+	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyTest  -vvv
 
 usdc-price-checker:
 	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi --mc SlippagePriceCheckerTest -vvv
@@ -40,6 +40,23 @@ weth-price-checker:
 strategy-factory:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationTest
 
+# Legacy two-market ERC20MoonwellMorphoStrategy + StrategyFactory (live type 1/4), restored under src/v1.
+v1-usdc-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyV1Test -vvv
+
+v1-cbbtc-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyV1Test -vvv
+
+v1-weth-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyV1Test -vvv
+
+v1-strategy-factory:
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationV1Test
+
+# Upgrade of real legacy USDC proxies at a pinned zero-cash block; self-forks in setUp, so NO --fork-url.
+v1-upgrade:
+	forge test --ffi --mc StrategyV1UpgradeTest -vv
+
 # NO --fork-url here: MulticallIntegrationTest self-forks at a PINNED block via vm.createSelectFork in
 # setUp (with the vm.fee(0) op-revm Isthmus workaround). Passing --fork-url base in addition makes
 # foundry init the OP-stack L1Block handler against the CLI fork and panic before vm.fee(0) runs — the
@@ -47,6 +64,10 @@ strategy-factory:
 # block delta" flake the unpinned `latest` fork produced inside Moonwell's timestamp accrual.
 strategy-multicall:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --ffi --mc MulticallIntegrationTest
+
+# Upgrades real mainnet proxies at a PINNED block; self-forks in setUp, so NO --fork-url (Isthmus panic).
+strategy-v2-upgrade:
+	forge test --ffi --mc ERC20StrategyV2Test -vv
 
 mamo-staking:
 	forge test --fork-url base --ffi --mc MamoStaking -vvv
@@ -101,7 +122,7 @@ leveraged-aero-setup:
 	forge test --ffi --match-path "test/LeveragedAeroSystemSetup.integration.t.sol" -vvv
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory v1-usdc-strategy v1-cbbtc-strategy v1-weth-strategy v1-strategy-factory v1-upgrade strategy-v2-upgrade strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
@@ -178,4 +199,4 @@ tenderly-leveraged-aero-account:
 tenderly-leveraged-aero-withdraw:
 	./script/tenderly/run-harness.sh leveraged-aero-withdraw
 
-.PHONY: test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
+.PHONY: strategy-v2-upgrade v1-usdc-strategy v1-cbbtc-strategy v1-weth-strategy v1-strategy-factory v1-upgrade test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
