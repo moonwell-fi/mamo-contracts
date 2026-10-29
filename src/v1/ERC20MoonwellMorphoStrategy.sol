@@ -15,6 +15,7 @@ import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Ini
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 interface IMerkleDistributor {
     function claim(
@@ -121,6 +122,12 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
     // @notice Emitted when the compound fee is taken from claimed rewards
     event CompoundFeeCollected(address indexed feeRecipient, address[] rewardTokens, uint256[] feeAmounts);
+
+    // @notice Emitted when Moonwell's cash could not cover the whole mToken position
+    event MoonwellRedeemLimited(uint256 cashRedeemed, uint256 mTokenLeft, uint256 underlyingLeft);
+
+    // @notice Emitted when MetaMorpho's liquidity could not cover the whole vault position
+    event VaultRedeemLimited(uint256 sharesRedeemed, uint256 sharesLeft);
 
     // @notice Initialization parameters struct to avoid stack too deep errors
     struct InitParams {
@@ -245,18 +252,36 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         if (tokenBalance < amount) {
             uint256 amountNeeded = amount - tokenBalance;
 
-            uint256 withdrawFromMoonwell = (amountNeeded * splitMToken) / SPLIT_TOTAL;
+            // Split is the preference; a leg that cannot pay its share now shifts the excess to the other
+            uint256 fromMoonwell = (amountNeeded * splitMToken) / SPLIT_TOTAL;
+            uint256 fromVault = amountNeeded - fromMoonwell;
+            uint256 moonwellMax = Math.min(mToken.getCash(), mToken.balanceOfUnderlying(address(this)));
+            uint256 vaultMax = metaMorphoVault.maxWithdraw(address(this));
 
-            // Withdraw from Moonwell if needed
-            if (withdrawFromMoonwell > 0) {
-                require(mToken.redeemUnderlying(withdrawFromMoonwell) == 0, "Failed to redeem mToken");
+            if (fromMoonwell > moonwellMax) {
+                fromVault += fromMoonwell - moonwellMax;
+                fromMoonwell = moonwellMax;
+            }
+            if (fromVault > vaultMax) {
+                fromMoonwell += fromVault - vaultMax;
+                fromVault = vaultMax;
+            }
+            require(fromMoonwell <= moonwellMax, "Moonwell cannot pay the remainder now");
+            // A leg that burns zero mTokens reverts in Moonwell; balanceOfUnderlying just refreshed the rate
+            if (fromMoonwell != 0 && fromMoonwell * 1e18 / mToken.exchangeRateStored() == 0) {
+                fromVault += fromMoonwell;
+                fromMoonwell = 0;
+                require(fromVault <= vaultMax, "Vault cannot pay the remainder now");
             }
 
-            uint256 withdrawFromMetaMorpho = (amountNeeded * splitVault) / SPLIT_TOTAL;
+            // Withdraw from Moonwell if needed
+            if (fromMoonwell > 0) {
+                require(mToken.redeemUnderlying(fromMoonwell) == 0, "Failed to redeem mToken");
+            }
 
             // Withdraw from MetaMorpho if needed
-            if (withdrawFromMetaMorpho > 0) {
-                metaMorphoVault.withdraw(withdrawFromMetaMorpho, address(this), address(this));
+            if (fromVault > 0) {
+                metaMorphoVault.withdraw(fromVault, address(this), address(this));
             }
         }
 
@@ -274,23 +299,21 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @dev Only callable by the user who owns this strategy
      */
     function withdrawAll() external onlyOwner {
-        // Get current balances
-        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
-        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
-
         // Withdraw from Moonwell if needed
-        if (mTokenBalance > 0) {
-            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
-        }
+        _redeemMTokenUpToCash();
 
         // Withdraw from MetaMorpho if needed
-        if (vaultBalance > 0) {
-            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
-        }
+        _redeemVaultUpToLiquidity();
 
         // Get final token balance
         uint256 finalBalance = token.balanceOf(address(this));
-        require(finalBalance > 0, "No tokens to withdraw");
+        // Nothing redeemable right now is not an error when a venue still holds the position
+        require(
+            finalBalance > 0 || IERC20(address(mToken)).balanceOf(address(this)) > 0
+                || metaMorphoVault.balanceOf(address(this)) > 0,
+            "No tokens to withdraw"
+        );
+        if (finalBalance == 0) return;
 
         // Transfer all tokens to the owner
         token.safeTransfer(msg.sender, finalBalance);
@@ -310,16 +333,10 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
         require(splitMoonwell + splitMorpho == SPLIT_TOTAL, "Split parameters must add up to SPLIT_TOTAL");
 
         // Withdraw from Moonwell
-        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
-        if (mTokenBalance > 0) {
-            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
-        }
+        _redeemMTokenUpToCash();
 
         // Withdraw from MetaMorpho
-        uint256 vaultBalance = metaMorphoVault.balanceOf(address(this));
-        if (vaultBalance > 0) {
-            metaMorphoVault.redeem(vaultBalance, address(this), address(this));
-        }
+        _redeemVaultUpToLiquidity();
 
         uint256 totalTokenBalance = token.balanceOf(address(this));
 
@@ -545,6 +562,40 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
 
         // Approve the vault relayer unlimited
         IERC20(tokenAddress).forceApprove(VAULT_RELAYER, amount);
+    }
+
+    /**
+     * @notice Redeems the mToken position up to the market's available cash, skipping when there is none
+     */
+    function _redeemMTokenUpToCash() internal {
+        uint256 mTokenBalance = IERC20(address(mToken)).balanceOf(address(this));
+        if (mTokenBalance == 0) return;
+
+        uint256 cash = mToken.getCash();
+        uint256 underlying = mToken.balanceOfUnderlying(address(this));
+        if (cash >= underlying) {
+            require(mToken.redeem(mTokenBalance) == 0, "Failed to redeem mToken");
+        } else {
+            // Moonwell rejects a redeem that burns zero mTokens, which dust cash does at WETH's exchange rate
+            if (cash * 1e18 / mToken.exchangeRateStored() == 0) cash = 0;
+            if (cash > 0) require(mToken.redeemUnderlying(cash) == 0, "Failed to redeem mToken");
+            emit MoonwellRedeemLimited(cash, IERC20(address(mToken)).balanceOf(address(this)), underlying - cash);
+        }
+    }
+
+    /**
+     * @notice Redeems the vault position up to what MetaMorpho can pay now
+     */
+    function _redeemVaultUpToLiquidity() internal {
+        uint256 shares = metaMorphoVault.balanceOf(address(this));
+        if (shares == 0) return;
+
+        // maxRedeem floors a fully liquid position below its share count, so redeem it whole when the assets cover it
+        uint256 redeemable = metaMorphoVault.maxWithdraw(address(this)) >= metaMorphoVault.previewRedeem(shares)
+            ? shares
+            : Math.min(shares, metaMorphoVault.maxRedeem(address(this)));
+        if (redeemable > 0) metaMorphoVault.redeem(redeemable, address(this), address(this));
+        if (redeemable < shares) emit VaultRedeemLimited(redeemable, shares - redeemable);
     }
 
     /**
