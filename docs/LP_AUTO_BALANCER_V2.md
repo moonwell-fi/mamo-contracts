@@ -159,7 +159,7 @@ cooldownRemaining, deviationGateOpen, rebalanceInFlight, rebalanceStartedAt
 - No `AlreadyInFlight` guard on `rebalanceUsingAlt`/`stake`/`withdrawPosition`/`deregisterPosition` (role-gated; they revert deep but harmlessly; `collectFees` — the permissionless one — is guarded).
 - Module keeps a standing max AERO relayer approval (reward-only exposure; `recoverERC20` escape hatch exists on both contracts).
 - Slipstream V3 gauges: nothing reachable from `gauge.voter()` names the emission token, so the constructor `AERO` is bound off-chain. Before deploying a V3 balancer, check `Voter(0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6).TOKEN() == AERO` and `AERO.MINTER() == Voter.MINTER()`. A wrong `AERO` is recoverable (`compound` reverts `NothingToCompound`; `recoverERC20` sweeps the stray token).
-- Slipstream V3 gauges defer a withdraw's emissions when the LeafVoter mint fails (`deferredEmissions(balancer)`). `claimEmissions`/`compound` sweep them even while unstaked, but not after `exit` (`NotActive`). Before `exit`, check `deferredEmissions(balancer) == 0`; if not, wait for the mint to recover and call `claimEmissions()` first.
+- Slipstream V3 gauges defer a withdraw's emissions when the LeafVoter mint fails (`deferredEmissions(balancer)`). `claimEmissions` sweeps them while unstaked and after `exit`/`withdrawPosition`/`deregisterPosition`, but only from the CURRENT gauge: `setGauge` and `setPool` re-point it and strand anything deferred on the old one. Before either, check `deferredEmissions(balancer) == 0` on the old gauge; if not, wait for the mint to recover and call `claimEmissions()` first.
 
 ## Document map
 

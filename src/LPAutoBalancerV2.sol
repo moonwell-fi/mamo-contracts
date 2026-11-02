@@ -643,7 +643,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @notice Claim AERO emissions from the gauge and forward them to feeCollector: the staked legs,
     ///         plus (V3) emissions the gauge deferred on a failed withdraw-time mint, which stay
-    ///         claimable while unstaked. A no-op when there is nothing to claim.
+    ///         claimable while unstaked and after exit/withdraw/deregister. A no-op when there is
+    ///         nothing to claim.
     /// @dev REBALANCER_ROLE-gated, deliberately NOT permissionless. This routes 100% of the claimed
     ///      AERO to the feeCollector, while `compound()` is the ONLY path that ever sends AERO to the
     ///      compoundModule. Permissionless, a bot calling this every block keeps the gauge's pending
@@ -652,7 +653,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///      not time-critical (emissions keep accruing in the gauge), so gating it costs nothing.
     function claimEmissions() external onlyRole(REBALANCER_ROLE) whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = position;
-        if (!p.active) revert NotActive();
+        // Inactive positions have no staked legs, so this can only sweep the gauge's deferred amount.
+        if (!p.active && p.gauge == address(0)) revert NotActive();
         // Snapshot AERO balance before claiming, then forward the net gain.
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         _claimRewards(p);

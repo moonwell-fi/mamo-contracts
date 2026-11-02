@@ -78,8 +78,13 @@ section "Verify fork is Base + protocol wiring intact"
 chain_sanity
 ensure_address_book
 [ "$(ccall "$GAUGE" 'nft()(address)')" = "$NFPM" ] || die "gauge.nft() != expected NFPM"
-[ "$(ccall "$GAUGE" 'rewardToken()(address)')" = "$AERO" ] || die "gauge.rewardToken() != AERO"
-ok "gauge.nft()==NFPM and gauge.rewardToken()==AERO"
+# A V3 gauge (answers depositBlock) has no rewardToken(); its emission token is bound off-chain (docs §6).
+if ccall "$GAUGE" 'depositBlock(uint256)(uint256)' 0 >/dev/null; then
+  ok "gauge.nft()==NFPM (V3 gauge: no rewardToken())"
+else
+  [ "$(ccall "$GAUGE" 'rewardToken()(address)')" = "$AERO" ] || die "gauge.rewardToken() != AERO"
+  ok "gauge.nft()==NFPM and gauge.rewardToken()==AERO"
+fi
 
 # ── 3. sender ─────────────────────────────────────────────────────────────────
 # derive_sender reads the key from the env (not argv) via the harness sender() entrypoint — see common.sh

@@ -1915,6 +1915,24 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(mockAero.balanceOf(feeCollector) - before, 4e18, "deferred forwarded");
     }
 
+    /// @notice Deferred emissions stay claimable after the position is released (inactive).
+    function test_v3Gauge_claimEmissionsSweepsDeferredAfterWithdrawPosition() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        vm.prank(admin);
+        lab.withdrawPosition(makeAddr("to"));
+        assertFalse(lab.exposed_position().active, "inactive");
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.lastClaimIdCount(), 0, "no legs claimed");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 4e18, "deferred forwarded after release");
+    }
+
     /// @notice L-1: compound also sweeps deferred emissions while unstaked.
     function test_v3Gauge_compoundSweepsDeferredWhileUnstaked() public {
         MockCLGaugeV3 v3 = _useV3Gauge();
@@ -3252,6 +3270,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.unstake();
     }
 
+    /// @notice Never registered (no gauge): nothing to claim from, so it reverts.
     function test_claimEmissions_revertsNotActive() public {
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.NotActive.selector);

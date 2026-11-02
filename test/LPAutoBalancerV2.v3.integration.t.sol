@@ -11,6 +11,18 @@ import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {DeployLPAutoBalancerV2Pair} from "@script/DeployLPAutoBalancerV2Pair.s.sol";
+import {LPPairConfig} from "@script/LPPairConfig.sol";
+
+contract DeployPairHarness is DeployLPAutoBalancerV2Pair {
+    function venue(LPPairConfig.Pair memory pair, address nfpmV1, address aeroV1)
+        external
+        view
+        returns (address, address)
+    {
+        return _venue(pair, nfpmV1, aeroV1);
+    }
+}
 
 // LPAutoBalancerV2V3Integration — Base-fork test against Slipstream V3 (WETH/cbBTC CL1). V3 has a new
 // position manager, emissions minted in a NEW AERO by the LeafVoter, no rewardToken()/getReward/
@@ -26,6 +38,9 @@ contract LPAutoBalancerV2V3Integration is Test {
     address constant V1_GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817; // CL10 V1 gauge (classifier control)
     address constant V3_CL10_GAUGE = 0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5; // V3 gauge of the WETH/cbBTC CL10 V3 pool
     address constant LEAF_VOTER = 0x382409fad8503FbCdbB27A4211551fa03e884078; // gauge.voter(); mints V3 emissions
+    address constant VOTER_V3 = 0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6; // root Voter, TOKEN() == AERO_V3
+    address constant V1_NFPM = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53; // V1 gauge.nft()
+    address constant V1_AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631; // V1 gauge.rewardToken()
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
@@ -179,6 +194,42 @@ contract LPAutoBalancerV2V3Integration is Test {
         lab.claimEmissions();
         assertEq(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "deferred swept");
         assertGe(IERC20(AERO_V3).balanceOf(feeCollector) - before, deferred, "deferred forwarded");
+    }
+
+    /// @notice `exit` deactivates the balancer; emissions deferred by its withdraw stay claimable.
+    function test_v3_deferredEmissionsClaimableAfterExit() public {
+        _bootstrap();
+        _accrue();
+        vm.mockCallRevert(LEAF_VOTER, abi.encodeWithSignature("mintEmissions(address[],uint128[])"), "MINT_DOWN");
+        vm.prank(admin);
+        lab.exit(makeAddr("exitTo"));
+        vm.clearMockedCalls();
+        uint256 deferred = ICLGaugeV3(GAUGE).deferredEmissions(address(lab));
+        assertGt(deferred, 0, "exit's withdraw deferred");
+        uint256 before = IERC20(AERO_V3).balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "deferred swept");
+        assertGe(IERC20(AERO_V3).balanceOf(feeCollector) - before, deferred, "deferred forwarded");
+    }
+
+    /// @notice The pair deploy resolves NFPM/AERO per gauge version and checks the V3 emission token.
+    function test_v3_deployVenueResolvesPerGaugeVersion() public {
+        DeployPairHarness h = new DeployPairHarness();
+        LPPairConfig.Pair memory pair;
+        pair.gauge = GAUGE;
+        (address nfpm, address aero) = h.venue(pair, V1_NFPM, V1_AERO);
+        assertEq(nfpm, NFPM, "V3 gauge -> V3 NFPM");
+        assertEq(aero, AERO_V3, "V3 gauge -> V3 AERO");
+        pair.gauge = V1_GAUGE;
+        (nfpm, aero) = h.venue(pair, V1_NFPM, V1_AERO);
+        assertEq(nfpm, V1_NFPM, "V1 gauge -> V1 NFPM");
+        assertEq(aero, V1_AERO, "V1 gauge -> V1 AERO");
+        // A V3 voter minting some other token must stop the deploy.
+        pair.gauge = GAUGE;
+        vm.mockCall(VOTER_V3, abi.encodeWithSignature("TOKEN()"), abi.encode(V1_AERO));
+        vm.expectRevert(bytes("V3 voter TOKEN != AERO_V3"));
+        h.venue(pair, V1_NFPM, V1_AERO);
     }
 
     function test_v3_compoundForwardsToModule() public {
