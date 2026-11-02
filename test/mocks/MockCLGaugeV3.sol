@@ -6,7 +6,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /// @notice Minimal mock of the Slipstream V3 CLGauge surface: no `rewardToken()`, no `getReward`,
 ///         no `earned(address,uint256)`. Claims go through `claimEmissions(account, recipient, ids)`,
-///         which, like the real gauge, requires `msg.sender == account` and every id to be staked.
+///         which, like the real gauge, requires `msg.sender == account`, every id staked, and a
+///         non-empty list unless the account has deferred emissions (`NS`).
 contract MockCLGaugeV3 {
     using SafeERC20 for IERC20;
 
@@ -15,9 +16,11 @@ contract MockCLGaugeV3 {
 
     /// @notice AERO paid per claimed token id (claimEmissions) and per withdraw.
     uint256 public aeroPerId;
-    /// @notice Value returned by `earned` for any staked set; `earnedReverts` makes it revert.
-    uint256 public earnedAmount;
+    /// @notice `earned` returns this per listed id, plus the account's deferred emissions.
+    uint256 public earnedPerId;
     bool public earnedReverts;
+
+    mapping(address => uint256) public deferredEmissions;
 
     uint256 public claimCallCount;
     uint256 public lastClaimIdCount;
@@ -44,9 +47,14 @@ contract MockCLGaugeV3 {
         aeroPerId = amount;
     }
 
-    function setEarned(uint256 amount, bool reverts) external {
-        earnedAmount = amount;
+    function setEarned(uint256 perId, bool reverts) external {
+        earnedPerId = perId;
         earnedReverts = reverts;
+    }
+
+    /// @notice Simulate a failed withdraw-time mint that left `amount` deferred for `account`.
+    function setDeferred(address account, uint256 amount) external {
+        deferredEmissions[account] = amount;
     }
 
     function deposit(uint256 tokenId) external {
@@ -64,10 +72,12 @@ contract MockCLGaugeV3 {
         for (uint256 i; i < tokenIds.length; i++) {
             require(_staked[account][tokenIds[i]], "NA");
         }
+        require(tokenIds.length > 0 || deferredEmissions[account] > 0, "NS");
         claimCallCount++;
         lastClaimIdCount = tokenIds.length;
         lastClaimRecipient = recipient;
-        uint256 amount = aeroPerId * tokenIds.length;
+        uint256 amount = aeroPerId * tokenIds.length + deferredEmissions[account];
+        delete deferredEmissions[account];
         if (amount > 0) IERC20(emissionToken).safeTransfer(recipient, amount);
     }
 
@@ -76,7 +86,7 @@ contract MockCLGaugeV3 {
         for (uint256 i; i < tokenIds.length; i++) {
             require(_staked[account][tokenIds[i]], "NA");
         }
-        return earnedAmount;
+        return earnedPerId * tokenIds.length + deferredEmissions[account];
     }
 
     /// @notice Exists only for LPPositionLib.isV3Gauge, which probes it to classify the gauge.

@@ -145,7 +145,7 @@ library LPPositionLib {
     /// @notice True for a Slipstream V3 CLGauge, identified POSITIVELY by its V3-only
     ///         `depositBlock(uint256)` view. Anything else takes the V1 path, whose calls
     ///         (`rewardToken`, `getReward`) revert on a V3 gauge — so a misclassification fails
-    ///         loudly rather than silently skipping a claim.
+    ///         loudly on the claim path (`earnedTolerant` reads it as 0).
     function isV3Gauge(address gauge) public view returns (bool) {
         (bool ok, bytes memory ret) = gauge.staticcall(abi.encodeCall(ICLGaugeV3.depositBlock, (0)));
         return ok && ret.length == 32;
@@ -153,16 +153,18 @@ library LPPositionLib {
 
     /// @notice Claim pending AERO for the staked legs into this contract, for either gauge version.
     /// @dev V1: `getReward(tokenId)` per staked leg. V3: one `claimEmissions(this, this, ids)`, which
-    ///      also sweeps any account-level emissions the gauge deferred when a withdraw-time mint
-    ///      failed. Runs under DELEGATECALL, so the gauge sees the balancer as `msg.sender` (= the
-    ///      staking account the V3 gauge requires). The caller measures the AERO balance delta.
+    ///      also sweeps the emissions the gauge deferred when a withdraw-time mint failed; with nothing
+    ///      staked it still runs (empty `ids`) while any are deferred. Runs under DELEGATECALL, so the
+    ///      gauge sees the balancer as `msg.sender`. The caller measures the AERO balance delta.
     function claimRewards(address gauge, uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
         public
     {
         uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
-        if (ids.length == 0) return;
         if (isV3Gauge(gauge)) {
-            ICLGaugeV3(gauge).claimEmissions(address(this), address(this), ids);
+            // The gauge reverts `NS` on an empty list with nothing deferred.
+            if (ids.length > 0 || ICLGaugeV3(gauge).deferredEmissions(address(this)) > 0) {
+                ICLGaugeV3(gauge).claimEmissions(address(this), address(this), ids);
+            }
             return;
         }
         for (uint256 i; i < ids.length; i++) {
@@ -290,10 +292,9 @@ library LPPositionLib {
     }
 
     /// @notice Total AERO earned across the staked legs, tolerating a broken gauge.
-    /// @dev A leg whose `earned` reverts contributes 0 rather than bricking the read. This is a
-    ///      DIAGNOSTIC path (the off-chain agent's primary read interface) — it must stay callable
-    ///      even when the gauge misbehaves, which is why the try/catch is here rather than letting
-    ///      the whole snapshot revert.
+    /// @dev A failed `earned` reads as 0 instead of reverting: per leg on V1, for the whole read on
+    ///      V3 (one call over both legs). This is a DIAGNOSTIC path (the off-chain agent's primary
+    ///      read interface) and must stay callable while the gauge misbehaves.
     function earnedTolerant(
         address gauge,
         address owner,
@@ -303,9 +304,8 @@ library LPPositionLib {
         bool altStaked
     ) public view returns (uint256 total) {
         uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
-        if (ids.length == 0) return 0;
         if (isV3Gauge(gauge)) {
-            // One call over both legs; V3 `earned` also counts the account's deferred emissions.
+            // One call over both legs; V3 `earned` also counts deferred emissions, even with no legs.
             try ICLGaugeV3(gauge).earned(owner, ids) returns (uint256 e) {
                 total = e;
             } catch {}

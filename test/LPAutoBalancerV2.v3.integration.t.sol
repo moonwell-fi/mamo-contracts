@@ -5,7 +5,7 @@ import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPPositionLib} from "@contracts/libraries/LPPositionLib.sol";
 import {Test} from "@forge-std/Test.sol";
 
-import {ICLGauge} from "@interfaces/ICLGauge.sol";
+import {ICLGauge, ICLGaugeV3} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -25,6 +25,7 @@ contract LPAutoBalancerV2V3Integration is Test {
     address constant AERO_V3 = 0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee; // minted as V3 emissions
     address constant V1_GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817; // CL10 V1 gauge (classifier control)
     address constant V3_CL10_GAUGE = 0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5; // V3 gauge of the WETH/cbBTC CL10 V3 pool
+    address constant LEAF_VOTER = 0x382409fad8503FbCdbB27A4211551fa03e884078; // gauge.voter(); mints V3 emissions
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
     address constant ETH_USD = 0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70;
@@ -71,9 +72,8 @@ contract LPAutoBalancerV2V3Integration is Test {
         deal(CBBTC, address(this), 3e6);
         IERC20(WETH).approve(NFPM, 1 ether);
         IERC20(CBBTC).approve(NFPM, 3e6);
-        (tokenId,,,) = ICLPositionManager(NFPM)
-            .mint(
-                ICLPositionManager.MintParams({
+        (tokenId,,,) = ICLPositionManager(NFPM).mint(
+            ICLPositionManager.MintParams({
                 token0: WETH,
                 token1: CBBTC,
                 tickSpacing: TICK_SPACING,
@@ -87,7 +87,7 @@ contract LPAutoBalancerV2V3Integration is Test {
                 deadline: block.timestamp + 1,
                 sqrtPriceX96: 0
             })
-            );
+        );
         INonfungiblePositionManager(NFPM).safeTransferFrom(address(this), address(lab), tokenId);
         // Unset fields (alt, staked flags, cooldown, lastRebalance, active) are zero, as registration expects.
         LPAutoBalancerV2.ManagedPositionV2 memory cfg;
@@ -153,12 +153,31 @@ contract LPAutoBalancerV2V3Integration is Test {
         _bootstrap();
         _accrue();
         uint256 earned = lab.getDecisionSnapshot().earnedAero;
+        assertGt(earned, 0, "snapshot reads V3 earned");
         uint256 before = IERC20(AERO_V3).balanceOf(feeCollector);
         vm.prank(rebalancer);
         lab.claimEmissions();
         uint256 paid = IERC20(AERO_V3).balanceOf(feeCollector) - before;
         assertGt(paid, 0, "V3 AERO claimed to feeCollector");
         assertGe(paid, earned, "claim covers the snapshot estimate");
+    }
+
+    /// @notice L-1: a failed withdraw-time mint defers the emissions; they stay claimable while unstaked.
+    function test_v3_deferredEmissionsClaimableWhileUnstaked() public {
+        _bootstrap();
+        _accrue();
+        vm.mockCallRevert(LEAF_VOTER, abi.encodeWithSignature("mintEmissions(address[],uint128[])"), "MINT_DOWN");
+        vm.prank(rebalancer);
+        lab.unstake();
+        vm.clearMockedCalls();
+        uint256 deferred = ICLGaugeV3(GAUGE).deferredEmissions(address(lab));
+        assertGt(deferred, 0, "withdraw-time mint deferred");
+        assertEq(lab.getDecisionSnapshot().earnedAero, deferred, "snapshot shows deferred while unstaked");
+        uint256 before = IERC20(AERO_V3).balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "deferred swept");
+        assertGe(IERC20(AERO_V3).balanceOf(feeCollector) - before, deferred, "deferred forwarded");
     }
 
     function test_v3_compoundForwardsToModule() public {

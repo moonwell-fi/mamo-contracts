@@ -447,7 +447,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // Both legs must be unstaked: a partial unstake can leave the alt NFT custodied by the OLD
         // gauge; changing the gauge while altStaked would strand it (M-2).
         if (position.mainStaked || position.altStaked) revert PositionStaked();
-        // Same gauge<->pool, gauge->NFPM and reward-token binding _validateAndStore enforces at
+        // Same gauge<->pool, gauge->NFPM and (V1) reward-token binding _validateAndStore enforces at
         // registration — shared via LPPositionLib.validateGauge so the two admin paths cannot drift.
         LPPositionLib.validateGauge(gauge, p.pool, AERO, address(POSITION_MANAGER));
         position.gauge = gauge;
@@ -641,8 +641,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit PositionWithdrawn(to);
     }
 
-    /// @notice Claim AERO emissions from the gauge for a staked position and forward to feeCollector.
-    ///         Claims from both main and alt (if altStaked && altTokenId != 0).
+    /// @notice Claim AERO emissions from the gauge and forward them to feeCollector: the staked legs,
+    ///         plus (V3) emissions the gauge deferred on a failed withdraw-time mint, which stay
+    ///         claimable while unstaked. A no-op when there is nothing to claim.
     /// @dev REBALANCER_ROLE-gated, deliberately NOT permissionless. This routes 100% of the claimed
     ///      AERO to the feeCollector, while `compound()` is the ONLY path that ever sends AERO to the
     ///      compoundModule. Permissionless, a bot calling this every block keeps the gauge's pending
@@ -652,8 +653,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function claimEmissions() external onlyRole(REBALANCER_ROLE) whenNotPaused nonReentrant {
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
-        if (!p.mainStaked) revert NotStaked();
-        // Snapshot AERO balance before claiming from both legs, then forward the net gain.
+        // Snapshot AERO balance before claiming, then forward the net gain.
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
         _claimRewards(p);
         uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
@@ -1623,7 +1623,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
             MAX_LOSS_CAP_BPS,
             config.tickSpacing
         );
-        // Gauge reward-token + gauge<->pool + gauge->NFPM binding, shared with setGauge
+        // Gauge (V1) reward-token + gauge<->pool + gauge->NFPM binding, shared with setGauge
         // (LPPositionLib.validateGauge) so registration and later admin paths enforce one invariant.
         LPPositionLib.validateGauge(config.gauge, config.pool, AERO, address(POSITION_MANAGER));
         // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPPositionLib for

@@ -375,3 +375,6 @@ jobs:
 
       - name: Run LPAutoBalancerV2 setup-proposal test
         run: make lp-v2-setup
+
+      - name: Run LPAutoBalancerV2 Slipstream V3 fork test
+        run: make lp-auto-balancer-v2-v3

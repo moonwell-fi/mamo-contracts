@@ -20,6 +20,8 @@ interface ICLGaugeV3 {
     /// @notice Claims the listed positions' emissions plus the account's deferred emissions.
     function claimEmissions(address account, address recipient, uint256[] calldata tokenIds) external;
     function earned(address account, uint256[] memory tokenIds) external view returns (uint256);
+    /// @notice Emissions a failed withdraw-time mint left for `account`; claimable with an empty id list.
+    function deferredEmissions(address account) external view returns (uint256);
     /// @notice Block of the position's deposit. V3-only: used to tell the gauge versions apart.
     function depositBlock(uint256 tokenId) external view returns (uint256);
 }
