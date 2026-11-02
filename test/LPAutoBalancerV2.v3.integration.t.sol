@@ -72,8 +72,9 @@ contract LPAutoBalancerV2V3Integration is Test {
         deal(CBBTC, address(this), 3e6);
         IERC20(WETH).approve(NFPM, 1 ether);
         IERC20(CBBTC).approve(NFPM, 3e6);
-        (tokenId,,,) = ICLPositionManager(NFPM).mint(
-            ICLPositionManager.MintParams({
+        (tokenId,,,) = ICLPositionManager(NFPM)
+            .mint(
+                ICLPositionManager.MintParams({
                 token0: WETH,
                 token1: CBBTC,
                 tickSpacing: TICK_SPACING,
@@ -87,7 +88,7 @@ contract LPAutoBalancerV2V3Integration is Test {
                 deadline: block.timestamp + 1,
                 sqrtPriceX96: 0
             })
-        );
+            );
         INonfungiblePositionManager(NFPM).safeTransferFrom(address(this), address(lab), tokenId);
         // Unset fields (alt, staked flags, cooldown, lastRebalance, active) are zero, as registration expects.
         LPAutoBalancerV2.ManagedPositionV2 memory cfg;

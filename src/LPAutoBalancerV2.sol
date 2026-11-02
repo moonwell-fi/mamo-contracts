@@ -779,12 +779,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     ///         VAULT_RELAYER allowance until a feed publishes. Backend mitigations: a short CowSwap
     ///         `validTo`, and preferring the no-swap `rebalanceUsingAlt` while either feed is
     ///         degraded. See the backend spec's runbook.
-    function unwindForSwap(UnwindParams calldata params)
-        external
-        onlyRole(REBALANCER_ROLE)
-        nonReentrant
-        whenNotPaused
-    {
+    function unwindForSwap(UnwindParams calldata params) external onlyRole(REBALANCER_ROLE) nonReentrant whenNotPaused {
         ManagedPositionV2 storage p = position;
         // Guards + calm-gate delegated to LPPositionLib (primitives in, primitives out) to keep this
         // function's bytecode off the balancer's EIP-170 budget. The library reverts with the same
