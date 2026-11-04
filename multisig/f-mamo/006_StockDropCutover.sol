@@ -38,8 +38,10 @@ interface ISafeModules {
  *         v1's gauge stake (to F-MAMO for a gauge Aerodrome has killed), sweeps v1's balances, makes v2 the MultiRewards distributor of MAMO and cbBTC,
  *         disables the old module, and starts the in-kind streams: WETH, USDC and each B20 stock become MultiRewards
  *         reward tokens distributed by v2, which pays them out as they are.
- * @dev Runs after mamo-multisig/017, which deploys DropAutomationV2. The old module must have nothing staged, and
- *      a last v1 drop (claimGaugeRewards + createDrop + notifyRewards) should run first so nothing is left behind.
+ * @dev Runs after mamo-multisig/017, which deploys DropAutomationV2. The old module must read EXECUTED: it is pending
+ *      only between a v1 createDrop and its notifyRewards, about an hour a week, and this batch sweeps v1's balances
+ *      and gauge stake whenever it runs. Nothing here funds the streams: the first v2 drop must land before the running
+ *      MAMO and cbBTC period ends, up to 7 days after v1's last notify.
  *      A staking account still on V1 parks the new tokens on itself when compounded; the first compound after its
  *      upgrade to MamoStakingStrategyV2 sweeps them, so the streams do not wait for accounts to upgrade.
  *      A token removed from MultiRewards must never be re-added: its stale per-user checkpoints make `earned`
