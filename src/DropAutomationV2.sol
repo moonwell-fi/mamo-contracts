@@ -82,6 +82,7 @@ contract DropAutomationV2 is Ownable {
     error NothingToDistribute();
     error NotAToken(address token);
     error TooManyRewardTokens();
+    error NotifyOutOfGas(address token);
 
     modifier onlyDedicatedMsgSender() {
         if (msg.sender != dedicatedMsgSender) revert NotDedicatedSender();
@@ -141,7 +142,9 @@ contract DropAutomationV2 is Ownable {
      * @param tickSpacings_ The tick spacing of each token's pool
      * @param swapDirectToCbBtc_ Whether each token swaps straight to cbBTC rather than through MAMO
      * @param minAmountOuts_ The minimum cbBTC each token must return
-     * @dev A reward token whose notification fails is skipped and stays held for the next drop
+     * @dev A reward token whose notification fails is skipped and stays held for the next drop. A notification
+     *      that runs out of gas reverts the drop instead, so the caller must send more gas than an estimate
+     *      that converged on a trimmed run.
      */
     function createDrop(
         address[] calldata swapTokens_,
@@ -324,10 +327,14 @@ contract DropAutomationV2 is Ownable {
         uint256 leftover = block.timestamp < periodFinish ? (periodFinish - block.timestamp) * rewardRate : 0;
         if (duration != 0) amount -= (amount + leftover) % duration;
 
+        // A notify that ran out of gas took its 63/64 share and left this frame with the rest. Treating it as
+        // a failed token would let an estimate-sized call skip the last stream on every drop, so revert instead.
+        uint256 gasBefore = gasleft();
         try this.notifyReward(token, amount) {
             emit RewardNotified(token, amount);
             return true;
         } catch (bytes memory reason) {
+            if (gasleft() <= gasBefore / 64) revert NotifyOutOfGas(token);
             emit RewardNotifyFailed(token, reason);
             return false;
         }

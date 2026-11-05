@@ -107,7 +107,7 @@ contract MamoStakingStrategyV2UnitTest is Test {
             admin, backend, admin, address(mamo), address(router), address(1), address(checker), 100
         );
 
-        MamoStakingStrategyV2 impl = new MamoStakingStrategyV2();
+        MamoStakingStrategyV2 impl = new MamoStakingStrategyV2(address(0), address(0), address(0));
         strategy = MamoStakingStrategyV2(
             payable(new ERC1967Proxy(
                     address(impl),
@@ -231,7 +231,7 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
     function test_initialize_crossChecksTheRegistryAndMultiRewards() public {
         MockERC20Decimals otherMamo = new MockERC20Decimals("MAMO2", 18);
-        MamoStakingStrategyV2 impl = new MamoStakingStrategyV2();
+        MamoStakingStrategyV2 impl = new MamoStakingStrategyV2(address(0), address(0), address(0));
         MamoStakingStrategyV2.InitParams memory params = MamoStakingStrategyV2.InitParams({
             mamoStrategyRegistry: address(strategyRegistry),
             stakingRegistry: address(registry),

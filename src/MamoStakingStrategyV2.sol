@@ -55,6 +55,15 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      */
     uint256 public constant MAX_REGISTRY_SLIPPAGE_IN_BPS = 2500;
 
+    /// @notice The two V1 registries live accounts were born on; an account still on either is moved to
+    ///         MIGRATION_REGISTRY by its first backend or owner call after the upgrade
+    /// @dev upgradeStrategy upgrades with empty calldata, so without this an upgraded account keeps its V1
+    ///      registry, whose missing slippagePriceChecker() makes every compound hold the reward instead of
+    ///      swapping it, while the transaction still succeeds. Zero disables the migration (unit tests).
+    address public immutable LEGACY_REGISTRY_A;
+    address public immutable LEGACY_REGISTRY_B;
+    address public immutable MIGRATION_REGISTRY;
+
     /// @notice The MultiRewards contract for staking
     IMultiRewards public multiRewards;
 
@@ -94,8 +103,19 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     /**
      * @notice Constructor disables initializers in the implementation contract
      */
-    constructor() {
+    constructor(address legacyRegistryA, address legacyRegistryB, address migrationRegistry) {
         _disableInitializers();
+
+        if (migrationRegistry != address(0)) {
+            require(legacyRegistryA != address(0) || legacyRegistryB != address(0), "No legacy registry");
+            require(
+                migrationRegistry != legacyRegistryA && migrationRegistry != legacyRegistryB,
+                "Migration registry is legacy"
+            );
+        }
+        LEGACY_REGISTRY_A = legacyRegistryA;
+        LEGACY_REGISTRY_B = legacyRegistryB;
+        MIGRATION_REGISTRY = migrationRegistry;
     }
 
     /**
@@ -108,6 +128,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      *      leave during an incident.
      */
     modifier onlyBackend() {
+        _migrateStakingRegistry();
         require(stakingRegistry.hasRole(stakingRegistry.BACKEND_ROLE(), msg.sender), "Not backend");
         require(!stakingRegistry.paused(), "Registry paused");
         _;
@@ -137,6 +158,25 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     }
 
     /**
+     * @notice Moves an upgraded account off its V1 registry, callable by anyone
+     * @dev Only the deploy-time pair of V1 registries moves, and only to the deploy-time V2 registry, so
+     *      there is nothing to gate. Also runs first in every backend and owner path that reads the
+     *      registry, so the app's setStakingRegistry step is a no-op safety net rather than a requirement.
+     */
+    function migrateStakingRegistry() external {
+        _migrateStakingRegistry();
+    }
+
+    function _migrateStakingRegistry() internal {
+        address current = address(stakingRegistry);
+        if (MIGRATION_REGISTRY == address(0) || current == MIGRATION_REGISTRY) return;
+        if (current != LEGACY_REGISTRY_A && current != LEGACY_REGISTRY_B) return;
+
+        stakingRegistry = MamoStakingRegistry(MIGRATION_REGISTRY);
+        emit StakingRegistryUpdated(current, MIGRATION_REGISTRY);
+    }
+
+    /**
      * @notice Repoints this strategy at a different MamoStakingRegistry
      * @dev MamoStakingRegistry is NOT upgradeable — plain constructor, no proxy — so any fix to it
      *      ships as a fresh deployment. Without this function `stakingRegistry` was write-once in
@@ -147,9 +187,9 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      * @dev TWO authorised callers, and the pairing is the security argument.
      *
      *      (1) The CURRENT registry's DEFAULT_ADMIN_ROLE — this grants that role no capability it does
-     *      not already hold. It can already call setDEXRouter, setSlippagePriceChecker and
-     *      setDefaultSlippage on the registry every strategy reads, so it already decides which router
-     *      receives the reward-token allowance in compound() and what minimum-out floor applies.
+     *      not already hold. It can already call setDEXRouter and setSlippagePriceChecker on the
+     *      registry every strategy reads, so it already decides which router receives the reward-token
+     *      allowance in compound() and what minimum-out floor applies.
      *      Gating instead on MamoStrategyRegistry's admin WOULD be an escalation: that role cannot
      *      presently change a strategy's behaviour without the owner opting into an upgrade. This is
      *      the arm that makes a fleet-wide migration one batched transaction.
@@ -366,6 +406,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      * @notice Withdraw all staked MAMO tokens from MultiRewards and claim rewards
      */
     function withdrawAll() external onlyOwner {
+        _migrateStakingRegistry();
         uint256 stakedBalance = multiRewards.balanceOf(address(this));
         require(stakedBalance > 0, "No tokens to withdraw");
 
@@ -400,6 +441,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      *      until it is listed, the strategy is repointed with setStakingRegistry, or it is recovered.
      */
     function withdrawRewards() external onlyOwner {
+        _migrateStakingRegistry();
         multiRewards.getReward();
 
         MamoStakingRegistry.RewardToken[] memory rewardTokens = stakingRegistry.getRewardTokens();
@@ -450,9 +492,14 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
             if (rewardBalance == 0) continue;
 
-            // A token whose route fails (stale feed, dust, missing route) is held rather than blocking the rest
+            // A token whose route fails (stale feed, dust, missing route) is held rather than blocking the rest.
+            // An inner call that ran out of gas is not a failed token: it took its 63/64 of the gas and left
+            // this frame with the rest, so holding it would let an estimate-sized call trim the last token
+            // on every run. Fail loudly instead so the caller sends more gas.
+            uint256 gasBefore = gasleft();
             try this.compoundRewardToken(rewardTokens[i].token, rewardTokens[i].pool, rewardBalance, deadline) {}
             catch {
+                require(gasleft() > gasBefore / 64, "Compound out of gas");
                 emit CompoundRewardTokenHeld(rewardTokens[i].token, rewardBalance);
             }
         }
@@ -497,10 +544,13 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
             rewardToken.forceApprove(strategyAddress, rewardBalance);
 
+            // Same out-of-gas rule as compound: a deposit that ran out of gas reverts the run instead of holding
+            uint256 gasBefore = gasleft();
             if (_strategyToken(strategyAddress) == address(rewardToken)) {
                 try IMamoMultiMarketStrategy(strategyAddress).deposit(rewardBalance) {
                     emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
                 } catch {
+                    require(gasleft() > gasBefore / 64, "Reinvest out of gas");
                     rewardToken.forceApprove(strategyAddress, 0);
                     emit ReinvestRewardTokenHeld(address(rewardToken), rewardBalance);
                 }
@@ -511,6 +561,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             try IStockAccountStrategy(strategyAddress).depositToken(address(rewardToken), rewardBalance) {
                 emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
             } catch {
+                require(gasleft() > gasBefore / 64, "Reinvest out of gas");
                 rewardToken.forceApprove(strategyAddress, 0);
                 emit ReinvestRewardTokenHeld(address(rewardToken), rewardBalance);
             }

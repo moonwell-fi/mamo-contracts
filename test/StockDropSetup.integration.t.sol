@@ -218,11 +218,34 @@ contract StockDropSetupTest is Test {
         assertGt(usdc.balanceOf(account), 0, "V1 parks USDC");
 
         uint256 stakedBefore = multiRewards.balanceOf(account);
-        _upgradeAndRepoint(lateUser, account);
+        _upgradeWithoutRepointing(lateUser, account);
         _compound(account);
 
         assertGt(multiRewards.balanceOf(account), stakedBefore, "Parked tokens restaked as MAMO");
         _assertNothingHeld(account);
+    }
+
+    /// @dev The upgrade alone leaves the account on the V1 registry, whose missing price checker would make every
+    ///      compound hold its rewards; the first backend call moves it to V2, so the app's repoint is only a safety net
+    function _upgradeWithoutRepointing(address owner, address account) internal {
+        address v1Registry = addresses.getAddress("MAMO_STAKING_REGISTRY");
+        address v2Registry = addresses.getAddress("MAMO_STAKING_REGISTRY_V2");
+        MamoStakingStrategyV2 strategy = MamoStakingStrategyV2(payable(account));
+        MamoStrategyRegistry mamoRegistry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        address implementation = addresses.getAddress("MAMO_STAKING_STRATEGY_V2");
+
+        vm.prank(owner);
+        mamoRegistry.upgradeStrategy(account, implementation);
+        assertEq(address(strategy.stakingRegistry()), v1Registry, "upgradeStrategy leaves the V1 registry in place");
+
+        vm.expectEmit(true, true, false, false, account);
+        emit MamoStakingStrategyV2.StakingRegistryUpdated(v1Registry, v2Registry);
+        _compound(account);
+        assertEq(address(strategy.stakingRegistry()), v2Registry, "First backend call migrates to V2");
+
+        vm.prank(owner);
+        vm.expectRevert("Staking registry already set");
+        strategy.setStakingRegistry(v2Registry);
     }
 
     function _compound(address account) internal {

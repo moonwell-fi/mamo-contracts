@@ -43,7 +43,8 @@ interface ISafeModules {
  *      and gauge stake whenever it runs. Nothing here funds the streams: the first v2 drop must land before the running
  *      MAMO and cbBTC period ends, up to 7 days after v1's last notify.
  *      A staking account still on V1 parks the new tokens on itself when compounded; the first compound after its
- *      upgrade to MamoStakingStrategyV2 sweeps them, so the streams do not wait for accounts to upgrade.
+ *      upgrade to MamoStakingStrategyV2, which also moves it to the V2 registry, sweeps them, so the streams do
+ *      not wait for accounts to upgrade.
  *      A token removed from MultiRewards must never be re-added: its stale per-user checkpoints make `earned`
  *      underflow and lock every earlier staker's withdrawals. {preBuildMock} can only check the token is not listed
  *      now, so this rule is operational.
@@ -259,19 +260,26 @@ contract StockDropCutover is MultisigProposal {
         assertEq(splitter.TOKEN_0(), live.TOKEN_0(), "Splitter token0");
         assertEq(splitter.TOKEN_1(), live.TOKEN_1(), "Splitter token1");
 
-        for (uint256 i = 0; i < _gauges.length; i++) {
-            IAerodromeGauge gauge = IAerodromeGauge(_gauges[i]);
+        // v1 keeps its gauge list after the withdrawals, so the set is read from it here rather than from build()
+        DropAutomation v1Drop = DropAutomation(v1);
+        bool built = _gauges.length > 0;
+        assertGt(v1Drop.getGaugeCount(), 0, "v1 lists its gauges");
+        for (uint256 i = 0; i < v1Drop.getGaugeCount(); i++) {
+            IAerodromeGauge gauge = v1Drop.aerodromeGauges(i);
+            bool alive = IAerodromeVoter(gauge.voter()).isAlive(address(gauge));
             assertEq(gauge.balanceOf(v1), 0, "v1 gauge stake moved");
-            if (_alive[i]) {
+            assertEq(DropAutomationV2(drop).isGauge(address(gauge)), alive, "v2 claims exactly the alive gauges");
+            if (!built) continue;
+
+            assertEq(_gauges[i], address(gauge), "gauge order");
+            if (alive) {
                 assertEq(gauge.balanceOf(drop), _stakes[i], "v2 holds the gauge stake");
-                assertTrue(DropAutomationV2(drop).isGauge(address(gauge)), "v2 claims the gauge");
             } else {
                 assertEq(
                     IERC20(gauge.stakingToken()).balanceOf(addresses.getAddress("F-MAMO")),
                     _safeLpBefore[i] + _stakes[i],
                     "F-MAMO holds a killed gauge's stake"
                 );
-                assertFalse(DropAutomationV2(drop).isGauge(address(gauge)), "v2 does not claim a killed gauge");
             }
         }
 

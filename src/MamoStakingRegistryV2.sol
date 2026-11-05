@@ -176,12 +176,16 @@ contract MamoStakingRegistryV2 is AccessControlEnumerable, Pausable {
         rewardTokens.pop();
         delete rewardTokenToIndex[token];
         isRewardToken[token] = false;
+        // A re-added token starts without a route rather than inheriting the old one
+        delete routes[token];
 
         emit RewardTokenRemoved(token);
     }
 
     /**
      * @notice Update the pool address for a reward token (backend only)
+     * @dev A route set with setRoute overrides this pool while it exists, so a routed token's pool
+     *      change only takes effect once the admin updates or clears the route
      * @param token The reward token address
      * @param newPool The new pool address
      */

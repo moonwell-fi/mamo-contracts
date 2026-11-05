@@ -60,7 +60,9 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         // suite would exercise the pre-audit logic and none of the fixes below would be covered.
         // The implementation holds no state of its own (proxies keep theirs), so replacing only its
         // runtime code is sufficient and leaves every live address, role and balance untouched.
-        vm.etch(stakingStrategyImplementation, address(new MamoStakingStrategy()).code);
+        vm.etch(
+            stakingStrategyImplementation, address(new MamoStakingStrategy(address(0), address(0), address(0))).code
+        );
 
         // The staking stack in this branch is AHEAD of what is deployed on Base: compound() prices
         // its minimum-out through MamoStakingRegistry.slippagePriceChecker(), and the live registry

@@ -181,8 +181,14 @@ contract DeployStockDrop is SlippagePriceCheckerHardening {
 
     function _deployStakingStrategy() internal {
         if (!addresses.isAddressSet(STAKING_IMPL_KEY)) {
+            // Accounts live on two V1 registries (the live factory's and the deprecated factory's); an upgraded
+            // account migrates itself from either to the V2 registry on its first call
             vm.startBroadcast(addresses.getAddress("DEPLOYER_EOA"));
-            MamoStakingStrategyV2 implementation = new MamoStakingStrategyV2();
+            MamoStakingStrategyV2 implementation = new MamoStakingStrategyV2(
+                addresses.getAddress("MAMO_STAKING_REGISTRY"),
+                addresses.getAddress("MAMO_STAKING_REGISTRY_DEPRECATED"),
+                addresses.getAddress(STAKING_REGISTRY_KEY)
+            );
             vm.stopBroadcast();
 
             addresses.addAddress(STAKING_IMPL_KEY, address(implementation), true);
@@ -347,6 +353,21 @@ contract DeployStockDrop is SlippagePriceCheckerHardening {
 
         assertTrue(mamoRegistry.whitelistedImplementations(implementation), "Staking V2 should be whitelisted");
         assertEq(mamoRegistry.latestImplementationById(STAKING_TYPE_ID), implementation, "Type id 3 should be V2");
+        assertEq(
+            MamoStakingStrategyV2(payable(implementation)).LEGACY_REGISTRY_A(),
+            addresses.getAddress("MAMO_STAKING_REGISTRY"),
+            "Migrates from the live V1 registry"
+        );
+        assertEq(
+            MamoStakingStrategyV2(payable(implementation)).LEGACY_REGISTRY_B(),
+            addresses.getAddress("MAMO_STAKING_REGISTRY_DEPRECATED"),
+            "Migrates from the deprecated V1 registry"
+        );
+        assertEq(
+            MamoStakingStrategyV2(payable(implementation)).MIGRATION_REGISTRY(),
+            addresses.getAddress(STAKING_REGISTRY_KEY),
+            "Migrates to the V2 registry"
+        );
 
         assertTrue(mamoRegistry.hasRole(backendRole, addresses.getAddress(STAKING_FACTORY_KEY)), "Staking factory role");
         assertFalse(
