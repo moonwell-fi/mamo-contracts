@@ -20,6 +20,7 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {OwnableUpgradeable} from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {MockConfigurableSwapRouter} from "./mocks/MockConfigurableSwapRouter.sol";
@@ -76,6 +77,9 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         user = makeAddr("testUser");
     }
 
+    /// @dev Stands in for the V2 registry's slippagePriceChecker() getter on the live V1 registry the
+    ///      factory still points new accounts at. The upgraded-but-not-repointed state is covered by
+    ///      StockDropSetup.integration.t.sol.
     function _mockRegistryPriceChecker() internal {
         vm.mockCall(
             address(stakingRegistry),
@@ -94,9 +98,10 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         ISlippagePriceChecker.TokenFeedConfiguration[] memory feeds =
             new ISlippagePriceChecker.TokenFeedConfiguration[](2);
-        // Production heartbeats are 3600 / 86400. The fork is pinned, so its rounds never refresh
-        // while tests vm.warp days forward; a heartbeat that spans the suite keeps the REAL answers
-        // usable. Heartbeat enforcement itself is covered in SlippagePriceChecker.integration.t.sol.
+        // Production heartbeats are 3600 / 86400. The suite forks at the latest block and then warps
+        // days forward against rounds that never refresh in a fork; a heartbeat that spans the suite
+        // keeps the REAL answers usable. Heartbeat enforcement itself is covered in
+        // SlippagePriceChecker.integration.t.sol.
         feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_BTC_USD"), reverse: false, heartbeat: 3650 days
         });
@@ -167,6 +172,10 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         assertEq(stakingRegistry.defaultSlippageInBps(), 100, "Staking registry should have correct default slippage");
     }
 
+    function _notOwner(address account) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, account);
+    }
+
     // Helper function to deploy a strategy for a user
     function _deployUserStrategy(address userAddress) internal returns (address payable) {
         address backend = addresses.getAddress("MAMO_STAKING_BACKEND");
@@ -224,7 +233,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         // Verify that only the strategy owner can withdraw
         vm.startPrank(randomDepositor);
-        vm.expectRevert();
+        vm.expectRevert(_notOwner(randomDepositor));
         MamoStakingStrategy(userStrategy).withdraw(depositAmount);
         vm.stopPrank();
 
@@ -333,7 +342,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         mamoToken.approve(userStrategy, depositAmount);
 
         // Attempt to deposit more than balance
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, user, 0, depositAmount));
         MamoStakingStrategy(userStrategy).deposit(depositAmount);
         vm.stopPrank();
     }
@@ -349,7 +358,11 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         mamoToken.approve(userStrategy, depositAmount - 1);
 
         // Attempt to deposit more than allowance
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientAllowance.selector, userStrategy, depositAmount - 1, depositAmount
+            )
+        );
         MamoStakingStrategy(userStrategy).deposit(depositAmount);
         vm.stopPrank();
     }
@@ -449,9 +462,9 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         _setupAndDeposit(user, userStrategy, depositAmount);
 
-        // Attempt to withdraw more than staked balance
+        // Attempt to withdraw more than staked balance: MultiRewards (0.5.17) underflows in SafeMath
         vm.startPrank(user);
-        vm.expectRevert();
+        vm.expectRevert("SafeMath: subtraction overflow");
         MamoStakingStrategy(userStrategy).withdraw(withdrawAmount);
         vm.stopPrank();
     }
@@ -467,7 +480,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         // Attempt to withdraw as non-owner
         vm.startPrank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(_notOwner(attacker));
         MamoStakingStrategy(userStrategy).withdraw(depositAmount);
         vm.stopPrank();
     }
@@ -604,7 +617,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         // Attempt to withdrawAll as non-owner
         vm.startPrank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(_notOwner(attacker));
         MamoStakingStrategy(userStrategy).withdrawAll();
         vm.stopPrank();
     }
@@ -759,7 +772,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         // Attempt to withdrawRewards as non-owner
         vm.startPrank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(_notOwner(attacker));
         MamoStakingStrategy(userStrategy).withdrawRewards();
         vm.stopPrank();
     }
@@ -860,7 +873,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
 
         // Attempt to set slippage as non-owner
         vm.startPrank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(_notOwner(attacker));
         MamoStakingStrategy(userStrategy).setAccountSlippage(150);
         vm.stopPrank();
     }
@@ -973,18 +986,9 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         // Check the balance after processing rewards
         uint256 finalBalance = multiRewards.balanceOf(userStrategy);
 
-        // The balance might be the same if no rewards were distributed, or higher if rewards were compounded
-        assertTrue(
-            finalBalance >= initialBalance,
-            "Balance should be at least the same, potentially higher with compounded rewards"
-        );
-
-        // Log for debugging
-        console.log("Initial balance:", initialBalance);
-        console.log("Final balance after compound:", finalBalance);
-        if (finalBalance > initialBalance) {
-            console.log("Rewards compounded successfully!");
-        }
+        // The seeded cbBTC stream was claimed and swapped into MAMO, so a failed swap fails the test
+        assertGt(finalBalance, initialBalance, "the week of cbBTC rewards compounds into the stake");
+        assertEq(IERC20(addresses.getAddress("cbBTC")).balanceOf(userStrategy), 0, "nothing held back");
     }
 
     function testCompoundModeEmitsCorrectEvents() public {

@@ -5,6 +5,7 @@ import {StockDropCutover} from "../multisig/f-mamo/006_StockDropCutover.sol";
 import {DeployStockDrop} from "../multisig/mamo-multisig/017_DeployStockDrop.sol";
 
 import {DropAutomationV2} from "@contracts/DropAutomationV2.sol";
+import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
 import {MamoStakingStrategyV2} from "@contracts/MamoStakingStrategyV2.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -99,7 +100,8 @@ contract StockDropSetupTest is Test {
         _proveDropTopsUpRunningStreams();
         _proveCompound(account);
         _proveV1ParksUntilUpgraded(lateAccount);
-        _proveStockAccountPaysDropAutomation();
+        address stockAccount = _proveStockAccountPaysDropAutomation();
+        _proveReinvestNeverPaysPartially(account, stockAccount);
     }
 
     /// @dev 017 refuses to deploy while the stock registry lists a stock on another pool than the config, as it did
@@ -260,7 +262,7 @@ contract StockDropSetupTest is Test {
     }
 
     /// @dev Created by the live v2 factory the app uses
-    function _proveStockAccountPaysDropAutomation() internal {
+    function _proveStockAccountPaysDropAutomation() internal returns (address) {
         StockAccountStrategyFactory factory =
             StockAccountStrategyFactory(addresses.getAddress("STOCK_ACCOUNT_STRATEGY_FACTORY"));
         address drop = addresses.getAddress("DROP_AUTOMATION_V2");
@@ -289,5 +291,47 @@ contract StockDropSetupTest is Test {
         stockAccount.payFees(address(usdc));
 
         assertGt(usdc.balanceOf(drop), before, "The management fee reached DropAutomationV2");
+        return address(stockAccount);
+    }
+
+    /// @dev A stock deposit is the deepest and costliest call reinvest makes. Under every gas cap from far too
+    ///      little to more than enough, the run either reverts or deposits the stock: never a success that held it,
+    ///      which is what an eth_estimateGas-sized call would otherwise converge on
+    function _proveReinvestNeverPaysPartially(address account, address stockAccount) internal {
+        MamoStakingStrategyV2 strategy = MamoStakingStrategyV2(payable(account));
+        MamoStakingRegistryV2 registry = MamoStakingRegistryV2(addresses.getAddress("MAMO_STAKING_REGISTRY_V2"));
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
+
+        MamoStakingRegistryV2.RewardToken[] memory rewardTokens = registry.getRewardTokens();
+        address[] memory destinations = new address[](rewardTokens.length);
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            if (rewardTokens[i].token == NVDAC) destinations[i] = stockAccount;
+        }
+
+        deal(NVDAC, account, 1e8);
+        uint256 snapshot = vm.snapshotState();
+
+        vm.prank(backend);
+        uint256 gasBefore = gasleft();
+        strategy.reinvest(destinations);
+        uint256 fullCost = gasBefore - gasleft();
+        assertEq(IERC20(NVDAC).balanceOf(account), 0, "Reinvest deposits the stock with enough gas");
+        assertLt(fullCost, 64 * strategy.CATCH_GAS_FLOOR() / 8, "Floor margin: a stock deposit under 64 * floor / d");
+
+        uint256 successes;
+        uint256 reverts;
+        for (uint256 cap = 300_000; cap <= fullCost + fullCost / 10; cap += 25_000) {
+            vm.revertToState(snapshot);
+            vm.prank(backend);
+            try strategy.reinvest{gas: cap}(destinations) {
+                assertEq(IERC20(NVDAC).balanceOf(account), 0, "A reinvest that succeeded deposited the stock");
+                successes++;
+            } catch {
+                reverts++;
+            }
+        }
+        assertGt(successes, 0, "The sweep reached a successful cap");
+        assertGt(reverts, 0, "The sweep started below the cost");
+        vm.revertToState(snapshot);
     }
 }

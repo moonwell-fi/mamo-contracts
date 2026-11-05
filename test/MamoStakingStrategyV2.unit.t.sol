@@ -11,6 +11,7 @@ import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {MockERC20Decimals} from "./mocks/MockERC20Decimals.sol";
 import {MockPriceChecker} from "./mocks/MockPriceChecker.sol";
@@ -374,7 +375,125 @@ contract MamoStakingStrategyV2UnitTest is Test {
 
         vm.prank(backend);
         registry.removeRewardToken(address(stock));
-        assertEq(registry.getRoute(address(stock)).length, 2, "only the admin changes a route");
+        assertEq(registry.getRoute(address(stock)).length, 0, "removing the token clears its route");
+    }
+
+    // ========== REGISTRY MIGRATION ==========
+
+    function test_constructor_validatesTheMigrationPair() public {
+        vm.expectRevert("No legacy registry");
+        new MamoStakingStrategyV2(address(0), address(0), address(registry));
+
+        vm.expectRevert("Migration registry is legacy");
+        new MamoStakingStrategyV2(address(registry), address(0), address(registry));
+
+        vm.expectRevert("Migration registry is legacy");
+        new MamoStakingStrategyV2(address(1), address(registry), address(registry));
+    }
+
+    function test_migrateStakingRegistry_movesALegacyAccountOnce() public {
+        MamoStakingRegistryV2 target = _registryLike(registry);
+        MamoStakingStrategyV2 account = _account(address(registry), address(0), address(target));
+        assertEq(address(account.LEGACY_REGISTRY_A()), address(registry));
+        assertEq(address(account.MIGRATION_REGISTRY()), address(target));
+
+        vm.expectEmit(address(account));
+        emit MamoStakingStrategyV2.StakingRegistryUpdated(address(registry), address(target));
+        account.migrateStakingRegistry();
+        assertEq(address(account.stakingRegistry()), address(target));
+
+        vm.recordLogs();
+        account.migrateStakingRegistry();
+        assertEq(vm.getRecordedLogs().length, 0, "already migrated");
+    }
+
+    function test_migrateStakingRegistry_runsFirstInTheBackendAndOwnerPaths() public {
+        MamoStakingRegistryV2 target = _registryLike(registry);
+        MamoStakingStrategyV2 viaBackend = _account(address(0), address(registry), address(target));
+        MamoStakingStrategyV2 viaOwner = _account(address(0), address(registry), address(target));
+
+        // Backend role is checked on the registry the account lands on, not the one it left
+        bytes32 backendRole = registry.BACKEND_ROLE();
+        vm.prank(admin);
+        registry.revokeRole(backendRole, backend);
+        vm.expectEmit(address(viaBackend));
+        emit MamoStakingStrategyV2.StakingRegistryUpdated(address(registry), address(target));
+        vm.prank(backend);
+        viaBackend.compound(block.timestamp + 10 minutes);
+        assertEq(address(viaBackend.stakingRegistry()), address(target));
+
+        vm.expectEmit(address(viaOwner));
+        emit MamoStakingStrategyV2.StakingRegistryUpdated(address(registry), address(target));
+        vm.prank(user);
+        viaOwner.withdrawRewards();
+        assertEq(address(viaOwner.stakingRegistry()), address(target));
+    }
+
+    function test_migrateStakingRegistry_leavesOtherAccountsAlone() public {
+        MamoStakingRegistryV2 target = _registryLike(registry);
+        MamoStakingRegistryV2 unrelated = _registryLike(registry);
+        MamoStakingStrategyV2 notLegacy = _account(address(unrelated), address(0), address(target));
+
+        vm.recordLogs();
+        notLegacy.migrateStakingRegistry();
+        vm.prank(backend);
+        notLegacy.compound(block.timestamp + 10 minutes);
+        assertEq(address(notLegacy.stakingRegistry()), address(registry), "not born on a legacy registry");
+
+        strategy.migrateStakingRegistry();
+        vm.prank(backend);
+        strategy.compound(block.timestamp + 10 minutes);
+        assertEq(address(strategy.stakingRegistry()), address(registry), "migration disabled");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != MamoStakingStrategyV2.StakingRegistryUpdated.selector, "no move");
+        }
+    }
+
+    function test_setStakingRegistry_isANoOpAfterTheAutomaticMigration() public {
+        MamoStakingRegistryV2 target = _registryLike(registry);
+        MamoStakingStrategyV2 account = _account(address(registry), address(0), address(target));
+
+        vm.prank(backend);
+        account.compound(block.timestamp + 10 minutes);
+
+        vm.prank(user);
+        vm.expectRevert("Staking registry already set");
+        account.setStakingRegistry(address(target));
+    }
+
+    /// @dev A registry with the fixture's roles, router, checker and reward token list
+    function _registryLike(MamoStakingRegistryV2 model) internal returns (MamoStakingRegistryV2 fresh) {
+        fresh = new MamoStakingRegistryV2(
+            admin, backend, admin, address(mamo), address(router), address(1), address(checker), 100
+        );
+        MamoStakingRegistryV2.RewardToken[] memory tokens = model.getRewardTokens();
+        vm.startPrank(backend);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            fresh.addRewardToken(tokens[i].token, tokens[i].pool);
+        }
+        vm.stopPrank();
+    }
+
+    /// @dev An account on `registry`, with a fresh implementation built for the given migration pair
+    function _account(address legacyA, address legacyB, address migration) internal returns (MamoStakingStrategyV2) {
+        MamoStakingStrategyV2 impl = new MamoStakingStrategyV2(legacyA, legacyB, migration);
+        return MamoStakingStrategyV2(
+            payable(new ERC1967Proxy(
+                    address(impl),
+                    abi.encodeCall(
+                        MamoStakingStrategyV2.initialize,
+                        (MamoStakingStrategyV2.InitParams({
+                                mamoStrategyRegistry: address(strategyRegistry),
+                                stakingRegistry: address(registry),
+                                multiRewards: address(multiRewards),
+                                mamoToken: address(mamo),
+                                strategyTypeId: 1,
+                                owner: user
+                            }))
+                    )
+                ))
+        );
     }
 
     function _listStock(IStockAccountRegistry.TokenStatus status, address pool) internal {

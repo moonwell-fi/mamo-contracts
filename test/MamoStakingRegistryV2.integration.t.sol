@@ -14,7 +14,9 @@ import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {ISwapRouter} from "@interfaces/ISwapRouter.sol";
 
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract MockStockHopChecker is MockPriceChecker {
     address public registry;
@@ -43,14 +45,21 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        // Get the deployed registry
-        stakingRegistry = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));
-
         // Get key addresses
         admin = addresses.getAddress("F-MAMO");
         backend = addresses.getAddress("STRATEGY_MULTICALL");
         guardian = addresses.getAddress("F-MAMO"); // Same as admin
         mamoToken = addresses.getAddress("MAMO");
+
+        // The address book's MAMO_STAKING_REGISTRY is the V1 deployment, so a suite bound to it runs V1
+        // bytecode. Every test here runs against THIS branch's registry instead; the V1 instance only
+        // lends its router and quoter, and cbBTC is listed again so the fixture matches the deployment.
+        stakingRegistry = MamoStakingRegistry(addresses.getAddress("MAMO_STAKING_REGISTRY"));
+        stakingRegistry = _freshRegistry();
+        address cbBTC = addresses.getAddress("cbBTC");
+        address cbBtcPool = address(new MockPool(cbBTC, mamoToken));
+        vm.prank(backend);
+        stakingRegistry.addRewardToken(cbBTC, cbBtcPool);
 
         // Create mock contracts for testing
         rewardToken1 = addresses.getAddress("USDC"); // Use real token contract
@@ -163,15 +172,16 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         stakingRegistry.addRewardToken(rewardToken1, pool1);
         vm.stopPrank();
 
-        // Update its pool to pool2 (which is a real contract)
+        // Update its pool to another pool that holds the token (V2 rejects one that does not)
+        address newPool = address(new MockPool(rewardToken1, rewardToken2));
         vm.startPrank(backend);
         vm.expectEmit(true, true, true, true);
-        emit RewardTokenPoolUpdated(rewardToken1, pool1, pool2);
-        stakingRegistry.updateRewardTokenPool(rewardToken1, pool2);
+        emit RewardTokenPoolUpdated(rewardToken1, pool1, newPool);
+        stakingRegistry.updateRewardTokenPool(rewardToken1, newPool);
         vm.stopPrank();
 
         // Verify update
-        assertEq(stakingRegistry.getRewardTokenPool(rewardToken1), pool2, "Pool should be updated");
+        assertEq(stakingRegistry.getRewardTokenPool(rewardToken1), newPool, "Pool should be updated");
     }
 
     // ========== REWARD TOKEN MANAGEMENT TESTS - UNHAPPY PATH ==========
@@ -216,7 +226,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     function testAddRewardTokenRevertsWhenNotBackend() public {
         address randomUser = makeAddr("randomUser");
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.BACKEND_ROLE()));
         stakingRegistry.addRewardToken(rewardToken1, pool1);
         vm.stopPrank();
     }
@@ -229,7 +239,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
 
         // Try to add token
         vm.startPrank(backend);
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         stakingRegistry.addRewardToken(rewardToken1, pool1);
         vm.stopPrank();
     }
@@ -250,7 +260,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         // Try to remove as non-backend
         address randomUser = makeAddr("randomUser");
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.BACKEND_ROLE()));
         stakingRegistry.removeRewardToken(rewardToken1);
         vm.stopPrank();
     }
@@ -345,15 +355,14 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
 
     // ========== DEX CONFIGURATION TESTS ==========
 
-    /// @dev Deploys the registry from THIS branch's source instead of reusing the instance at
-    ///      MAMO_STAKING_REGISTRY. MamoStakingRegistry is not upgradeable — it has a plain
-    ///      constructor and no proxy — so the deployed instance runs whatever bytecode was shipped,
-    ///      and every test bound to that address silently asserts against the OLD access control.
-    ///      The setDEXRouter role change below is invisible to such a test: it keeps passing with
-    ///      `backend` and would keep passing if the fix were reverted. Roles are wired to the same
-    ///      admin/backend/guardian the deployment uses, so the only difference is the code.
-    /// @dev The price checker comes from the address book, not from stakingRegistry: the deployed
-    ///      instance predates slippagePriceChecker() and reverts on that selector.
+    /// @dev Deploys the registry from THIS branch's source. MamoStakingRegistry is not upgradeable — it
+    ///      has a plain constructor and no proxy — so the instance at MAMO_STAKING_REGISTRY runs whatever
+    ///      bytecode was shipped, and a test bound to that address silently asserts against the OLD code.
+    ///      Roles are wired to the same admin/backend/guardian the deployment uses, so the only
+    ///      difference is the code. Router and quoter are read from whatever `stakingRegistry` is at the
+    ///      time (the V1 instance in setUp, the fresh one afterwards); both answer the same addresses.
+    /// @dev The price checker comes from the address book, not from stakingRegistry: the V1 instance
+    ///      predates slippagePriceChecker() and reverts on that selector.
     function _freshRegistry() internal returns (MamoStakingRegistry fresh) {
         fresh = new MamoStakingRegistry(
             admin,
@@ -474,7 +483,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         address randomUser = makeAddr("randomUser");
 
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, registry.DEFAULT_ADMIN_ROLE()));
         registry.setDEXRouter(ISwapRouter(newRouter));
         vm.stopPrank();
     }
@@ -531,7 +540,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         address randomUser = makeAddr("randomUser");
 
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.BACKEND_ROLE()));
         stakingRegistry.setQuoter(IQuoter(newQuoter));
         vm.stopPrank();
     }
@@ -569,7 +578,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     function testSetDefaultSlippageRevertsWhenNotBackend() public {
         address randomUser = makeAddr("randomUser");
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.BACKEND_ROLE()));
         stakingRegistry.setDefaultSlippage(200);
         vm.stopPrank();
     }
@@ -627,7 +636,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
     function testPauseRevertsWhenNotGuardian() public {
         address randomUser = makeAddr("randomUser");
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.GUARDIAN_ROLE()));
         stakingRegistry.pause();
         vm.stopPrank();
     }
@@ -641,7 +650,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         // Try to unpause as non-guardian
         address randomUser = makeAddr("randomUser");
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.GUARDIAN_ROLE()));
         stakingRegistry.unpause();
         vm.stopPrank();
     }
@@ -655,13 +664,13 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         // All backend operations should revert
         vm.startPrank(backend);
 
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         stakingRegistry.addRewardToken(rewardToken1, pool1);
 
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         stakingRegistry.setDefaultSlippage(200);
 
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         stakingRegistry.setQuoter(IQuoter(makeAddr("newQuoter")));
 
         vm.stopPrank();
@@ -826,7 +835,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         address randomUser = makeAddr("randomUser");
 
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.DEFAULT_ADMIN_ROLE()));
         stakingRegistry.recoverERC20(token, recipient, amount);
         vm.stopPrank();
     }
@@ -872,7 +881,7 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         address randomUser = makeAddr("randomUser");
 
         vm.startPrank(randomUser);
-        vm.expectRevert();
+        vm.expectRevert(_missingRole(randomUser, stakingRegistry.DEFAULT_ADMIN_ROLE()));
         stakingRegistry.recoverETH(recipient);
         vm.stopPrank();
     }
@@ -891,6 +900,28 @@ contract MamoStakingRegistryV2IntegrationTest is BaseTest {
         vm.expectRevert("Empty balance");
         stakingRegistry.recoverETH(recipient);
         vm.stopPrank();
+    }
+
+    function testRemoveRewardTokenClearsTheRoute() public {
+        MamoStakingRegistry.Hop[] memory route = new MamoStakingRegistry.Hop[](1);
+        route[0] = MamoStakingRegistry.Hop(pool1, ISwapRouter(address(0)), ISlippagePriceChecker(address(0)));
+
+        vm.prank(backend);
+        stakingRegistry.addRewardToken(rewardToken1, pool1);
+        vm.prank(admin);
+        stakingRegistry.setRoute(rewardToken1, route);
+        assertEq(stakingRegistry.getRoute(rewardToken1).length, 1, "route set");
+
+        vm.startPrank(backend);
+        stakingRegistry.removeRewardToken(rewardToken1);
+        stakingRegistry.addRewardToken(rewardToken1, pool1);
+        vm.stopPrank();
+
+        assertEq(stakingRegistry.getRoute(rewardToken1).length, 0, "a re-added token starts without a route");
+    }
+
+    function _missingRole(address account, bytes32 role) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, account, role);
     }
 
     // Event declarations

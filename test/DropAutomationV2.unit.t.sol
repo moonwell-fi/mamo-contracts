@@ -7,6 +7,7 @@ import {IQuoter} from "@interfaces/IQuoter.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {MockERC20Decimals} from "./mocks/MockERC20Decimals.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
@@ -161,10 +162,101 @@ contract DropAutomationV2UnitTest is Test {
     function test_createDrop_dustWaitsForTheNextDrop() public {
         mamo.mint(address(drop), 1e18);
         stock.mint(address(drop), DURATION - 1);
+        (,, uint256 periodFinishBefore,,,) = multiRewards.rewardData(address(stock));
 
+        vm.recordLogs();
         _createDrop();
 
         assertEq(stock.balanceOf(address(drop)), DURATION - 1);
+        (,, uint256 periodFinish,,,) = multiRewards.rewardData(address(stock));
+        assertEq(periodFinish, periodFinishBefore, "no stream opened for dust");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(_notifiedCount(logs, address(stock)), 0, "dust is not notified, not even as zero");
+        assertEq(_notifiedCount(logs, address(mamo)), 1);
+    }
+
+    /// @dev A6: a notify that runs out of gas reverts the drop instead of being held as a failed token, so no
+    ///      gas cap can produce a run that paid some streams and silently skipped the rest
+    function test_createDrop_neverPaysPartiallyUnderAnyGasCap() public {
+        mamo.mint(address(drop), 1_000e18);
+        cbBtc.mint(address(drop), 1e8);
+        stock.mint(address(drop), 5e8);
+        uint256 snap = vm.snapshotState();
+
+        vm.prank(sender);
+        uint256 gasBefore = gasleft();
+        drop.createDrop(new address[](0), new int24[](0), new bool[](0), new uint256[](0));
+        uint256 fullCost = gasBefore - gasleft();
+
+        bool sawSuccess;
+        uint256 outOfGasCaps;
+        for (uint256 cap = 60_000; cap <= fullCost + fullCost / 10; cap += 1_000) {
+            assertTrue(vm.revertToState(snap));
+
+            vm.prank(sender);
+            try drop.createDrop{gas: cap}(new address[](0), new int24[](0), new bool[](0), new uint256[](0)) {
+                sawSuccess = true;
+                assertLt(mamo.balanceOf(address(drop)), DURATION, "MAMO stream paid");
+                assertLt(cbBtc.balanceOf(address(drop)), DURATION, "cbBTC stream paid");
+                assertLt(stock.balanceOf(address(drop)), DURATION, "stock stream paid");
+            } catch (bytes memory reason) {
+                if (bytes4(reason) == DropAutomationV2.NotifyOutOfGas.selector) outOfGasCaps++;
+            }
+        }
+
+        assertTrue(sawSuccess, "the sweep reaches a full run");
+        assertGt(outOfGasCaps, 0, "the sweep crosses a notify that ran out of gas");
+    }
+
+    /// @dev eth_estimateGas binary-searches the smallest gas the call succeeds with; that run must pay every stream
+    function test_createDrop_estimateSizedCallPaysEveryStream() public {
+        mamo.mint(address(drop), 1_000e18);
+        cbBtc.mint(address(drop), 1e8);
+        stock.mint(address(drop), 5e8);
+        uint256 snap = vm.snapshotState();
+
+        vm.prank(sender);
+        uint256 gasBefore = gasleft();
+        drop.createDrop(new address[](0), new int24[](0), new bool[](0), new uint256[](0));
+        uint256 hi = gasBefore - gasleft() + 10_000;
+        uint256 lo = 60_000;
+        while (hi - lo > 1) {
+            uint256 mid = (lo + hi) / 2;
+            assertTrue(vm.revertToState(snap));
+            vm.prank(sender);
+            try drop.createDrop{gas: mid}(new address[](0), new int24[](0), new bool[](0), new uint256[](0)) {
+                hi = mid;
+            } catch {
+                lo = mid;
+            }
+        }
+
+        assertTrue(vm.revertToState(snap));
+        vm.prank(sender);
+        drop.createDrop{gas: hi}(new address[](0), new int24[](0), new bool[](0), new uint256[](0));
+        assertEq(mamo.balanceOf(address(drop)), 1_000e18 % DURATION, "MAMO stream paid");
+        assertEq(cbBtc.balanceOf(address(drop)), 1e8 % DURATION, "cbBTC stream paid");
+        assertEq(stock.balanceOf(address(drop)), 5e8 % DURATION, "the last stream is paid too");
+    }
+
+    function test_removeRewardToken() public {
+        vm.startPrank(owner);
+        drop.addRewardToken(address(weth));
+        vm.expectEmit(address(drop));
+        emit DropAutomationV2.RewardTokenRemoved(address(weth));
+        drop.removeRewardToken(address(weth));
+        vm.expectRevert(abi.encodeWithSelector(DropAutomationV2.NotFound.selector, address(weth)));
+        drop.removeRewardToken(address(weth));
+        vm.stopPrank();
+
+        assertFalse(drop.isRewardToken(address(weth)));
+        assertEq(drop.getRewardTokens().length, 3);
+
+        weth.mint(address(drop), 1e18);
+        stock.mint(address(drop), 5e8);
+        _createDrop();
+        assertEq(weth.balanceOf(address(drop)), 1e18, "a removed token is no longer notified");
+        assertEq(stock.balanceOf(address(drop)), 5e8 % DURATION);
     }
 
     function test_createDrop_revertsWhenNothingIsFunded() public {
@@ -316,6 +408,16 @@ contract DropAutomationV2UnitTest is Test {
     function _createDrop() internal {
         vm.prank(sender);
         drop.createDrop(new address[](0), new int24[](0), new bool[](0), new uint256[](0));
+    }
+
+    /// @dev RewardNotified events for `token` among `logs`
+    function _notifiedCount(Vm.Log[] memory logs, address token) internal view returns (uint256 count) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == address(drop) && logs[i].topics[0] == DropAutomationV2.RewardNotified.selector
+                    && logs[i].topics[1] == bytes32(uint256(uint160(token)))
+            ) count++;
+        }
     }
 
     function _swapArgs(bool direct, uint256 minOut)

@@ -58,6 +58,9 @@ contract DropAutomationV2 is Ownable {
     /// @notice The slippage tolerance applied to Aerodrome swaps, in basis points
     uint256 public maxSlippageBps;
 
+    /// @notice Gas a failed notify must leave behind to count as a failed token rather than as out of gas
+    uint256 public constant CATCH_GAS_FLOOR = 150_000;
+
     event RewardTokenAdded(address indexed token);
     event RewardTokenRemoved(address indexed token);
     event RewardNotified(address indexed token, uint256 amount);
@@ -327,14 +330,16 @@ contract DropAutomationV2 is Ownable {
         uint256 leftover = block.timestamp < periodFinish ? (periodFinish - block.timestamp) * rewardRate : 0;
         if (duration != 0) amount -= (amount + leftover) % duration;
 
-        // A notify that ran out of gas took its 63/64 share and left this frame with the rest. Treating it as
-        // a failed token would let an estimate-sized call skip the last stream on every drop, so revert instead.
-        uint256 gasBefore = gasleft();
+        // A notify that starved d frames down hands back about d/64 of what this frame had; a token that
+        // merely reverted hands back nearly all of it. Holding the first kind would let an estimate-sized
+        // call skip the last stream on every drop, so a catch that lands under the floor reverts and the
+        // caller sends more gas. Catches a starve of any notify under 64 * floor / d: three frames and
+        // well under 1M gas here.
         try this.notifyReward(token, amount) {
             emit RewardNotified(token, amount);
             return true;
         } catch (bytes memory reason) {
-            if (gasleft() <= gasBefore / 64) revert NotifyOutOfGas(token);
+            if (gasleft() < CATCH_GAS_FLOOR) revert NotifyOutOfGas(token);
             emit RewardNotifyFailed(token, reason);
             return false;
         }

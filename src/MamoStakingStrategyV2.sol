@@ -40,6 +40,14 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
     ///      price expires is not protected by that price.
     uint256 public constant MAX_COMPOUND_DEADLINE = 1 hours;
 
+    /// @notice Gas a failed reward call must leave behind to be held rather than treated as out of gas
+    /// @dev A call that starved d frames down hands back the 1/64 each frame kept, about d/64 of what this
+    ///      frame had; a call that merely reverted hands back nearly all of it. Holding the first kind would
+    ///      let an estimate-sized call trim the last reward on every run. The floor catches a starve of any
+    ///      inner call costing under 64 * floor / d: a stock deposit runs four frames deep and under 2M gas,
+    ///      so 300k keeps a margin above two.
+    uint256 public constant CATCH_GAS_FLOOR = 300_000;
+
     /**
      * @notice Hard ceiling this strategy will accept for a candidate registry's default slippage
      * @dev Deliberately a strategy-side constant rather than a read of the candidate's own
@@ -492,14 +500,11 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
             if (rewardBalance == 0) continue;
 
-            // A token whose route fails (stale feed, dust, missing route) is held rather than blocking the rest.
-            // An inner call that ran out of gas is not a failed token: it took its 63/64 of the gas and left
-            // this frame with the rest, so holding it would let an estimate-sized call trim the last token
-            // on every run. Fail loudly instead so the caller sends more gas.
-            uint256 gasBefore = gasleft();
+            // A token whose route fails (stale feed, dust, missing route) is held rather than blocking the rest;
+            // one that ran out of gas reverts the run instead, see CATCH_GAS_FLOOR
             try this.compoundRewardToken(rewardTokens[i].token, rewardTokens[i].pool, rewardBalance, deadline) {}
             catch {
-                require(gasleft() > gasBefore / 64, "Compound out of gas");
+                require(gasleft() >= CATCH_GAS_FLOOR, "Compound out of gas");
                 emit CompoundRewardTokenHeld(rewardTokens[i].token, rewardBalance);
             }
         }
@@ -544,13 +549,12 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
 
             rewardToken.forceApprove(strategyAddress, rewardBalance);
 
-            // Same out-of-gas rule as compound: a deposit that ran out of gas reverts the run instead of holding
-            uint256 gasBefore = gasleft();
+            // A deposit that ran out of gas reverts the run instead of holding, see CATCH_GAS_FLOOR
             if (_strategyToken(strategyAddress) == address(rewardToken)) {
                 try IMamoMultiMarketStrategy(strategyAddress).deposit(rewardBalance) {
                     emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
                 } catch {
-                    require(gasleft() > gasBefore / 64, "Reinvest out of gas");
+                    require(gasleft() >= CATCH_GAS_FLOOR, "Reinvest out of gas");
                     rewardToken.forceApprove(strategyAddress, 0);
                     emit ReinvestRewardTokenHeld(address(rewardToken), rewardBalance);
                 }
@@ -561,7 +565,7 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
             try IStockAccountStrategy(strategyAddress).depositToken(address(rewardToken), rewardBalance) {
                 emit ReinvestRewardTokenProcessed(address(rewardToken), rewardBalance);
             } catch {
-                require(gasleft() > gasBefore / 64, "Reinvest out of gas");
+                require(gasleft() >= CATCH_GAS_FLOOR, "Reinvest out of gas");
                 rewardToken.forceApprove(strategyAddress, 0);
                 emit ReinvestRewardTokenHeld(address(rewardToken), rewardBalance);
             }
