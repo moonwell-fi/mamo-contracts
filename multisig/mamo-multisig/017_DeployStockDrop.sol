@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {DropAutomation} from "@contracts/DropAutomation.sol";
 import {DropAutomationV2} from "@contracts/DropAutomationV2.sol";
 import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {MamoStakingStrategyFactory} from "@contracts/MamoStakingStrategyFactory.sol";
@@ -126,10 +125,11 @@ contract DeployStockDrop is SlippagePriceCheckerHardening {
         rewardTokens[0] = addresses.getAddress("MAMO");
         rewardTokens[1] = addresses.getAddress("cbBTC");
 
+        // A backend key of its own runs the drops. v1's dedicatedMsgSender is a personal EOA and does not carry over.
         vm.startBroadcast(addresses.getAddress("DEPLOYER_EOA"));
         DropAutomationV2 drop = new DropAutomationV2(
             addresses.getAddress("F-MAMO"),
-            DropAutomation(addresses.getAddress("DROP_AUTOMATION")).dedicatedMsgSender(),
+            addresses.getAddress("MAMO_DROP_BACKEND"),
             addresses.getAddress("MAMO"),
             addresses.getAddress("cbBTC"),
             addresses.getAddress("MAMO_MULTI_REWARDS"),
@@ -375,8 +375,8 @@ contract DeployStockDrop is SlippagePriceCheckerHardening {
         assertEq(drop.owner(), addresses.getAddress("F-MAMO"), "Drop owner");
         assertEq(
             drop.dedicatedMsgSender(),
-            DropAutomation(addresses.getAddress("DROP_AUTOMATION")).dedicatedMsgSender(),
-            "Drop operator should match v1"
+            addresses.getAddress("MAMO_DROP_BACKEND"),
+            "Drop operator is the drop backend key"
         );
         assertEq(address(drop.MULTI_REWARDS()), addresses.getAddress("MAMO_MULTI_REWARDS"), "Drop MultiRewards");
         assertEq(address(drop.AERODROME_CL_ROUTER()), addresses.getAddress("AERODROME_ROUTER"), "Drop router");

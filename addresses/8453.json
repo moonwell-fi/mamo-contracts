@@ -235,6 +235,11 @@
     "isContract": false
   },
   {
+    "addr": "0xD10b8B0ed38824b13589EA6e3a39Eb3d11D2B2e0",
+    "name": "MAMO_DROP_BACKEND",
+    "isContract": false
+  },
+  {
     "addr": "0x7855B0821401Ab078f6Cf457dEAFae775fF6c7A3",
     "name": "MAMO_MULTI_REWARDS",
     "isContract": true
