@@ -1972,6 +1972,57 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(lab.getDecisionSnapshot().earnedAero, 0, "reverting earned reads as 0");
     }
 
+    /// @notice emergencyUnstake is admin-only.
+    function test_emergencyUnstake_revertsForNonAdmin() public {
+        _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, rebalancer, bytes32(0))
+        );
+        lab.emergencyUnstake();
+    }
+
+    /// @notice With the gauge factory's flag off, emergencyUnstake reverts with the gauge's `NE`.
+    function test_v3Gauge_emergencyUnstakeRevertsWhileFlagOff() public {
+        _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        vm.prank(admin);
+        vm.expectRevert(bytes("NE"));
+        lab.emergencyUnstake();
+    }
+
+    /// @notice With the flag on, emergencyUnstake pulls both legs back and clears the flags so exit works.
+    function test_v3Gauge_emergencyUnstakeClearsStakeAndExitSucceeds() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        v3.setEmergencyEnabled(true);
+        vm.prank(admin);
+        lab.emergencyUnstake();
+        (bool mainStaked, bool altStaked) = _readStakeFlags();
+        assertFalse(mainStaked || altStaked, "stake flags cleared");
+        assertFalse(v3.stakedContains(address(lab), TOKEN_ID), "main back from the gauge");
+        assertFalse(v3.stakedContains(address(lab), ALT_TOKEN_ID), "alt back from the gauge");
+        vm.prank(admin);
+        lab.exit(admin);
+        assertFalse(lab.exposed_position().active, "exit completed");
+    }
+
+    /// @notice A V1 gauge has no emergencyWithdraw, so emergencyUnstake reverts with empty data.
+    function test_emergencyUnstake_revertsOnV1Gauge() public {
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        vm.prank(admin);
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(LPAutoBalancerV2.emergencyUnstake, ()));
+        assertFalse(ok, "V1 reverts");
+        assertEq(ret.length, 0, "no such function on V1");
+    }
+
     /// @notice setGauge refuses to leave a V3 gauge holding deferred emissions until they are claimed.
     function test_v3Gauge_setGaugeRevertsWhileDeferredPending() public {
         MockCLGaugeV3 v3 = _useV3Gauge();

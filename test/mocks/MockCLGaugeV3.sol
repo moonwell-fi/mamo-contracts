@@ -67,6 +67,20 @@ contract MockCLGaugeV3 {
         if (aeroPerId > 0) IERC20(emissionToken).safeTransfer(msg.sender, aeroPerId);
     }
 
+    /// @notice Mirrors the factory's `emergencyWithdrawEnabled()` gate (off by default, as on Base).
+    bool public emergencyEnabled;
+
+    function setEmergencyEnabled(bool enabled) external {
+        emergencyEnabled = enabled;
+    }
+
+    /// @notice Like the real gauge: flag gate (`NE`), then only the stake owner (`NA`); skips the voter.
+    function emergencyWithdraw(uint256 tokenId) external {
+        require(emergencyEnabled, "NE");
+        require(_staked[msg.sender][tokenId], "NA");
+        _staked[msg.sender][tokenId] = false;
+    }
+
     function claimEmissions(address account, address recipient, uint256[] calldata tokenIds) external {
         require(msg.sender == account, "NA");
         for (uint256 i; i < tokenIds.length; i++) {

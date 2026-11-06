@@ -24,4 +24,6 @@ interface ICLGaugeV3 {
     function deferredEmissions(address account) external view returns (uint256);
     /// @notice Block of the position's deposit. V3-only: used to tell the gauge versions apart.
     function depositBlock(uint256 tokenId) external view returns (uint256);
+    /// @notice Returns a staked NFT without touching the LeafVoter; only while the factory enables it.
+    function emergencyWithdraw(uint256 tokenId) external;
 }

@@ -14,6 +14,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DeployLPAutoBalancerV2Pair} from "@script/DeployLPAutoBalancerV2Pair.s.sol";
 import {LPPairConfig} from "@script/LPPairConfig.sol";
 
+interface IGaugeFactoryV3 {
+    function emergencyWithdrawEnabled() external view returns (bool);
+}
+
 contract DeployPairHarness is DeployLPAutoBalancerV2Pair {
     function venue(LPPairConfig.Pair memory pair, address nfpmV1, address aeroV1)
         external
@@ -39,6 +43,7 @@ contract LPAutoBalancerV2V3Integration is Test {
     address constant V1_GAUGE = 0x61E0B10423a0009C3f83ab4313813d29437d0817; // CL10 V1 gauge (classifier control)
     address constant V3_CL10_GAUGE = 0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5; // V3 gauge of the WETH/cbBTC CL10 V3 pool
     address constant LEAF_VOTER = 0x382409fad8503FbCdbB27A4211551fa03e884078; // gauge.voter(); mints V3 emissions
+    address constant GAUGE_FACTORY = 0xf437f62053ACB121665b8fDBfeA8F214FB8E589d; // gauge.gaugeFactory()
     address constant VOTER_V3 = 0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6; // root Voter, TOKEN() == AERO_V3
     address constant V1_NFPM = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53; // V1 gauge.nft()
     address constant V1_AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631; // V1 gauge.rewardToken()
@@ -213,6 +218,35 @@ contract LPAutoBalancerV2V3Integration is Test {
         lab.claimEmissions();
         vm.prank(admin);
         lab.setGauge(address(0));
+    }
+
+    /// @notice LeafVoter outage freezes exit; once the factory flag is on, emergencyUnstake + exit recover principal.
+    function test_v3_emergencyUnstakeRecoversPrincipalWhenVoterReverts() public {
+        uint256 tokenId = _bootstrap();
+        _accrue();
+        vm.mockCallRevert(LEAF_VOTER, abi.encodeWithSignature("settleGauge(address)"), "SETTLE_DOWN");
+        address to = makeAddr("exitTo");
+        vm.prank(admin);
+        vm.expectRevert(bytes("SETTLE_DOWN"));
+        lab.exit(to);
+        vm.mockCall(GAUGE_FACTORY, abi.encodeWithSignature("emergencyWithdrawEnabled()"), abi.encode(true));
+        vm.prank(admin);
+        lab.emergencyUnstake();
+        assertEq(INonfungiblePositionManager(NFPM).ownerOf(tokenId), address(lab), "NFT back on the balancer");
+        assertFalse(lab.getDecisionSnapshot().mainStaked, "stake flag cleared");
+        vm.prank(admin);
+        lab.exit(to);
+        assertGt(IERC20(WETH).balanceOf(to), 0, "WETH principal recovered");
+        assertGt(IERC20(CBBTC).balanceOf(to), 0, "cbBTC principal recovered");
+    }
+
+    /// @notice Control: with the factory flag off (as on Base), emergencyUnstake reverts with the gauge's `NE`.
+    function test_v3_emergencyUnstakeRevertsWhileFlagOff() public {
+        _bootstrap();
+        assertFalse(IGaugeFactoryV3(GAUGE_FACTORY).emergencyWithdrawEnabled(), "flag off at the pin");
+        vm.prank(admin);
+        vm.expectRevert(bytes("NE"));
+        lab.emergencyUnstake();
     }
 
     /// @notice `exit` deactivates the balancer; emissions deferred by its withdraw stay claimable.

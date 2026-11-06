@@ -155,11 +155,23 @@ library LPPositionLib {
 
     /// @notice Claim the staked legs' AERO into this contract (DELEGATECALL; the caller measures it).
     /// @dev V1: `getReward` per staked leg. V3: one `claimEmissions(this, this, ids)`, which also sweeps
-    ///      deferred emissions, and still runs with empty `ids` while any are deferred.
-    function claimRewards(address gauge, uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
-        public
-    {
+    ///      deferred emissions, and still runs with empty `ids` while any are deferred. `emergency`
+    ///      instead `emergencyWithdraw`s each staked leg (V3 only; V1 has no such function).
+    function claimRewards(
+        address gauge,
+        uint256 mainTokenId,
+        bool mainStaked,
+        uint256 altTokenId,
+        bool altStaked,
+        bool emergency
+    ) public {
         uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (emergency) {
+            for (uint256 i; i < ids.length; i++) {
+                ICLGaugeV3(gauge).emergencyWithdraw(ids[i]);
+            }
+            return;
+        }
         if (isV3Gauge(gauge)) {
             // The gauge reverts `NS` on an empty list with nothing deferred.
             if (ids.length > 0 || ICLGaugeV3(gauge).deferredEmissions(address(this)) > 0) {

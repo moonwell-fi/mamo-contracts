@@ -593,6 +593,16 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit Unstaked(tokenId, p.gauge);
     }
 
+    /// @notice V3 escape hatch for a LeafVoter that blocks `withdraw`: pulls each staked leg back via
+    ///         `emergencyWithdraw` (needs the gauge factory's flag on; forfeits pending emissions). A V1
+    ///         gauge has no such function, so a staked V1 leg reverts. Then `exit`/`withdrawPosition` work.
+    function emergencyUnstake() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        ManagedPositionV2 storage p = position;
+        _gaugeLegs(p, true);
+        p.mainStaked = false;
+        p.altStaked = false;
+    }
+
     /// @notice Emergency exit: unstake (skimming AERO to feeCollector), collect fees, remove all
     ///         liquidity, burn both NFTs, and transfer the resulting token0/token1 balances to `to`.
     ///         Marks the position inactive. Use when the Safe needs to fully tear down a position in one
@@ -656,7 +666,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (!p.active && p.gauge == address(0)) revert NotActive();
         // Snapshot AERO balance before claiming, then forward the net gain.
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        _claimRewards(p);
+        _gaugeLegs(p, false);
         uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
         if (aeroEarned > 0) {
             IERC20(AERO).safeTransfer(p.feeCollector, aeroEarned);
@@ -664,9 +674,9 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         }
     }
 
-    /// @dev Harvest the staked legs' AERO into this contract (V1 or V3 gauge; no unstake).
-    function _claimRewards(ManagedPositionV2 storage p) private {
-        LPPositionLib.claimRewards(p.gauge, p.mainTokenId, p.mainStaked, p.altTokenId, p.altStaked);
+    /// @dev Harvest the staked legs' AERO into this contract, or (`emergency`) emergency-withdraw them.
+    function _gaugeLegs(ManagedPositionV2 storage p, bool emergency) private {
+        LPPositionLib.claimRewards(p.gauge, p.mainTokenId, p.mainStaked, p.altTokenId, p.altStaked, emergency);
     }
 
     /// @notice Live underlying token0 — read by the compound module (survives setPool).
@@ -704,7 +714,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         ManagedPositionV2 storage p = position;
         if (!p.active) revert NotActive();
 
-        _claimRewards(p);
+        _gaugeLegs(p, false);
 
         uint256 aero = IERC20(AERO).balanceOf(address(this));
         if (aero == 0) revert NothingToCompound();
@@ -809,11 +819,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // unconditionally, while `valueInUsd` reads a leg's feed only when that leg's amount is
         // non-zero. So a fully single-sided unwind can be blocked on a feed the rebuild would never
         // have touched. Fail-closed and deliberate; the alternative is a conditional probe that
-        // duplicates the valuation's branch logic on the balancer's last ~220 bytes.
+        // duplicates the valuation's branch logic on the balancer's last 4 bytes.
         // Two direct `_readFeed` calls, deliberately: routing this through a single
         // `LPValuationLib.probeFeeds(cfg)` helper reads better but measures WORSE (+34 bytes on the
         // balancer), because materialising the six-field OracleConfig in memory costs more than the
-        // second external call it saves. The balancer is ~220 bytes under EIP-170; that trade is
+        // second external call it saves. The balancer is 4 bytes under EIP-170; that trade is
         // not available here.
         _readFeed(p.oracle0, maxOracleDelay0);
         _readFeed(p.oracle1, maxOracleDelay1);
