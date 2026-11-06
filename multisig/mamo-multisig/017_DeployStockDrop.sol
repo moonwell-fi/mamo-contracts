@@ -181,8 +181,9 @@ contract DeployStockDrop is SlippagePriceCheckerHardening {
 
     function _deployStakingStrategy() internal {
         if (!addresses.isAddressSet(STAKING_IMPL_KEY)) {
-            // Accounts live on two V1 registries (the live factory's and the deprecated factory's); an upgraded
-            // account migrates itself from either to the V2 registry on its first call
+            // An upgraded account migrates itself from its V1 registry to the V2 registry on its first call. Only the
+            // live factory's accounts (type id 3, on MAMO_STAKING_REGISTRY) can upgrade to it; the deprecated
+            // factory's (type id 2) cannot today, and their registry is listed so a later whitelist needs no redeploy
             vm.startBroadcast(addresses.getAddress("DEPLOYER_EOA"));
             MamoStakingStrategyV2 implementation = new MamoStakingStrategyV2(
                 addresses.getAddress("MAMO_STAKING_REGISTRY"),

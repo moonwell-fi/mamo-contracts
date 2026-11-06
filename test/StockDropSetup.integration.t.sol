@@ -38,8 +38,10 @@ interface ILiveStakingStrategy {
 ///         upgrades and repoints itself, a drop tops up the running streams and starts WETH and USDC ones, the account
 ///         compounds all three through the live pools, an account left on V1 parks the new tokens until its upgrade
 ///         sweeps them, and a v2 stock account pays its fee to DropAutomationV2.
-/// @dev The B20 stocks cannot execute in revm (code 0xEF), so their drop, compound and reinvest legs are covered by
-///      the unit suites. Self-forks at a pinned block, so it runs without --fork-url.
+/// @dev The B20 stocks cannot execute in revm (code 0xEF). 006 etches MockERC20Decimals onto them in preBuildMock, so
+///      every stock leg here (the 12 streams, the compound sweep's stock sales, the NVDAc reinvest and all their gas
+///      figures) runs against that mock and real B20 gas is unmeasured. Self-forks at a pinned block, so it runs
+///      without --fork-url.
 contract StockDropSetupTest is Test {
     /// @dev After 019 (52,830,279) and 021 (53,132,330); v1's USDC/AERO gauge is killed, the cbBTC stream is running
     uint256 internal constant PINNED_BLOCK = 53_200_000;
@@ -196,15 +198,65 @@ contract StockDropSetupTest is Test {
         assertEq(usdcFinish, block.timestamp + 7 days, "USDC stream started");
     }
 
+    /// @dev The catch floor is load-bearing in compound: without it a starved swap is caught, the reward is held on the
+    ///      account and the call still succeeds. The account is given every reward token first, because the gap a
+    ///      floor of 0 leaves open needs a cheap tail after the starved leg: with the three streamed tokens alone no
+    ///      cap under the full cost completes. Then sweeps gas caps around the full cost, 10k apart, so that gap
+    ///      (measured with the floor at 0: 60k wide, 120k to 170k under the full cost, where the last stock's swap
+    ///      starves and the restake still fits) cannot slip between two caps; every capped success must leave the
+    ///      account exactly as the uncapped compound does. Runs at the first compound because a longer warp makes
+    ///      the fork's cbBTC/USD round stale and that leg is held either way.
     function _proveCompound(address account) internal {
+        MamoStakingStrategyV2 strategy = MamoStakingStrategyV2(payable(account));
         IMultiRewards multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
+        address backend = addresses.getAddress("STRATEGY_MULTICALL");
         uint256 stakedBefore = multiRewards.balanceOf(account);
 
         skip(30 minutes);
-        _compound(account);
+        uint256 deadline = block.timestamp + 10 minutes;
+        uint256 beforeStocks = vm.snapshotState();
 
-        assertGt(multiRewards.balanceOf(account), stakedBefore, "MAMO and swapped cbBTC restaked");
-        _assertNothingHeld(account);
+        address[] memory stocks = _stocks();
+        for (uint256 i = 0; i < stocks.length; i++) {
+            deal(stocks[i], account, 1e8);
+        }
+        // The fork's stock TWAPs sit further from spot than the 1% default allows, a property of the pinned market
+        // data, not of the code: widen the account to the registry maximum so every stock leg swaps
+        uint256 maxSlippage =
+            MamoStakingRegistryV2(addresses.getAddress("MAMO_STAKING_REGISTRY_V2")).MAX_SLIPPAGE_IN_BPS();
+        vm.prank(user);
+        strategy.setAccountSlippage(maxSlippage);
+        uint256 loaded = vm.snapshotState();
+
+        vm.prank(backend);
+        uint256 gasBefore = gasleft();
+        strategy.compound(deadline);
+        uint256 fullCost = gasBefore - gasleft();
+        uint256 staked = multiRewards.balanceOf(account);
+        assertGt(staked, stakedBefore, "MAMO, the swapped streams and the swapped stocks restaked");
+        _assertNothingHeld(account, "Full compound");
+
+        uint256 successes;
+        uint256 reverts;
+        for (uint256 cap = fullCost - 600_000; cap <= fullCost + fullCost / 20; cap += 10_000) {
+            vm.revertToState(loaded);
+            vm.prank(backend);
+            try strategy.compound{gas: cap}(deadline) {
+                _assertNothingHeld(account, "Capped compound");
+                assertEq(multiRewards.balanceOf(account), staked, "A capped compound restakes what the full one does");
+                successes++;
+            } catch {
+                reverts++;
+            }
+        }
+        assertGt(successes, 0, "The sweep reached a successful cap");
+        assertGt(reverts, 0, "The sweep started below the cost");
+
+        // The sweep's stock sales move the pools the rest of the lifecycle swaps through: continue from before them
+        vm.revertToState(beforeStocks);
+        _compound(account);
+        assertGt(multiRewards.balanceOf(account), stakedBefore, "MAMO and the swapped streams restaked");
+        _assertNothingHeld(account, "Compound of the streams");
     }
 
     /// @dev V1 swaps only the old registry's cbBTC, so WETH and USDC wait on the account for its upgrade
@@ -224,7 +276,7 @@ contract StockDropSetupTest is Test {
         _compound(account);
 
         assertGt(multiRewards.balanceOf(account), stakedBefore, "Parked tokens restaked as MAMO");
-        _assertNothingHeld(account);
+        _assertNothingHeld(account, "Upgraded V1 account");
     }
 
     /// @dev The upgrade alone leaves the account on the V1 registry, whose missing price checker would make every
@@ -255,10 +307,33 @@ contract StockDropSetupTest is Test {
         MamoStakingStrategyV2(payable(account)).compound(block.timestamp + 10 minutes);
     }
 
-    function _assertNothingHeld(address account) internal view {
-        assertEq(IERC20(addresses.getAddress("cbBTC")).balanceOf(account), 0, "cbBTC swapped, not held");
-        assertEq(IERC20(addresses.getAddress("WETH")).balanceOf(account), 0, "WETH swapped, not held");
-        assertEq(IERC20(addresses.getAddress("USDC")).balanceOf(account), 0, "USDC swapped, not held");
+    /// @dev Every V2 reward token: the three streams and the 12 stocks
+    function _assertNothingHeld(address account, string memory when) internal view {
+        MamoStakingRegistryV2 registry = MamoStakingRegistryV2(addresses.getAddress("MAMO_STAKING_REGISTRY_V2"));
+        MamoStakingRegistryV2.RewardToken[] memory rewardTokens = registry.getRewardTokens();
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            address token = rewardTokens[i].token;
+            assertEq(IERC20(token).balanceOf(account), 0, string.concat(when, ": held ", vm.toString(token)));
+        }
+    }
+
+    /// @dev The V2 registry's reward tokens that are not a stream: the 12 listed stocks
+    function _stocks() internal view returns (address[] memory stocks) {
+        MamoStakingRegistryV2 registry = MamoStakingRegistryV2(addresses.getAddress("MAMO_STAKING_REGISTRY_V2"));
+        MamoStakingRegistryV2.RewardToken[] memory rewardTokens = registry.getRewardTokens();
+        address cbBtc = addresses.getAddress("cbBTC");
+        address weth = addresses.getAddress("WETH");
+        address usdc = addresses.getAddress("USDC");
+        stocks = new address[](rewardTokens.length);
+        uint256 n;
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
+            address token = rewardTokens[i].token;
+            if (token == cbBtc || token == weth || token == usdc) continue;
+            stocks[n++] = token;
+        }
+        assembly {
+            mstore(stocks, n)
+        }
     }
 
     /// @dev Created by the live v2 factory the app uses
@@ -316,6 +391,7 @@ contract StockDropSetupTest is Test {
         strategy.reinvest(destinations);
         uint256 fullCost = gasBefore - gasleft();
         assertEq(IERC20(NVDAC).balanceOf(account), 0, "Reinvest deposits the stock with enough gas");
+        // A margin check on the constant, not a behavioural proof; the compound sweep above is where the floor shows
         assertLt(fullCost, 64 * strategy.CATCH_GAS_FLOOR() / 8, "Floor margin: a stock deposit under 64 * floor / d");
 
         uint256 successes;

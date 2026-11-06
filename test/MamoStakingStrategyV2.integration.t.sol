@@ -124,7 +124,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
     }
 
     /// @dev Widens this strategy's slippage to the protocol maximum.
-    ///      On the pinned fork the Aerodrome cbBTC/MAMO pool price sits further than the 1% default
+    ///      On the fork the Aerodrome cbBTC/MAMO pool price sits further than the 1% default
     ///      from the BTC/USD ÷ MAMO/USD Chainlink pair, so a real swap cannot clear a 1% floor. That
     ///      is a property of the fork's market data, not of the code under test; every test that
     ///      actually swaps therefore opts into the widest slippage the registry permits.

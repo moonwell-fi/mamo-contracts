@@ -427,6 +427,17 @@ contract MamoStakingStrategyV2UnitTest is Test {
         vm.prank(user);
         viaOwner.withdrawRewards();
         assertEq(address(viaOwner.stakingRegistry()), address(target));
+
+        MamoStakingStrategyV2 viaWithdrawAll = _account(address(0), address(registry), address(target));
+        mamo.mint(user, 1e18);
+        vm.startPrank(user);
+        mamo.approve(address(viaWithdrawAll), 1e18);
+        viaWithdrawAll.deposit(1e18);
+        vm.expectEmit(address(viaWithdrawAll));
+        emit MamoStakingStrategyV2.StakingRegistryUpdated(address(registry), address(target));
+        viaWithdrawAll.withdrawAll();
+        vm.stopPrank();
+        assertEq(address(viaWithdrawAll.stakingRegistry()), address(target));
     }
 
     function test_migrateStakingRegistry_leavesOtherAccountsAlone() public {

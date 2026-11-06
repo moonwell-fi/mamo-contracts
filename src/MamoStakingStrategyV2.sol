@@ -63,11 +63,14 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      */
     uint256 public constant MAX_REGISTRY_SLIPPAGE_IN_BPS = 2500;
 
-    /// @notice The two V1 registries live accounts were born on; an account still on either is moved to
-    ///         MIGRATION_REGISTRY by its first backend or owner call after the upgrade
+    /// @notice The V1 registries accounts were born on; an account still on either is moved to MIGRATION_REGISTRY
+    ///         by its first backend or owner call after the upgrade
     /// @dev upgradeStrategy upgrades with empty calldata, so without this an upgraded account keeps its V1
     ///      registry, whose missing slippagePriceChecker() makes every compound hold the reward instead of
     ///      swapping it, while the transaction still succeeds. Zero disables the migration (unit tests).
+    ///      Only accounts of the live factory (type id 3) can upgrade to this implementation today; the deprecated
+    ///      factory's accounts (type id 2, on LEGACY_REGISTRY_B) cannot, and B is kept so a later whitelist under
+    ///      their type id needs no redeploy.
     address public immutable LEGACY_REGISTRY_A;
     address public immutable LEGACY_REGISTRY_B;
     address public immutable MIGRATION_REGISTRY;
@@ -445,8 +448,8 @@ contract MamoStakingStrategyV2 is Initializable, UUPSUpgradeable, BaseStrategy {
      * @dev Claims every MultiRewards reward but forwards only the tokens the staking registry lists.
      *      MamoStakingRegistryV2 refuses to list MAMO, so MAMO paid by getReward() stays here until compound or
      *      reinvest stakes it, withdrawAll transfers it, or recoverERC20 recovers it. A reward token missing
-     *      from the registry (e.g. on a strategy still pointed at the deprecated registry) stays here too,
-     *      until it is listed, the strategy is repointed with setStakingRegistry, or it is recovered.
+     *      from the registry (e.g. on a strategy pointed at a custom registry) stays here too, until it is
+     *      listed, the strategy is repointed with setStakingRegistry, or it is recovered.
      */
     function withdrawRewards() external onlyOwner {
         _migrateStakingRegistry();
