@@ -676,7 +676,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @dev Harvest the staked legs' AERO into this contract, or (`emergency`) emergency-withdraw them.
     function _gaugeLegs(ManagedPositionV2 storage p, bool emergency) private {
-        LPPositionLib.claimRewards(p.gauge, p.mainTokenId, p.mainStaked, p.altTokenId, p.altStaked, emergency);
+        LPPositionLib.gaugeLegs(p.gauge, p.mainTokenId, p.mainStaked, p.altTokenId, p.altStaked, emergency);
     }
 
     /// @notice Live underlying token0 — read by the compound module (survives setPool).
@@ -819,7 +819,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // unconditionally, while `valueInUsd` reads a leg's feed only when that leg's amount is
         // non-zero. So a fully single-sided unwind can be blocked on a feed the rebuild would never
         // have touched. Fail-closed and deliberate; the alternative is a conditional probe that
-        // duplicates the valuation's branch logic on the balancer's last 4 bytes.
+        // duplicates the valuation's branch logic with 4 bytes of headroom left.
         // Two direct `_readFeed` calls, deliberately: routing this through a single
         // `LPValuationLib.probeFeeds(cfg)` helper reads better but measures WORSE (+34 bytes on the
         // balancer), because materialising the six-field OracleConfig in memory costs more than the

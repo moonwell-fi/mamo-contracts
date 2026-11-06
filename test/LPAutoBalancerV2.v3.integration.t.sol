@@ -14,6 +14,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DeployLPAutoBalancerV2Pair} from "@script/DeployLPAutoBalancerV2Pair.s.sol";
 import {LPPairConfig} from "@script/LPPairConfig.sol";
 
+interface ILeafVoterStatus {
+    function setChainStatus(uint8 status) external;
+}
+
 interface IGaugeFactoryV3 {
     function emergencyWithdrawEnabled() external view returns (bool);
 }
@@ -44,6 +48,7 @@ contract LPAutoBalancerV2V3Integration is Test {
     address constant V3_CL10_GAUGE = 0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5; // V3 gauge of the WETH/cbBTC CL10 V3 pool
     address constant LEAF_VOTER = 0x382409fad8503FbCdbB27A4211551fa03e884078; // gauge.voter(); mints V3 emissions
     address constant GAUGE_FACTORY = 0xf437f62053ACB121665b8fDBfeA8F214FB8E589d; // gauge.gaugeFactory()
+    address constant CHAIN_STATUS_ADMIN = 0x42255e3C2d0b71a0b006243148fdF1a71d054cE0; // LeafVoter CHAIN_STATUS_ROLE
     address constant VOTER_V3 = 0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6; // root Voter, TOKEN() == AERO_V3
     address constant V1_NFPM = 0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53; // V1 gauge.nft()
     address constant V1_AERO = 0x940181a94A35A4569E4529A3CDfB74e38FD98631; // V1 gauge.rewardToken()
@@ -216,6 +221,46 @@ contract LPAutoBalancerV2V3Integration is Test {
         lab.setGauge(address(0));
         vm.prank(rebalancer);
         lab.claimEmissions();
+        vm.prank(admin);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice A paused LeafVoter chain refuses every mint, so the deferred guard lets setGauge re-point.
+    function test_v3_deferredGuardSkippedWhenChainPaused() public {
+        _bootstrap();
+        _accrue();
+        vm.prank(CHAIN_STATUS_ADMIN);
+        ILeafVoterStatus(LEAF_VOTER).setChainStatus(2); // Paused
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertGt(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "paused mint deferred");
+        vm.prank(rebalancer);
+        vm.expectRevert(bytes4(keccak256("ChainNotActiveOrSunset()")));
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        (,,,,,, address gauge,,,,,,,,,,,,,,) = lab.position();
+        assertEq(gauge, address(0), "re-pointed");
+    }
+
+    /// @notice An old gauge the voter reports unregistered can never mint, so setGauge may re-point.
+    function test_v3_deferredGuardSkippedWhenGaugeUnregistered() public {
+        _bootstrap();
+        _accrue();
+        vm.mockCallRevert(
+            LEAF_VOTER, abi.encodeWithSignature("mintEmissions(address[],uint128[])"), "GaugeNotRegistered"
+        );
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertGt(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "withdraw-time mint deferred");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+        vm.mockCall(
+            LEAF_VOTER,
+            abi.encodeWithSignature("gaugeStates(address)", GAUGE),
+            abi.encode(0, 0, 0, false, true, 0, 0, 0, 0, 0, 0, 0)
+        );
         vm.prank(admin);
         lab.setGauge(address(0));
     }

@@ -94,6 +94,8 @@ library LPPositionLib {
     /// @dev Redeclared so `skimFees` logs the same topic as LPAutoBalancerV2.FeesSkimmed (event topic
     ///      is keccak of the signature; emitted from the balancer's address under DELEGATECALL).
     event FeesSkimmed(uint256 amount0, uint256 amount1);
+    /// @dev Redeclared so the emergency path logs LPAutoBalancerV2.Unstaked.
+    event Unstaked(uint256 indexed tokenId, address gauge);
 
     /// @dev Cross-validate a position config's pool descriptor and NFT binding (extracted from the
     ///      balancer's _validateAndStore for EIP-170 headroom; runs under DELEGATECALL so
@@ -135,14 +137,33 @@ library LPPositionLib {
         public
         view
     {
-        // Re-pointing away from a V3 gauge would strand its deferred emissions: claimEmissions() first.
-        if (isV3Gauge(oldGauge) && ICLGaugeV3(oldGauge).deferredEmissions(address(this)) > 0) {
+        // Re-pointing would strand the old V3 gauge's deferred emissions; claim first, unless its mint is dead.
+        if (isV3Gauge(oldGauge) && ICLGaugeV3(oldGauge).deferredEmissions(address(this)) > 0 && _voterCanMint(oldGauge))
+        {
             revert DeferredEmissionsPending();
         }
         if (gauge == address(0)) return;
         if (!isV3Gauge(gauge) && ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
         if (ICLGauge(gauge).pool() != pool || ICLPool(pool).gauge() != gauge) revert PoolMismatch();
         if (ICLGauge(gauge).nft() != positionManager) revert PoolMismatch();
+    }
+
+    /// @dev False only when the gauge's LeafVoter reads back that it would refuse the mint: gauge not
+    ///      registered, or chain status not Active (1) / Sunset (4). Any failed read returns true (fail closed).
+    function _voterCanMint(address gauge) private view returns (bool) {
+        (bool ok, bytes memory r) = gauge.staticcall(abi.encodeWithSignature("voter()"));
+        if (!ok || r.length < 32) return true;
+        address voter = abi.decode(r, (address));
+        (ok, r) = voter.staticcall(abi.encodeWithSignature("gaugeStates(address)", gauge));
+        if (!ok || r.length < 128) return true;
+        uint256 registered;
+        assembly {
+            registered := mload(add(r, 128)) // 4th return word: `_isRegistered`
+        }
+        (ok, r) = voter.staticcall(abi.encodeWithSignature("chainStatus()"));
+        if (!ok || r.length < 32) return true;
+        uint256 status = abi.decode(r, (uint256));
+        return registered != 0 && (status == 1 || status == 4);
     }
 
     /// @notice True for a Slipstream V3 CLGauge, identified by its V3-only `depositBlock(uint256)` view.
@@ -153,11 +174,10 @@ library LPPositionLib {
         return ok && ret.length == 32;
     }
 
-    /// @notice Claim the staked legs' AERO into this contract (DELEGATECALL; the caller measures it).
-    /// @dev V1: `getReward` per staked leg. V3: one `claimEmissions(this, this, ids)`, which also sweeps
-    ///      deferred emissions, and still runs with empty `ids` while any are deferred. `emergency`
-    ///      instead `emergencyWithdraw`s each staked leg (V3 only; V1 has no such function).
-    function claimRewards(
+    /// @notice Claim the staked legs' AERO into this contract (V1 `getReward` per leg; V3 one `claimEmissions`
+    ///         that also sweeps deferred emissions), or with `emergency` `emergencyWithdraw` each leg (V3 only).
+    ///         Runs under DELEGATECALL; the caller measures the AERO delta.
+    function gaugeLegs(
         address gauge,
         uint256 mainTokenId,
         bool mainStaked,
@@ -169,6 +189,7 @@ library LPPositionLib {
         if (emergency) {
             for (uint256 i; i < ids.length; i++) {
                 ICLGaugeV3(gauge).emergencyWithdraw(ids[i]);
+                emit Unstaked(ids[i], gauge);
             }
             return;
         }

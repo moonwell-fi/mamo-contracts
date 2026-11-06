@@ -5,7 +5,7 @@ import {LPSequencerFeedMock} from "./LPValuationLib.unit.t.sol";
 import {MockERC20} from "./MockERC20.sol";
 import {LPAutoBalancerV2Harness} from "./harness/LPAutoBalancerV2Harness.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
-import {MockCLGaugeV3} from "./mocks/MockCLGaugeV3.sol";
+import {MockCLGaugeV3, MockLeafVoter} from "./mocks/MockCLGaugeV3.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
@@ -2001,6 +2001,10 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(rebalancer);
         lab.stake();
         v3.setEmergencyEnabled(true);
+        vm.expectEmit(true, false, false, true, address(lab));
+        emit LPAutoBalancerV2.Unstaked(TOKEN_ID, address(v3));
+        vm.expectEmit(true, false, false, true, address(lab));
+        emit LPAutoBalancerV2.Unstaked(ALT_TOKEN_ID, address(v3));
         vm.prank(admin);
         lab.emergencyUnstake();
         (bool mainStaked, bool altStaked) = _readStakeFlags();
@@ -2037,6 +2041,67 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         lab.setGauge(address(0));
         assertEq(lab.exposed_position().gauge, address(0), "re-pointed once deferred is claimed");
+    }
+
+    /// @dev Registered V3 gauge holding 4e18 deferred, with a readable LeafVoter in the given state.
+    function _deferredWithVoter(bool registered, uint8 chainStatus) internal {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        MockLeafVoter voter = new MockLeafVoter();
+        voter.set(registered, chainStatus);
+        v3.setVoter(address(voter));
+        v3.setDeferred(address(lab), 4e18);
+    }
+
+    /// @notice The guard holds while the voter would mint (registered, chain Active).
+    function test_v3Gauge_deferredGuardHoldsWhileVoterCanMint() public {
+        _deferredWithVoter(true, 1);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice The guard also holds on a Sunset chain, which still mints.
+    function test_v3Gauge_deferredGuardHoldsOnSunsetChain() public {
+        _deferredWithVoter(true, 4);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice An unregistered old gauge can never mint, so re-pointing is allowed despite deferred > 0.
+    function test_v3Gauge_deferredGuardSkippedWhenGaugeUnregistered() public {
+        _deferredWithVoter(false, 1);
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed");
+    }
+
+    /// @notice A Paused/Suspended chain refuses every mint, so re-pointing is allowed despite deferred > 0.
+    function test_v3Gauge_deferredGuardSkippedWhenChainNotMinting() public {
+        _deferredWithVoter(true, 3);
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed");
+    }
+
+    /// @notice registerPosition after a withdraw is guarded too (its own path through _validateAndStore).
+    function test_v3Gauge_registerRevertsWhileDeferredPending() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(admin);
+        lab.withdrawPosition(makeAddr("to"));
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.registerPosition(cfg);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.registerPosition(cfg);
+        assertTrue(lab.exposed_position().active, "registered once deferred is claimed");
     }
 
     /// @notice setPool after exit refuses to drop a V3 gauge holding deferred emissions.

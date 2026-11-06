@@ -4,6 +4,25 @@ pragma solidity 0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/// @notice LeafVoter stand-in: the `gaugeStates` tuple (Point flattened, same ABI) and `chainStatus`.
+contract MockLeafVoter {
+    bool public registered = true;
+    uint8 public chainStatus = 1; // Active
+
+    function set(bool registered_, uint8 chainStatus_) external {
+        registered = registered_;
+        chainStatus = chainStatus_;
+    }
+
+    function gaugeStates(address)
+        external
+        view
+        returns (uint128, uint128, uint48, bool, bool, uint128, uint256, uint256, int128, int128, uint48, uint128)
+    {
+        return (0, 0, 0, registered, true, 0, 0, 0, 0, 0, 0, 0);
+    }
+}
+
 /// @notice Minimal mock of the Slipstream V3 CLGauge surface: no `rewardToken()`, no `getReward`,
 ///         no `earned(address,uint256)`. Claims go through `claimEmissions(account, recipient, ids)`,
 ///         which, like the real gauge, requires `msg.sender == account`, every id staked, and a
@@ -65,6 +84,13 @@ contract MockCLGaugeV3 {
         require(_staked[msg.sender][tokenId], "NA");
         _staked[msg.sender][tokenId] = false;
         if (aeroPerId > 0) IERC20(emissionToken).safeTransfer(msg.sender, aeroPerId);
+    }
+
+    /// @notice The LeafVoter the balancer reads `gaugeStates`/`chainStatus` from (unset = unreadable).
+    address public voter;
+
+    function setVoter(address voter_) external {
+        voter = voter_;
     }
 
     /// @notice Mirrors the factory's `emergencyWithdrawEnabled()` gate (off by default, as on Base).
