@@ -37,7 +37,8 @@ contract DeployLPAutoBalancerV2Pair is Script {
     // book-backed suites pin, and the book checks every entry's code when it is built.
     address internal constant NFPM_V3 = 0x4857DB576eE0e45F10525eC59527BfD10beeC60b;
     address internal constant AERO_V3 = 0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee;
-    /// @dev Root Voter minting V3 emissions; nothing reachable from `gauge.voter()` names it.
+    /// @dev Root Voter whose TOKEN()/MINTER() name the V3 AERO (the LeafVoter mints it). Nothing
+    ///      reachable from `gauge.voter()` names the token, so it is pinned here.
     address internal constant VOTER_V3 = 0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6;
 
     function run() public returns (LPAutoBalancerV2 lab, LPCompoundModule module) {

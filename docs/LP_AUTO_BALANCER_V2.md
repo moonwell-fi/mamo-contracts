@@ -28,8 +28,8 @@ Reward AERO (from gauge staking) is a third, non-principal asset: it is either d
 | `DEFAULT_ADMIN_ROLE` | F-MAMO Safe | register/deregister/withdraw/exit, `setPool`, `setGauge`, `setOracles`, `setFeeCollector`, `setCompoundModule`, `setSwapLossAllowanceBps`, `recoverERC20` |
 | `GUARDIAN_ROLE` | F-MAMO Safe | `pause()` / `unpause()` |
 | `MANAGER_ROLE` | Safe (op key optional) | `setPositionConfig` (widths, calm-gate params, loss cap, cooldown) |
-| `REBALANCER_ROLE` | backend EOA (hot key) | `rebalanceUsingAlt`, `unwindForSwap`, `rebuildAfterSwap`, `stake`, `unstake`, `compound` |
-| — (permissionless) | anyone | `collectFees`, `claimEmissions`, `getDecisionSnapshot` |
+| `REBALANCER_ROLE` | backend EOA (hot key) | `rebalanceUsingAlt`, `unwindForSwap`, `rebuildAfterSwap`, `stake`, `unstake`, `compound`, `claimEmissions` |
+| — (permissionless) | anyone | `collectFees`, `getDecisionSnapshot` |
 
 Trust envelope: the hot rebalancer key can shift value only within the haircut the Safe configured — `maxRebalanceLossBps` (≤ 500) per rebalance, plus `swapLossAllowanceBps` (≤ 500) on the swap path, with CowSwap orders additionally price-floored by the module's `rebalanceSlippageBps` against Chainlink. All unbounded value movement (exit destinations, fee collector, config) is Safe-only. `exit()` is the escape hatch: admin-gated, **not** pausable, callable mid-flight.
 
@@ -56,7 +56,7 @@ stateDiagram-v2
 ```
 
 Notes:
-- `registerPosition`/`setPool` share one validation path (`_validateAndStore` → `LPPositionLib.validateGauge` + `validatePoolAndNft`): pool descriptor ↔ live pool, NFT ownership + NFT ↔ pool binding, gauge rewards AERO + gauge ↔ pool binding, width bounds (incl. the `int24.max` cap).
+- `registerPosition`/`setPool` share one validation path (`_validateAndStore` → `LPPositionLib.validateGauge` + `validatePoolAndNft`): pool descriptor ↔ live pool, NFT ownership + NFT ↔ pool binding, gauge ↔ pool binding from both sides (`gauge.pool()`, `pool.gauge()`) + `gauge.nft()` == the balancer's position manager + (V1 only) gauge rewards AERO, width bounds (incl. the `int24.max` cap).
 - `deregisterPosition` is pure bookkeeping transfer (reverts if staked); `withdrawPosition` rescues in one call (auto-unstakes); `exit` additionally liquidates to tokens and sweeps — see 3.2 for its mid-flight role.
 
 ### 3.2 Machine B — rebalance window (operational plane)
@@ -113,7 +113,7 @@ stateDiagram-v2
 
 **Compound** — `compound(compoundBps)`: harvests AERO, drops `1 − compoundBps` to the feeCollector, forwards the compound share to the module; the backend then posts reward-only AERO→WETH / AERO→cbBTC orders (module `isValidSignature`, `allowedSlippageInBps`). Proceeds land on the **balancer** as loose balance and fold at the next rebuild.
 
-**Fees/emissions** — `collectFees` (unstaked; both legs) and `claimEmissions` (staked) are permissionless skims to the feeCollector.
+**Fees/emissions** — `collectFees` (permissionless; unstaked; both legs) and `claimEmissions` (rebalancer; the staked legs plus, on V3, deferred emissions, also while unstaked or inactive) skim to the feeCollector.
 
 ## 5. Backend integration (summary — the spec is the contract)
 
@@ -158,8 +158,10 @@ cooldownRemaining, deviationGateOpen, rebalanceInFlight, rebalanceStartedAt
 - The swap-rebalance floor spans two transactions: donations between unwind and rebuild widen apparent headroom (not extractable); slippage on commingled loose can false-revert an honest rebuild (recoverable — `exit()` or smaller sell).
 - No `AlreadyInFlight` guard on `rebalanceUsingAlt`/`stake`/`withdrawPosition`/`deregisterPosition` (role-gated; they revert deep but harmlessly; `collectFees` — the permissionless one — is guarded).
 - Module keeps a standing max AERO relayer approval (reward-only exposure; `recoverERC20` escape hatch exists on both contracts).
-- Slipstream V3 gauges: nothing reachable from `gauge.voter()` names the emission token, so the constructor `AERO` is bound off-chain. Before deploying a V3 balancer, check `Voter(0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6).TOKEN() == AERO` and `AERO.MINTER() == Voter.MINTER()`. A wrong `AERO` is recoverable (`compound` reverts `NothingToCompound`; `recoverERC20` sweeps the stray token).
-- Slipstream V3 gauges defer a withdraw's emissions when the LeafVoter mint fails (`deferredEmissions(balancer)`). `claimEmissions` sweeps them while unstaked and after `exit`/`withdrawPosition`/`deregisterPosition`, but only from the CURRENT gauge: `setGauge` and `setPool` re-point it and strand anything deferred on the old one. Before either, check `deferredEmissions(balancer) == 0` on the old gauge; if not, wait for the mint to recover and call `claimEmissions()` first.
+- Slipstream V3 gauges have no on-chain getter for the emission token: none on the gauge, the LeafVoter, its `EMISSIONS_HANDLER` or the gauge factory (probed on Base, 2026-11-06). The constructor `AERO` is therefore bound off-chain. `DeployLPAutoBalancerV2Pair` is the only deploy path that resolves V3: it checks `Voter(0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6).TOKEN() == AERO` and `AERO.MINTER() == Voter.MINTER()`. `DeployLPAutoBalancerV2` and `DeployLPAutoBalancerV2Test` hard-code the V1 venue; the balancer they build refuses a V3 gauge at registration (`PoolMismatch` on `gauge.nft()`). A wrong `AERO` registers and forwards nothing: `compound` reverts `NothingToCompound` and `recoverERC20` sweeps the stray token.
+- Slipstream V3 early-withdraw penalty: every `stake`/restake resets the gauge's `depositBlock`, and any withdraw or claim (`unstake`, `compound`, `claimEmissions`, a rebalance teardown, `exit`) inside the window forfeits 100% of the emissions accrued since. The window is `effectivePenaltyConfig(gauge)` on the gauge factory (`0xf437f62053ACB121665b8fDBfeA8F214FB8E589d`): 7 blocks at block 52,964,000, 70 on 2026-11-06, and `PENALTY_ADMIN`-tunable up to `maxMinStakeBlocks()` = 90,000. Nothing on-chain ties it to `minRebalanceInterval`. Operational rule: the keeper reads the window every cycle and keeps both `minRebalanceInterval` and its claim/compound cadence above it (at ~2 s blocks, 70 blocks is ~140 s). Principal is never affected.
+- Slipstream V3 gauges defer a withdraw's emissions when the LeafVoter mint fails (`deferredEmissions(balancer)`). `claimEmissions` sweeps them while unstaked and after `exit`/`withdrawPosition`/`deregisterPosition`. Only the CURRENT gauge is claimed, so `setGauge`, `setPool` and `registerPosition` revert `DeferredEmissionsPending` while the old V3 gauge holds any: call `claimEmissions()` first. During a mint outage that claim reverts too, so re-pointing waits for the mint to recover.
+- Slipstream V3 mint outage: `claimEmissions` and `compound` call the gauge's `claimEmissions`, which reverts while the LeafVoter mint fails. Liveness only: nothing is lost, and both work again once the mint recovers. Withdraws are not blocked (the gauge defers instead).
 
 ## Document map
 
