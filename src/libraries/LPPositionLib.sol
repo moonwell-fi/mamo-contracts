@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {ICLGauge} from "@interfaces/ICLGauge.sol";
+import {ICLGauge, ICLGaugeV3} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
 import {INonfungiblePositionManager} from "@interfaces/INonfungiblePositionManager.sol";
@@ -32,6 +32,7 @@ library LPPositionLib {
     error InvalidSellToken();
     error GaugeRewardMismatch();
     error PoolMismatch();
+    error DeferredEmissionsPending();
     error NotHeld();
     error LossCapExceeded();
     error InvalidConfig();
@@ -93,6 +94,8 @@ library LPPositionLib {
     /// @dev Redeclared so `skimFees` logs the same topic as LPAutoBalancerV2.FeesSkimmed (event topic
     ///      is keccak of the signature; emitted from the balancer's address under DELEGATECALL).
     event FeesSkimmed(uint256 amount0, uint256 amount1);
+    /// @dev Redeclared so the emergency path logs LPAutoBalancerV2.Unstaked.
+    event Unstaked(uint256 indexed tokenId, address gauge);
 
     /// @dev Cross-validate a position config's pool descriptor and NFT binding (extracted from the
     ///      balancer's _validateAndStore for EIP-170 headroom; runs under DELEGATECALL so
@@ -127,16 +130,91 @@ library LPPositionLib {
         }
     }
 
-    /// @dev Validate a gauge binding (shared by registerPosition/setPool via _validateAndStore AND
-    ///      setGauge, so the two admin paths cannot drift): a non-zero gauge must reward in `aero`
-    ///      (or staked emissions would be stranded) and must be the gauge for THIS `pool` — a valid
-    ///      AERO-rewarding gauge for a different pool would otherwise be accepted and only fail
-    ///      later, deep inside stake()/_restakeBoth on the rebalance path.
-    function validateGauge(address gauge, address pool, address aero) public view {
-        if (gauge != address(0)) {
-            if (ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
-            if (ICLGauge(gauge).pool() != pool) revert PoolMismatch();
+    /// @dev Shared by registration and setGauge: a non-zero gauge must name `pool` (and be named by it),
+    ///      accept `positionManager` NFTs, and on V1 reward in `aero`. V3 has no on-chain emission-token
+    ///      getter, so its AERO is bound off-chain by the deploy script (docs §6).
+    function validateGauge(address oldGauge, address gauge, address pool, address aero, address positionManager)
+        public
+        view
+    {
+        // Re-pointing would strand the old V3 gauge's deferred emissions; claim first, unless its voter refuses mints.
+        if (isV3Gauge(oldGauge) && ICLGaugeV3(oldGauge).deferredEmissions(address(this)) > 0 && _voterCanMint(oldGauge))
+        {
+            revert DeferredEmissionsPending();
         }
+        if (gauge == address(0)) return;
+        if (!isV3Gauge(gauge) && ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
+        if (ICLGauge(gauge).pool() != pool || ICLPool(pool).gauge() != gauge) revert PoolMismatch();
+        if (ICLGauge(gauge).nft() != positionManager) revert PoolMismatch();
+    }
+
+    /// @dev False only when the gauge's LeafVoter reads back that it would refuse the mint: gauge not
+    ///      registered, or chain status not Active (1) / Sunset (4). Any failed read returns true (fail closed).
+    function _voterCanMint(address gauge) private view returns (bool) {
+        (bool ok, bytes memory r) = gauge.staticcall(abi.encodeWithSignature("voter()"));
+        if (!ok || r.length < 32) return true;
+        address voter = abi.decode(r, (address));
+        (ok, r) = voter.staticcall(abi.encodeWithSignature("gaugeStates(address)", gauge));
+        if (!ok || r.length < 128) return true;
+        uint256 registered;
+        assembly {
+            registered := mload(add(r, 128)) // 4th return word: `_isRegistered`
+        }
+        (ok, r) = voter.staticcall(abi.encodeWithSignature("chainStatus()"));
+        if (!ok || r.length < 32) return true;
+        uint256 status = abi.decode(r, (uint256));
+        return registered != 0 && (status == 1 || status == 4);
+    }
+
+    /// @notice True for a Slipstream V3 CLGauge, identified by its V3-only `depositBlock(uint256)` view.
+    ///         A misclassified V3 gauge reverts on the V1 claim path; the snapshot's `earnedTolerant`
+    ///         reads it as 0 instead.
+    function isV3Gauge(address gauge) public view returns (bool) {
+        (bool ok, bytes memory ret) = gauge.staticcall(abi.encodeCall(ICLGaugeV3.depositBlock, (0)));
+        return ok && ret.length == 32;
+    }
+
+    /// @notice Claim the staked legs' AERO into this contract (V1 `getReward` per leg; V3 one `claimEmissions`
+    ///         that also sweeps deferred emissions), or with `emergency` `emergencyWithdraw` each leg (V3 only).
+    ///         Runs under DELEGATECALL; the caller measures the AERO delta.
+    function gaugeLegs(
+        address gauge,
+        uint256 mainTokenId,
+        bool mainStaked,
+        uint256 altTokenId,
+        bool altStaked,
+        bool emergency
+    ) public {
+        uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (emergency) {
+            for (uint256 i; i < ids.length; i++) {
+                ICLGaugeV3(gauge).emergencyWithdraw(ids[i]);
+                emit Unstaked(ids[i], gauge);
+            }
+            return;
+        }
+        if (isV3Gauge(gauge)) {
+            // The gauge reverts `NS` on an empty list with nothing deferred.
+            if (ids.length > 0 || ICLGaugeV3(gauge).deferredEmissions(address(this)) > 0) {
+                ICLGaugeV3(gauge).claimEmissions(address(this), address(this), ids);
+            }
+            return;
+        }
+        for (uint256 i; i < ids.length; i++) {
+            ICLGauge(gauge).getReward(ids[i]);
+        }
+    }
+
+    /// @dev The staked legs' token ids, main first; the alt counts only when it exists.
+    function _stakedIds(uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
+        private
+        pure
+        returns (uint256[] memory ids)
+    {
+        bool alt = altStaked && altTokenId != 0;
+        ids = new uint256[]((mainStaked ? 1 : 0) + (alt ? 1 : 0));
+        if (mainStaked) ids[0] = mainTokenId;
+        if (alt) ids[ids.length - 1] = altTokenId;
     }
 
     /// @notice Collect accrued LP fees for `tokenId` (recipient = the balancer under DELEGATECALL) and
@@ -145,14 +223,12 @@ library LPPositionLib {
     function skimFees(address positionManager, address token0, address token1, address feeCollector, uint256 tokenId)
         public
     {
-        (uint256 a0, uint256 a1) = INonfungiblePositionManager(positionManager).collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+        (uint256 a0, uint256 a1) = INonfungiblePositionManager(positionManager)
+            .collect(
+                INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
-        );
+            );
         if (a0 > 0) IERC20(token0).safeTransfer(feeCollector, a0);
         if (a1 > 0) IERC20(token1).safeTransfer(feeCollector, a1);
         emit FeesSkimmed(a0, a1);
@@ -175,20 +251,13 @@ library LPPositionLib {
         if (liq > 0) {
             pm.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId,
-                    liquidity: liq,
-                    amount0Min: amount0Min,
-                    amount1Min: amount1Min,
-                    deadline: deadline
+                    tokenId: tokenId, liquidity: liq, amount0Min: amount0Min, amount1Min: amount1Min, deadline: deadline
                 })
             );
         }
         pm.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
         );
     }
@@ -247,10 +316,9 @@ library LPPositionLib {
     }
 
     /// @notice Total AERO earned across the staked legs, tolerating a broken gauge.
-    /// @dev A leg whose `earned` reverts contributes 0 rather than bricking the read. This is a
-    ///      DIAGNOSTIC path (the off-chain agent's primary read interface) — it must stay callable
-    ///      even when the gauge misbehaves, which is why the try/catch is here rather than letting
-    ///      the whole snapshot revert.
+    /// @dev A failed `earned` reads as 0 instead of reverting: per leg on V1, for the whole read on
+    ///      V3 (one call over both legs). This is a DIAGNOSTIC path (the off-chain agent's primary
+    ///      read interface) and must stay callable while the gauge misbehaves.
     function earnedTolerant(
         address gauge,
         address owner,
@@ -259,13 +327,16 @@ library LPPositionLib {
         uint256 altTokenId,
         bool altStaked
     ) public view returns (uint256 total) {
-        if (mainStaked) {
-            try ICLGauge(gauge).earned(owner, mainTokenId) returns (uint256 e) {
-                total += e;
+        uint256[] memory ids = _stakedIds(mainTokenId, mainStaked, altTokenId, altStaked);
+        if (isV3Gauge(gauge)) {
+            // One call over both legs; V3 `earned` also counts deferred emissions, even with no legs.
+            try ICLGaugeV3(gauge).earned(owner, ids) returns (uint256 e) {
+                total = e;
             } catch {}
+            return total;
         }
-        if (altStaked && altTokenId != 0) {
-            try ICLGauge(gauge).earned(owner, altTokenId) returns (uint256 e) {
+        for (uint256 i; i < ids.length; i++) {
+            try ICLGauge(gauge).earned(owner, ids[i]) returns (uint256 e) {
                 total += e;
             } catch {}
         }
