@@ -147,9 +147,7 @@ contract LPCompoundModule is AccessControlEnumerable {
         GPv2OrderChecks.validate(
             o,
             GPv2OrderChecks.Binding({
-                orderDigest: orderDigest,
-                domainSeparator: DOMAIN_SEPARATOR,
-                expectedAppData: compoundAppData
+                orderDigest: orderDigest, domainSeparator: DOMAIN_SEPARATOR, expectedAppData: compoundAppData
             }),
             balancer,
             slippagePriceChecker,
@@ -172,7 +170,8 @@ contract LPCompoundModule is AccessControlEnumerable {
         address t1 = ILPAutoBalancerV2(balancer).token1();
         require(
             (address(o.sellToken) == t0 || address(o.sellToken) == t1)
-                && (address(o.buyToken) == t0 || address(o.buyToken) == t1) && address(o.sellToken) != address(o.buyToken),
+                && (address(o.buyToken) == t0 || address(o.buyToken) == t1)
+                && address(o.sellToken) != address(o.buyToken),
             "tokens must be distinct underlying"
         );
         require(
@@ -182,9 +181,7 @@ contract LPCompoundModule is AccessControlEnumerable {
         GPv2OrderChecks.validate(
             o,
             GPv2OrderChecks.Binding({
-                orderDigest: orderDigest,
-                domainSeparator: DOMAIN_SEPARATOR,
-                expectedAppData: compoundAppData
+                orderDigest: orderDigest, domainSeparator: DOMAIN_SEPARATOR, expectedAppData: compoundAppData
             }),
             balancer,
             slippagePriceChecker,

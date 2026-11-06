@@ -1,0 +1,49 @@
+{
+  "tokens": [
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xa3b1e3f9747065e2073722ff4c9027d3ea4994f0",
+      "source": "PoolTwap",
+      "symbol": "AAPLc",
+      "token": "0xb200000000000000000000c2e324d24d7eecd1fb"
+    },
+    {
+      "chainlinkFeed": "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F",
+      "decimals": 8,
+      "heartbeat": 3600,
+      "pool": "0x160D7E9d948B16c163332a277b393c288408eb12",
+      "source": "Chainlink",
+      "symbol": "cbBTC",
+      "token": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xb1987cad1682841b4b641d50e520777ec5ab5542",
+      "source": "PoolTwap",
+      "symbol": "GOOGLc",
+      "token": "0xb2000000000000000000002d0ba3164cc74f58b7"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xeaf57753bc382e0324a1d43f72e7027705a2273e",
+      "source": "PoolTwap",
+      "symbol": "METAc",
+      "token": "0xb2000000000000000000008bc8786b856e61707c"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9",
+      "source": "PoolTwap",
+      "symbol": "NVDAc",
+      "token": "0xb20000000000000000000078ee7ce2fE4908108C"
+    }
+  ]
+}

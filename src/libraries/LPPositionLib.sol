@@ -145,14 +145,12 @@ library LPPositionLib {
     function skimFees(address positionManager, address token0, address token1, address feeCollector, uint256 tokenId)
         public
     {
-        (uint256 a0, uint256 a1) = INonfungiblePositionManager(positionManager).collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+        (uint256 a0, uint256 a1) = INonfungiblePositionManager(positionManager)
+            .collect(
+                INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
-        );
+            );
         if (a0 > 0) IERC20(token0).safeTransfer(feeCollector, a0);
         if (a1 > 0) IERC20(token1).safeTransfer(feeCollector, a1);
         emit FeesSkimmed(a0, a1);
@@ -175,20 +173,13 @@ library LPPositionLib {
         if (liq > 0) {
             pm.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
-                    tokenId: tokenId,
-                    liquidity: liq,
-                    amount0Min: amount0Min,
-                    amount1Min: amount1Min,
-                    deadline: deadline
+                    tokenId: tokenId, liquidity: liq, amount0Min: amount0Min, amount1Min: amount1Min, deadline: deadline
                 })
             );
         }
         pm.collect(
             INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
+                tokenId: tokenId, recipient: address(this), amount0Max: type(uint128).max, amount1Max: type(uint128).max
             })
         );
     }

@@ -7,6 +7,26 @@ import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {Test} from "@forge-std/Test.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 
+import {MockChainlinkAggregator} from "./mocks/MockChainlinkAggregator.sol";
+
+/// @dev A full latestRoundData tuple, but no decimals()
+contract FeedWithoutDecimals {
+    function latestRoundData() external pure returns (uint80, int256, uint256, uint256, uint80) {
+        return (1, 1e8, 1, 1, 1);
+    }
+}
+
+/// @dev decimals() answers, but latestRoundData returns a single word
+contract FeedWithShortRound {
+    function decimals() external pure returns (uint8) {
+        return 8;
+    }
+
+    function latestRoundData() external pure returns (uint256) {
+        return 1e8;
+    }
+}
+
 /// @notice Mocks-only unit coverage for the two audit fixes on SlippagePriceChecker: the
 ///         implementation initializer lock (Sherlock #44) and the reward-token latch that made a
 ///         mistaken configuration permanent.
@@ -17,7 +37,7 @@ contract SlippagePriceCheckerUnitTest is Test {
     address public owner = makeAddr("owner");
     address public rewardToken = makeAddr("rewardToken");
     address public underlying = makeAddr("underlying");
-    address public feed = makeAddr("chainlinkFeed");
+    address public feed = address(new MockChainlinkAggregator());
 
     function setUp() public {
         implementation = new SlippagePriceChecker();
@@ -31,10 +51,15 @@ contract SlippagePriceCheckerUnitTest is Test {
     }
 
     function _configure(address from, address to, uint256 maxTime) internal {
+        _configure(from, to, maxTime, feed);
+    }
+
+    function _configure(address from, address to, uint256 maxTime, address chainlinkFeed) internal {
         ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
             new ISlippagePriceChecker.TokenFeedConfiguration[](1);
-        configs[0] =
-            ISlippagePriceChecker.TokenFeedConfiguration({chainlinkFeed: feed, reverse: false, heartbeat: 3600});
+        configs[0] = ISlippagePriceChecker.TokenFeedConfiguration({
+            chainlinkFeed: chainlinkFeed, reverse: false, heartbeat: 3600
+        });
 
         vm.startPrank(owner);
         checker.addTokenConfiguration(from, to, configs);
@@ -143,5 +168,29 @@ contract SlippagePriceCheckerUnitTest is Test {
         vm.prank(owner);
         vm.expectRevert("Token not configured");
         checker.clearRewardToken(makeAddr("neverConfigured"));
+    }
+
+    // ==================== H48: A FEED MUST ANSWER THE AGGREGATOR SURFACE ====================
+
+    function test_addTokenConfigurationRejectsAFeedWithNoCode() public {
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, makeAddr("typoFeed"));
+    }
+
+    function test_addTokenConfigurationRejectsAContractWithoutLatestRoundData() public {
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, address(implementation));
+    }
+
+    function test_addTokenConfigurationRejectsAFeedWithoutDecimals() public {
+        address noDecimals = address(new FeedWithoutDecimals());
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, noDecimals);
+    }
+
+    function test_addTokenConfigurationRejectsAShortLatestRoundData() public {
+        address shortRound = address(new FeedWithShortRound());
+        vm.expectRevert("Chainlink feed not readable");
+        _configure(rewardToken, underlying, 3600, shortRound);
     }
 }

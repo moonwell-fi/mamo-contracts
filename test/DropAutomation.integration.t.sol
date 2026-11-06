@@ -401,18 +401,10 @@ contract DropAutomationIntegrationTest is BaseTest {
         IAerodromeGauge gaugeContract = IAerodromeGauge(gauge);
         IERC20 lpToken = IERC20(stakingToken);
 
-        // Get existing staked balance from FPS setup
+        // Aerodrome killed this gauge in its Slipstream V3 move, so it takes no deposits: withdraw part of the live stake
         uint256 existingBalance = gaugeContract.balanceOf(address(dropAutomation));
-
-        // Deal and stake additional LP tokens directly to gauge for DropAutomation
-        uint256 amount = 1e18;
-        deal(stakingToken, address(this), amount);
-
-        lpToken.approve(gauge, amount);
-        gaugeContract.deposit(amount, address(dropAutomation));
-
-        uint256 stakedBalance = gaugeContract.balanceOf(address(dropAutomation));
-        assertEq(stakedBalance, existingBalance + amount, "Should have staked balance");
+        assertGt(existingBalance, 0, "DropAutomation should hold a stake in the gauge");
+        uint256 amount = existingBalance / 2;
 
         // Only owner can withdraw
         address nonOwner = makeAddr("nonOwner");
@@ -420,16 +412,14 @@ contract DropAutomationIntegrationTest is BaseTest {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
         dropAutomation.withdrawGauge(gauge, amount, makeAddr("recipient"));
 
-        // Owner withdraws the amount we just added
         address recipient = makeAddr("recipient");
         vm.prank(owner);
         dropAutomation.withdrawGauge(gauge, amount, recipient);
 
-        // Verify withdrawal - should have original balance minus what we withdrew
         assertEq(
             gaugeContract.balanceOf(address(dropAutomation)),
-            existingBalance,
-            "Staked balance should be back to original"
+            existingBalance - amount,
+            "Staked balance should drop by the withdrawal"
         );
         assertEq(lpToken.balanceOf(recipient), amount, "Recipient should receive LP tokens");
     }

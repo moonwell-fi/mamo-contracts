@@ -120,15 +120,16 @@ contract MamoLeveragedAeroStrategyFactory is AccessControl {
         strategy = Create2.deploy(0, salt, bytecode);
 
         // Initialize the account with the parameters
-        MamoLeveragedAeroStrategy(payable(strategy)).initialize(
-            MamoLeveragedAeroStrategy.InitParams({
+        MamoLeveragedAeroStrategy(payable(strategy))
+            .initialize(
+                MamoLeveragedAeroStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 strategyTypeId: strategyTypeId,
                 owner: user,
                 leveragedAeroStrategy: leveragedAeroStrategy,
                 usdc: usdc
             })
-        );
+            );
 
         // Register the account with the MamoStrategyRegistry
         mamoStrategyRegistryInterface.addStrategy(user, strategy);

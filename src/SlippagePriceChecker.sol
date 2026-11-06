@@ -210,6 +210,7 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         for (uint256 i = 0; i < configurations.length; i++) {
             require(configurations[i].chainlinkFeed != address(0), "Invalid chainlink feed address");
             require(configurations[i].heartbeat > 0, "Heartbeat must be greater than 0");
+            _requireReadableFeed(configurations[i].chainlinkFeed);
             tokenPairOracleData[fromToken][toToken].push(configurations[i]);
 
             // Emit event for each configuration
@@ -244,10 +245,9 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
         // Clear configurations
         delete tokenPairOracleData[fromToken][toToken];
-        // NOTE: `maxTimePriceValid[fromToken]` is deliberately NOT cleared here. It is keyed by
-        // fromToken alone while configurations are keyed by the pair, so clearing it as a side
-        // effect of removing ONE pair would silently invalidate every other pair the same token
-        // still has. Use {clearRewardToken} to retire the token itself.
+        // NOTE: `maxTimePriceValid[fromToken]` is keyed by fromToken alone while configurations are
+        // keyed by the pair, so it is NOT cleared while the token still has another pair: that would
+        // silently invalidate every other pair. It is cleared below once the last pair goes.
 
         // MOO-726: maxTimePriceValid is the legacy reward-token flag and used to be a one-way latch,
         // so a token whose last pair had been removed still passed the isRewardToken() gate and
@@ -370,10 +370,10 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
 
     /**
      * @notice Sets sane-range bounds for a Chainlink feed
-     * @dev Only callable by the owner. Today's aggregators report minAnswer = 1 and
-     *      maxAnswer = 2**176 - 1, i.e. representational limits rather than market bounds, so no
-     *      answer can saturate. A future proxy upgrade to an aggregator with ACTIVE finite bounds
-     *      would report a clamped boundary value as a valid price; these bounds reject that.
+     * @dev Only callable by the owner. Aggregator bounds vary by feed: some report representational
+     *      limits (maxAnswer = 2**176 - 1), others finite ones (the Base USDC/USD aggregator reports
+     *      minAnswer = 1 and maxAnswer = 1.05e8). An aggregator with finite bounds reports a clamped
+     *      boundary value as a valid price; these bounds reject that.
      *      Setting maxAnswer to zero clears the bounds for the feed.
      * @param chainlinkFeed The feed the bounds apply to
      * @param minAnswer The lowest accepted answer
@@ -600,6 +600,13 @@ contract SlippagePriceChecker is ISlippagePriceChecker, Initializable, UUPSUpgra
         if (_bounds.maxAnswer == 0) return;
 
         require(answer >= _bounds.minAnswer && answer <= _bounds.maxAnswer, "Chainlink price out of bounds");
+    }
+
+    /// @dev Both calls succeed and return full-width data, so a typo'd feed can't be configured
+    function _requireReadableFeed(address chainlinkFeed) internal view {
+        (bool roundOk, bytes memory round) = chainlinkFeed.staticcall(abi.encodeCall(IPriceFeed.latestRoundData, ()));
+        (bool decimalsOk, bytes memory dec) = chainlinkFeed.staticcall(abi.encodeCall(IPriceFeed.decimals, ()));
+        require(roundOk && round.length == 160 && decimalsOk && dec.length == 32, "Chainlink feed not readable");
     }
 
     /**

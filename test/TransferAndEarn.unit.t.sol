@@ -124,12 +124,10 @@ contract TransferAndEarnUnitTest is Test {
         // Set up mock data - need to call on the etched address
         MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setOwner(TOKEN_ID_1, address(transferAndEarn));
         MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setOwner(TOKEN_ID_2, address(transferAndEarn));
-        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setPosition(
-            TOKEN_ID_1, address(mockToken0), address(mockToken1)
-        );
-        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS).setPosition(
-            TOKEN_ID_2, address(mockToken0), address(mockToken1)
-        );
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS)
+            .setPosition(TOKEN_ID_1, address(mockToken0), address(mockToken1));
+        MockNonfungiblePositionManager(POSITION_MANAGER_ADDRESS)
+            .setPosition(TOKEN_ID_2, address(mockToken0), address(mockToken1));
 
         vm.label(address(transferAndEarn), "TransferAndEarn");
         vm.label(owner, "Owner");

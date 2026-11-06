@@ -84,6 +84,8 @@ contract MultiMarketStrategyTest is Test {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
         // Run the multi-market deployment proposal
+        // The deployer carries an EIP-7702 delegation since block 51,790,538, which FPS reads as a contract
+        vm.etch(0xDca82E03057329f53Ed4173429D46B0511E46Fb8, "");
         DeployMultiMarketSystem proposal = new DeployMultiMarketSystem();
         vm.makePersistent(address(proposal));
         proposal.run();
@@ -514,21 +516,22 @@ contract MultiMarketStrategyTest is Test {
         ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");
         s = MamoMultiMarketStrategy(payable(address(proxy)));
 
-        LegacyV1Strategy(payable(address(s))).initializeLegacyForTest(
-            address(registry),
-            address(mToken),
-            address(metaMorphoVault),
-            address(underlying),
-            address(slippagePriceChecker),
-            admin,
-            _splitMToken,
-            _splitVault,
-            typeId,
-            owner,
-            100000,
-            100,
-            500
-        );
+        LegacyV1Strategy(payable(address(s)))
+            .initializeLegacyForTest(
+                address(registry),
+                address(mToken),
+                address(metaMorphoVault),
+                address(underlying),
+                address(slippagePriceChecker),
+                admin,
+                _splitMToken,
+                _splitVault,
+                typeId,
+                owner,
+                100000,
+                100,
+                500
+            );
         registry.addStrategy(owner, address(s));
         vm.stopPrank();
     }

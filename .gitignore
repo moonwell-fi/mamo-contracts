@@ -15,6 +15,14 @@ node_modules/
 .roo/
 .claude/settings.local.json
 memory-bank/
+# Stock accounts vnet artifacts
+script/stock-accounts/addresses-vnet/
+script/stock-accounts/vnet-manifest.json
+script/stock-accounts/addresses-dryrun/
+script/stock-accounts/addresses-rehearsal/
+script/stock-accounts/scenarios/results.json
+script/stock-accounts/scenarios/.state/
+foundry.lock
 
 # Tenderly harness run artifacts (logs + per-phase forge output)
 script/tenderly/harness-results.log

@@ -19,6 +19,8 @@ interface ICLPool {
         returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128);
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function factory() external view returns (address);
     function tickSpacing() external view returns (int24);
     function liquidity() external view returns (uint128);
+    function increaseObservationCardinalityNext(uint16 observationCardinalityNext) external;
 }
