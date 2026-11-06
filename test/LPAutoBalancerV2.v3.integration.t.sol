@@ -26,7 +26,8 @@ contract DeployPairHarness is DeployLPAutoBalancerV2Pair {
 
 // LPAutoBalancerV2V3Integration — Base-fork test against Slipstream V3 (WETH/cbBTC CL1). V3 has a new
 // position manager, emissions minted in a NEW AERO by the LeafVoter, no rewardToken()/getReward/
-// earned(address,uint256), and a 100% early-withdraw penalty inside 7 blocks. Proves registration,
+// earned(address,uint256), and a 100% early-withdraw penalty inside an admin-tunable block window
+// (factory effectivePenaltyConfig: 7 blocks at PINNED_BLOCK, 70 on 2026-11-06). Proves registration,
 // staking, claiming, compounding, a no-swap rebalance and exit with a balancer built for V3.
 // Addresses resolved on-chain at PINNED_BLOCK.
 
@@ -128,7 +129,7 @@ contract LPAutoBalancerV2V3Integration is Test {
         lab.stake();
     }
 
-    /// @dev Let emissions accrue well past the 7-block early-withdraw penalty window.
+    /// @dev Let emissions accrue well past the early-withdraw penalty window (7 blocks at the pin).
     function _accrue() internal {
         skip(2 hours);
         vm.roll(block.number + 3_600);
@@ -194,6 +195,24 @@ contract LPAutoBalancerV2V3Integration is Test {
         lab.claimEmissions();
         assertEq(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "deferred swept");
         assertGe(IERC20(AERO_V3).balanceOf(feeCollector) - before, deferred, "deferred forwarded");
+    }
+
+    /// @notice setGauge refuses to strand the real gauge's deferred emissions until they are claimed.
+    function test_v3_setGaugeRevertsWhileDeferredPending() public {
+        _bootstrap();
+        _accrue();
+        vm.mockCallRevert(LEAF_VOTER, abi.encodeWithSignature("mintEmissions(address[],uint128[])"), "MINT_DOWN");
+        vm.prank(rebalancer);
+        lab.unstake();
+        vm.clearMockedCalls();
+        assertGt(ICLGaugeV3(GAUGE).deferredEmissions(address(lab)), 0, "withdraw-time mint deferred");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.setGauge(address(0));
     }
 
     /// @notice `exit` deactivates the balancer; emissions deferred by its withdraw stay claimable.

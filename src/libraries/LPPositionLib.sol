@@ -32,6 +32,7 @@ library LPPositionLib {
     error InvalidSellToken();
     error GaugeRewardMismatch();
     error PoolMismatch();
+    error DeferredEmissionsPending();
     error NotHeld();
     error LossCapExceeded();
     error InvalidConfig();
@@ -127,35 +128,34 @@ library LPPositionLib {
         }
     }
 
-    /// @dev Validate a gauge binding (shared by registerPosition/setPool via _validateAndStore AND
-    ///      setGauge, so the two admin paths cannot drift). A non-zero gauge, of either version, must
-    ///      be bound to THIS `pool` from both sides (`gauge.pool()` and `pool.gauge()`) and must accept
-    ///      THIS balancer's `positionManager` NFTs (`gauge.nft()`); otherwise registration succeeds and
-    ///      the mismatch only surfaces later, deep inside stake()/_restakeBoth on the rebalance path.
-    ///      A V1 gauge must also reward in `aero` (or staked emissions would be stranded). A V3 gauge
-    ///      has no `rewardToken()` (its LeafVoter mints emissions) and nothing on-chain names its
-    ///      emission token, so the deployer must pair the V3 position manager with the V3 AERO.
-    function validateGauge(address gauge, address pool, address aero, address positionManager) public view {
+    /// @dev Shared by registration and setGauge: a non-zero gauge must name `pool` (and be named by it),
+    ///      accept `positionManager` NFTs, and on V1 reward in `aero`. V3 has no on-chain emission-token
+    ///      getter, so its AERO is bound off-chain by the deploy script (docs §6).
+    function validateGauge(address oldGauge, address gauge, address pool, address aero, address positionManager)
+        public
+        view
+    {
+        // Re-pointing away from a V3 gauge would strand its deferred emissions: claimEmissions() first.
+        if (isV3Gauge(oldGauge) && ICLGaugeV3(oldGauge).deferredEmissions(address(this)) > 0) {
+            revert DeferredEmissionsPending();
+        }
         if (gauge == address(0)) return;
         if (!isV3Gauge(gauge) && ICLGauge(gauge).rewardToken() != aero) revert GaugeRewardMismatch();
         if (ICLGauge(gauge).pool() != pool || ICLPool(pool).gauge() != gauge) revert PoolMismatch();
         if (ICLGauge(gauge).nft() != positionManager) revert PoolMismatch();
     }
 
-    /// @notice True for a Slipstream V3 CLGauge, identified POSITIVELY by its V3-only
-    ///         `depositBlock(uint256)` view. Anything else takes the V1 path, whose calls
-    ///         (`rewardToken`, `getReward`) revert on a V3 gauge — so a misclassification fails
-    ///         loudly on the claim path (`earnedTolerant` reads it as 0).
+    /// @notice True for a Slipstream V3 CLGauge, identified by its V3-only `depositBlock(uint256)` view.
+    ///         A misclassified V3 gauge reverts on the V1 claim path; the snapshot's `earnedTolerant`
+    ///         reads it as 0 instead.
     function isV3Gauge(address gauge) public view returns (bool) {
         (bool ok, bytes memory ret) = gauge.staticcall(abi.encodeCall(ICLGaugeV3.depositBlock, (0)));
         return ok && ret.length == 32;
     }
 
-    /// @notice Claim pending AERO for the staked legs into this contract, for either gauge version.
-    /// @dev V1: `getReward(tokenId)` per staked leg. V3: one `claimEmissions(this, this, ids)`, which
-    ///      also sweeps the emissions the gauge deferred when a withdraw-time mint failed; with nothing
-    ///      staked it still runs (empty `ids`) while any are deferred. Runs under DELEGATECALL, so the
-    ///      gauge sees the balancer as `msg.sender`. The caller measures the AERO balance delta.
+    /// @notice Claim the staked legs' AERO into this contract (DELEGATECALL; the caller measures it).
+    /// @dev V1: `getReward` per staked leg. V3: one `claimEmissions(this, this, ids)`, which also sweeps
+    ///      deferred emissions, and still runs with empty `ids` while any are deferred.
     function claimRewards(address gauge, uint256 mainTokenId, bool mainStaked, uint256 altTokenId, bool altStaked)
         public
     {

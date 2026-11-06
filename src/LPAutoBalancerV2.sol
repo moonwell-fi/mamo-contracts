@@ -224,6 +224,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     error WidthTooNarrow();
     error GaugeRewardMismatch();
     error PoolMismatch();
+    error DeferredEmissionsPending();
     error OracleRequired();
     error InvalidConfig();
     error NotActive();
@@ -352,7 +353,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
 
     /// @dev Shared body of deregisterPosition/withdrawPosition — the two differ only in whether a
     ///      staked leg is auto-unstaked or rejected, and in which event they emit.
-    /// @param autoUnstake true  → unstake both legs first (auto-claims AERO to the feeCollector);
+    /// @param autoUnstake true  → unstake both legs first (claims AERO to the feeCollector; V3 may defer it);
     ///                    false → revert PositionStaked if EITHER leg is staked, keeping deregister
     ///                    a pure book-keeping/transfer path that can never strand a staked NFT (one
     ///                    held by the gauge cannot be safeTransferFrom'd by this contract).
@@ -449,7 +450,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (position.mainStaked || position.altStaked) revert PositionStaked();
         // Same gauge<->pool, gauge->NFPM and (V1) reward-token binding _validateAndStore enforces at
         // registration — shared via LPPositionLib.validateGauge so the two admin paths cannot drift.
-        LPPositionLib.validateGauge(gauge, p.pool, AERO, address(POSITION_MANAGER));
+        LPPositionLib.validateGauge(p.gauge, gauge, p.pool, AERO, address(POSITION_MANAGER));
         position.gauge = gauge;
         emit GaugeUpdated(gauge);
     }
@@ -553,10 +554,10 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (p.altStaked && p.altTokenId != 0) _unstakeLeg(p, false);
     }
 
-    /// @dev Withdraw one leg from the gauge (which auto-claims AERO), clear that leg's staked flag,
-    ///      then skim ONLY the AERO gained by this withdraw to the feeCollector. Measuring the gain
-    ///      rather than the balance means a stray AERO balance already sitting on this contract is
-    ///      never swept. CEI: the flag is cleared before the AERO transfer.
+    /// @dev Withdraw one leg from the gauge (which claims AERO; V3 may defer it), clear that leg's
+    ///      staked flag, then skim ONLY the AERO gained by this withdraw to the feeCollector. Measuring
+    ///      the gain rather than the balance means a stray AERO balance already sitting on this
+    ///      contract is never swept. CEI: the flag is cleared before the AERO transfer.
     /// @dev NO LP-FEE MIRROR OF MOO-736 HERE. `CLGauge.withdraw()` opens with the same
     ///      `nft.collect({recipient: msg.sender})` that motivated the skim-before-stake fix in
     ///      `stake()`, so the symmetric worry is that fees land loose on the way OUT and get counted
@@ -581,7 +582,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
     function _unstakeLeg(ManagedPositionV2 storage p, bool main) private {
         uint256 tokenId = main ? p.mainTokenId : p.altTokenId;
         uint256 aeroBefore = IERC20(AERO).balanceOf(address(this));
-        ICLGauge(p.gauge).withdraw(tokenId); // returns NFT + auto-claims AERO
+        ICLGauge(p.gauge).withdraw(tokenId); // returns NFT + claims AERO (V3: may defer it)
         if (main) p.mainStaked = false;
         else p.altStaked = false;
         uint256 aeroEarned = IERC20(AERO).balanceOf(address(this)) - aeroBefore;
@@ -641,10 +642,8 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         emit PositionWithdrawn(to);
     }
 
-    /// @notice Claim AERO emissions from the gauge and forward them to feeCollector: the staked legs,
-    ///         plus (V3) emissions the gauge deferred on a failed withdraw-time mint, which stay
-    ///         claimable while unstaked and after exit/withdraw/deregister. A no-op when there is
-    ///         nothing to claim.
+    /// @notice Claim the staked legs' AERO, plus any V3 deferred emissions (claimable while unstaked or
+    ///         inactive), and forward it to feeCollector. A no-op when there is nothing to claim.
     /// @dev REBALANCER_ROLE-gated, deliberately NOT permissionless. This routes 100% of the claimed
     ///      AERO to the feeCollector, while `compound()` is the ONLY path that ever sends AERO to the
     ///      compoundModule. Permissionless, a bot calling this every block keeps the gauge's pending
@@ -810,11 +809,11 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         // unconditionally, while `valueInUsd` reads a leg's feed only when that leg's amount is
         // non-zero. So a fully single-sided unwind can be blocked on a feed the rebuild would never
         // have touched. Fail-closed and deliberate; the alternative is a conditional probe that
-        // duplicates the valuation's branch logic on the balancer's last 90 bytes.
+        // duplicates the valuation's branch logic on the balancer's last ~220 bytes.
         // Two direct `_readFeed` calls, deliberately: routing this through a single
         // `LPValuationLib.probeFeeds(cfg)` helper reads better but measures WORSE (+34 bytes on the
         // balancer), because materialising the six-field OracleConfig in memory costs more than the
-        // second external call it saves. The balancer is inside 100 bytes of EIP-170; that trade is
+        // second external call it saves. The balancer is ~220 bytes under EIP-170; that trade is
         // not available here.
         _readFeed(p.oracle0, maxOracleDelay0);
         _readFeed(p.oracle1, maxOracleDelay1);
@@ -1172,7 +1171,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         if (p.altTokenId != 0) _stakeLeg(p, p.altTokenId, false);
     }
 
-    /// @dev Tear down the managed position(s): unstake the main (auto-claims AERO →
+    /// @dev Tear down the managed position(s): unstake the main (claims AERO →
     ///      feeCollector), skim LP fees on every held NFT → feeCollector, then remove all
     ///      liquidity, collect the principal into this contract, and burn the NFTs.
     ///      Handles both main and alt; the alt is skipped when altTokenId == 0.
@@ -1191,7 +1190,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         uint256 mainId = p.mainTokenId;
         uint256 altId = p.altTokenId;
 
-        // 1. unstake both legs if staked (auto-claims AERO → feeCollector)
+        // 1. unstake both legs if staked (claims AERO → feeCollector; V3 may defer it)
         if (p.mainStaked) _unstakeLeg(p, true);
         if (altId != 0 && p.altStaked) _unstakeLeg(p, false);
 
@@ -1622,7 +1621,7 @@ contract LPAutoBalancerV2 is AccessControlEnumerable, ReentrancyGuard, Pausable,
         );
         // Gauge (V1) reward-token + gauge<->pool + gauge->NFPM binding, shared with setGauge
         // (LPPositionLib.validateGauge) so registration and later admin paths enforce one invariant.
-        LPPositionLib.validateGauge(config.gauge, config.pool, AERO, address(POSITION_MANAGER));
+        LPPositionLib.validateGauge(position.gauge, config.gauge, config.pool, AERO, address(POSITION_MANAGER));
         // Pool-descriptor cross-validation + NFT ownership/binding, extracted to LPPositionLib for
         // EIP-170 headroom (see validatePoolAndNft's NatSpec for the full invariants).
         LPPositionLib.validatePoolAndNft(

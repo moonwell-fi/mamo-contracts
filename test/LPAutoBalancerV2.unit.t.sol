@@ -1965,8 +1965,47 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.stake();
         v3.setEarned(3e18, false);
         assertEq(lab.getDecisionSnapshot().earnedAero, 6e18, "one earned call over main + alt");
+        // V3 `earned` adds the deferred amount once per call, so a per-leg read would count it twice.
+        v3.setDeferred(address(lab), 5e18);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 11e18, "deferred counted once");
         v3.setEarned(3e18, true);
         assertEq(lab.getDecisionSnapshot().earnedAero, 0, "reverting earned reads as 0");
+    }
+
+    /// @notice setGauge refuses to leave a V3 gauge holding deferred emissions until they are claimed.
+    function test_v3Gauge_setGaugeRevertsWhileDeferredPending() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed once deferred is claimed");
+    }
+
+    /// @notice setPool after exit refuses to drop a V3 gauge holding deferred emissions.
+    function test_v3Gauge_setPoolRevertsWhileDeferredPending() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(admin);
+        lab.exit(admin);
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        cfg.mainTokenId = NEW_TOKEN_ID;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setPool(cfg);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.setPool(cfg);
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed once deferred is claimed");
     }
 
     /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
