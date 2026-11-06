@@ -137,7 +137,7 @@ library LPPositionLib {
         public
         view
     {
-        // Re-pointing would strand the old V3 gauge's deferred emissions; claim first, unless its mint is dead.
+        // Re-pointing would strand the old V3 gauge's deferred emissions; claim first, unless its voter refuses mints.
         if (isV3Gauge(oldGauge) && ICLGaugeV3(oldGauge).deferredEmissions(address(this)) > 0 && _voterCanMint(oldGauge))
         {
             revert DeferredEmissionsPending();

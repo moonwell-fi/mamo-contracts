@@ -2085,6 +2085,34 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(lab.exposed_position().gauge, address(0), "re-pointed");
     }
 
+    /// @notice A reverting `gauge.voter()` read keeps the guard on, even where the voter would let it skip.
+    function test_v3Gauge_deferredGuardHoldsWhenVoterReadReverts() public {
+        _deferredWithVoter(true, 3);
+        vm.mockCallRevert(gauge, abi.encodeWithSignature("voter()"), "VOTER_DOWN");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice A short `gauge.voter()` return keeps the guard on.
+    function test_v3Gauge_deferredGuardHoldsWhenVoterReadShort() public {
+        _deferredWithVoter(true, 3);
+        vm.mockCall(gauge, abi.encodeWithSignature("voter()"), abi.encodePacked(uint8(1)));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice A reverting `chainStatus()` read keeps the guard on, even with a status that would skip it.
+    function test_v3Gauge_deferredGuardHoldsWhenChainStatusReadReverts() public {
+        _deferredWithVoter(true, 3);
+        address voter = MockCLGaugeV3(gauge).voter();
+        vm.mockCallRevert(voter, abi.encodeWithSignature("chainStatus()"), "STATUS_DOWN");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
     /// @notice registerPosition after a withdraw is guarded too (its own path through _validateAndStore).
     function test_v3Gauge_registerRevertsWhileDeferredPending() public {
         MockCLGaugeV3 v3 = _useV3Gauge();
