@@ -27,8 +27,8 @@ contract ERC20StrategyV2Test is BaseTest {
     uint256 public constant STRATEGY_TYPE_ID = 1;
 
     function setUp() public override {
-        // The address book is built at the chain head (every entry has code there); the suite runs without --fork-url
-        vm.createSelectFork({urlOrAlias: "base"});
+        // The address book needs every entry deployed; 51_500_000 is the repo's existing book pin. No --fork-url.
+        vm.createSelectFork({urlOrAlias: "base", blockNumber: 51_500_000});
         super.setUp();
         vm.createSelectFork({urlOrAlias: "base", blockNumber: 36224833});
 
