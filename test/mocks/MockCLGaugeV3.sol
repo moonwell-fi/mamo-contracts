@@ -80,10 +80,18 @@ contract MockCLGaugeV3 {
         _staked[msg.sender][tokenId] = true;
     }
 
+    /// @notice Opt-in: withdraw defers its emissions instead of paying, like the real gauge on a failed mint.
+    bool public deferOnWithdraw;
+
+    function setDeferOnWithdraw(bool on) external {
+        deferOnWithdraw = on;
+    }
+
     function withdraw(uint256 tokenId) external {
         require(_staked[msg.sender][tokenId], "NA");
         _staked[msg.sender][tokenId] = false;
-        if (aeroPerId > 0) IERC20(emissionToken).safeTransfer(msg.sender, aeroPerId);
+        if (deferOnWithdraw) deferredEmissions[msg.sender] += aeroPerId;
+        else if (aeroPerId > 0) IERC20(emissionToken).safeTransfer(msg.sender, aeroPerId);
     }
 
     /// @notice The LeafVoter the balancer reads `gaugeStates`/`chainStatus` from (unset = unreadable).

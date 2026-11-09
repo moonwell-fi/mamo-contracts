@@ -1881,14 +1881,14 @@ contract LPAutoBalancerV2UnitTest is Test {
         assertEq(mockAero.balanceOf(moduleSink), 700e18, "70% to module");
     }
 
+    /// @notice Unstaked with nothing deferred, compound has nothing to harvest (the gauge would revert `NS`).
     function test_v3Gauge_compoundUnstakedSkipsClaim() public {
-        MockCLGaugeV3 v3 = _useV3Gauge();
+        _useV3Gauge();
         _register(true);
         _setModule();
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.NothingToCompound.selector);
         lab.compound(5_000);
-        assertEq(v3.claimCallCount(), 0, "no claim while unstaked");
     }
 
     /// @notice Unstaked with nothing deferred, the claim skips the gauge (which would revert `NS`).
@@ -1940,9 +1940,32 @@ contract LPAutoBalancerV2UnitTest is Test {
         _setModule();
         mockAero.mint(address(v3), 10e18);
         v3.setDeferred(address(lab), 10e18);
+        uint256 fcBefore = mockAero.balanceOf(feeCollector);
         vm.prank(rebalancer);
         lab.compound(5_000);
         assertEq(mockAero.balanceOf(moduleSink), 5e18, "half to module");
+        assertEq(mockAero.balanceOf(feeCollector) - fcBefore, 5e18, "other half to feeCollector");
+        assertEq(v3.deferredEmissions(address(lab)), 0, "deferred swept");
+    }
+
+    /// @notice A withdraw whose mint fails defers the emissions; a later claimEmissions sweeps them.
+    function test_v3Gauge_unstakeDefersThenClaimSweeps() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 5e18);
+        v3.setAeroPerId(5e18);
+        v3.setDeferOnWithdraw(true);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertEq(mockAero.balanceOf(feeCollector), before, "nothing paid on a deferred withdraw");
+        assertEq(v3.deferredEmissions(address(lab)), 5e18, "withdraw deferred the emissions");
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.deferredEmissions(address(lab)), 0, "deferred swept");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 5e18, "deferred forwarded");
     }
 
     function test_v3Gauge_unstakeForwardsWithdrawClaim() public {

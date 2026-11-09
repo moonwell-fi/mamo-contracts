@@ -359,11 +359,14 @@ contract LPAutoBalancerV2V3Integration is Test {
         uint256 aeroBefore = IERC20(AERO_V3).balanceOf(feeCollector);
         vm.prank(rebalancer);
         lab.rebalanceUsingAlt(params);
-        (uint256 newId,,,,,,,,,,,,,,,,,,,,) = lab.position();
+        (uint256 newId, uint256 altId,,,,,,,,,,,,,,,,,,,) = lab.position();
         LPAutoBalancerV2.DecisionSnapshotV2 memory snap = lab.getDecisionSnapshot();
         assertTrue(newId != oldId, "fresh main");
         assertTrue(snap.mainStaked, "restaked");
         assertEq(INonfungiblePositionManager(NFPM).ownerOf(newId), GAUGE, "new main in the V3 gauge");
+        assertTrue(altId != 0 && altId != oldId && altId != newId, "fresh alt minted");
+        assertEq(INonfungiblePositionManager(NFPM).ownerOf(altId), GAUGE, "alt in the V3 gauge");
+        assertTrue(ICLGauge(GAUGE).stakedContains(address(lab), altId), "alt staked for the balancer");
         assertEq(snap.mainTickLower, tl, "committed lower tick");
         assertEq(snap.mainTickUpper, tu, "committed upper tick");
         assertGt(IERC20(AERO_V3).balanceOf(feeCollector), aeroBefore, "withdraw-time claim forwarded");
