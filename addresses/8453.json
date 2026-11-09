@@ -508,5 +508,30 @@
     "addr": "0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC",
     "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC",
     "isContract": true
+  },
+  {
+    "addr": "0x4857DB576eE0e45F10525eC59527BfD10beeC60b",
+    "name": "AERODROME_SLIPSTREAM_NFPM_V3",
+    "isContract": true
+  },
+  {
+    "addr": "0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee",
+    "name": "AERO_V3",
+    "isContract": true
+  },
+  {
+    "addr": "0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6",
+    "name": "AERODROME_V3_VOTER",
+    "isContract": true
+  },
+  {
+    "addr": "0xeC3c3755b9DED4a2960ef50C9b48C1694CE274C2",
+    "name": "WETH_CBBTC_V3_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0xAbb3fb6659e05847631896cB87A6D1b8bc0c6D8C",
+    "name": "WETH_CBBTC_V3_CL_GAUGE",
+    "isContract": true
   }
 ]

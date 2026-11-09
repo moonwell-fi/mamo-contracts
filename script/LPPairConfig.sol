@@ -122,12 +122,24 @@ library LPPairConfig {
         });
     }
 
+    /// @notice WETH/cbBTC on Slipstream V3 (CL1). Same envelope as `wethCbbtc`; spacing 1 keeps
+    ///         MIN_WIDTH/MAX_WIDTH on the 2*tickSpacing grid.
+    function wethCbbtcV3(Addresses a) internal view returns (Pair memory) {
+        Pair memory p = wethCbbtc(a);
+        p.key = "WETH_CBBTC_V3";
+        p.pool = a.getAddress("WETH_CBBTC_V3_CL_POOL");
+        p.gauge = a.getAddress("WETH_CBBTC_V3_CL_GAUGE");
+        p.tickSpacing = 1;
+        return p;
+    }
+
     /// @notice Resolve a pair by its key. Reverts on an unknown key rather than defaulting.
     function byKey(Addresses a, string memory key) internal view returns (Pair memory) {
         bytes32 h = keccak256(bytes(key));
         if (h == keccak256("WETH_USDC")) return wethUsdc(a);
         if (h == keccak256("USDC_CBBTC")) return usdcCbbtc(a);
         if (h == keccak256("WETH_CBBTC")) return wethCbbtc(a);
+        if (h == keccak256("WETH_CBBTC_V3")) return wethCbbtcV3(a);
         revert("LPPairConfig: unknown pair key");
     }
 

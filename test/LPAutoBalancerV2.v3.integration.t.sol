@@ -14,6 +14,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DeployLPAutoBalancerV2Pair} from "@script/DeployLPAutoBalancerV2Pair.s.sol";
 import {LPPairConfig} from "@script/LPPairConfig.sol";
 
+import {Addresses} from "@fps/addresses/Addresses.sol";
+
 interface ILeafVoterStatus {
     function setChainStatus(uint8 status) external;
 }
@@ -23,12 +25,8 @@ interface IGaugeFactoryV3 {
 }
 
 contract DeployPairHarness is DeployLPAutoBalancerV2Pair {
-    function venue(LPPairConfig.Pair memory pair, address nfpmV1, address aeroV1)
-        external
-        view
-        returns (address, address)
-    {
-        return _venue(pair, nfpmV1, aeroV1);
+    function venue(Addresses addresses, LPPairConfig.Pair memory pair) external view returns (address, address) {
+        return _venue(addresses, pair);
     }
 }
 
@@ -311,23 +309,27 @@ contract LPAutoBalancerV2V3Integration is Test {
         assertGe(IERC20(AERO_V3).balanceOf(feeCollector) - before, deferred, "deferred forwarded");
     }
 
-    /// @notice The pair deploy resolves NFPM/AERO per gauge version and checks the V3 emission token.
+    /// @notice The pair deploy resolves NFPM/AERO per gauge version from the book and checks the V3 emission token.
     function test_v3_deployVenueResolvesPerGaugeVersion() public {
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+        Addresses addresses = new Addresses("./addresses", chainIds);
         DeployPairHarness h = new DeployPairHarness();
-        LPPairConfig.Pair memory pair;
-        pair.gauge = GAUGE;
-        (address nfpm, address aero) = h.venue(pair, V1_NFPM, V1_AERO);
+        LPPairConfig.Pair memory pair = LPPairConfig.wethCbbtcV3(addresses);
+        assertEq(pair.pool, POOL, "book V3 pool");
+        assertEq(pair.gauge, GAUGE, "book V3 gauge");
+        (address nfpm, address aero) = h.venue(addresses, pair);
         assertEq(nfpm, NFPM, "V3 gauge -> V3 NFPM");
         assertEq(aero, AERO_V3, "V3 gauge -> V3 AERO");
         pair.gauge = V1_GAUGE;
-        (nfpm, aero) = h.venue(pair, V1_NFPM, V1_AERO);
+        (nfpm, aero) = h.venue(addresses, pair);
         assertEq(nfpm, V1_NFPM, "V1 gauge -> V1 NFPM");
         assertEq(aero, V1_AERO, "V1 gauge -> V1 AERO");
         // A V3 voter minting some other token must stop the deploy.
         pair.gauge = GAUGE;
         vm.mockCall(VOTER_V3, abi.encodeWithSignature("TOKEN()"), abi.encode(V1_AERO));
         vm.expectRevert(bytes("V3 voter TOKEN != AERO_V3"));
-        h.venue(pair, V1_NFPM, V1_AERO);
+        h.venue(addresses, pair);
     }
 
     function test_v3_compoundForwardsToModule() public {

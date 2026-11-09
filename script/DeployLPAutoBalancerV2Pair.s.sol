@@ -21,7 +21,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  *      is admin-gated and is NOT done here.
  *
  *      Env:
- *        LP_PAIR        required — "WETH_USDC" or "USDC_CBBTC"
+ *        LP_PAIR        required — an LPPairConfig key, e.g. "WETH_USDC" or "WETH_CBBTC_V3"
  *        LP_ADMIN       optional — DEFAULT_ADMIN_ROLE; defaults to MAMO_LP_REBALANCER
  *        LP_GUARDIAN    optional — defaults to LP_ADMIN
  *        LP_MANAGER     optional — defaults to address(0), granted later by the admin
@@ -33,14 +33,6 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 contract DeployLPAutoBalancerV2Pair is Script {
     using LPPairConfig for LPPairConfig.Pair;
 
-    // Slipstream V3 venue. Kept out of the address book: these have no code at the blocks the
-    // book-backed suites pin, and the book checks every entry's code when it is built.
-    address internal constant NFPM_V3 = 0x4857DB576eE0e45F10525eC59527BfD10beeC60b;
-    address internal constant AERO_V3 = 0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee;
-    /// @dev Root Voter whose TOKEN()/MINTER() name the V3 AERO (the LeafVoter mints it). Nothing
-    ///      reachable from `gauge.voter()` names the token, so it is pinned here.
-    address internal constant VOTER_V3 = 0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6;
-
     function run() public returns (LPAutoBalancerV2 lab, LPCompoundModule module) {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
@@ -49,7 +41,6 @@ contract DeployLPAutoBalancerV2Pair is Script {
         vm.makePersistent(address(addresses));
 
         LPPairConfig.Pair memory pair = LPPairConfig.byKey(addresses, vm.envString("LP_PAIR"));
-        _assertPairMatchesChain(pair);
 
         address admin = vm.envOr("LP_ADMIN", addresses.getAddress("MAMO_LP_REBALANCER"));
         require(admin != address(0), "LP_ADMIN must be set");
@@ -57,11 +48,28 @@ contract DeployLPAutoBalancerV2Pair is Script {
         address manager = vm.envOr("LP_MANAGER", address(0));
         address rebalancer = vm.envOr("LP_REBALANCER", address(0));
 
+        (lab, module) = deployPair(addresses, pair, admin, guardian, manager, rebalancer);
+
+        addresses.updateJson();
+        addresses.printJSONChanges();
+    }
+
+    /// @notice Deploy and register one pair's balancer + module. Also the deploy step of the
+    ///         activation proposals, so venue selection lives in one place.
+    function deployPair(
+        Addresses addresses,
+        LPPairConfig.Pair memory pair,
+        address admin,
+        address guardian,
+        address manager,
+        address rebalancer
+    ) public returns (LPAutoBalancerV2 lab, LPCompoundModule module) {
+        _assertPairMatchesChain(pair);
+
         string memory balancerName = pair.balancerName();
         require(!addresses.isAddressSet(balancerName), string.concat(balancerName, " already deployed"));
 
-        (address nfpm, address aero) =
-            _venue(pair, addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2"), addresses.getAddress("AERO"));
+        (address nfpm, address aero) = _venue(addresses, pair);
 
         vm.startBroadcast();
         lab = new LPAutoBalancerV2(admin, manager, rebalancer, guardian, nfpm, aero);
@@ -70,8 +78,6 @@ contract DeployLPAutoBalancerV2Pair is Script {
 
         addresses.addAddress(balancerName, address(lab), true);
         addresses.addAddress(pair.moduleName(), address(module), true);
-        addresses.updateJson();
-        addresses.printJSONChanges();
 
         console.log("=== LPAutoBalancerV2 pair deployment ===");
         console.log("  pair             :", pair.key);
@@ -93,19 +99,23 @@ contract DeployLPAutoBalancerV2Pair is Script {
     }
 
     /// @dev The position manager and emission token the balancer is built with — both immutable, so a
-    ///      gauge version mismatch must fail here, not at `registerPosition` after the deploy.
-    function _venue(LPPairConfig.Pair memory pair, address nfpmV1, address aeroV1)
+    ///      gauge version mismatch must fail here, not at `registerPosition` after the deploy. No V3
+    ///      getter names the emission token, so the V3 voter's TOKEN()/MINTER() pin it.
+    function _venue(Addresses addresses, LPPairConfig.Pair memory pair)
         internal
         view
         returns (address nfpm, address aero)
     {
         (bool ok, bytes memory ret) = pair.gauge.staticcall(abi.encodeCall(ICLGaugeV3.depositBlock, (0)));
         if (ok && ret.length == 32) {
-            (nfpm, aero) = (NFPM_V3, AERO_V3);
-            require(IVoterV3(VOTER_V3).TOKEN() == aero, "V3 voter TOKEN != AERO_V3");
-            require(IVoterV3(aero).MINTER() == IVoterV3(VOTER_V3).MINTER(), "AERO_V3 minter != voter minter");
+            nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V3");
+            aero = addresses.getAddress("AERO_V3");
+            address voter = addresses.getAddress("AERODROME_V3_VOTER");
+            require(IVoterV3(voter).TOKEN() == aero, "V3 voter TOKEN != AERO_V3");
+            require(IVoterV3(aero).MINTER() == IVoterV3(voter).MINTER(), "AERO_V3 minter != voter minter");
         } else {
-            (nfpm, aero) = (nfpmV1, aeroV1);
+            nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V2");
+            aero = addresses.getAddress("AERO");
             require(ICLGauge(pair.gauge).rewardToken() == aero, "gauge rewardToken != AERO");
         }
         require(ICLGauge(pair.gauge).nft() == nfpm, "gauge.nft() != NFPM");
