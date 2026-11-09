@@ -1,7 +1,7 @@
 # The excluded suites self-fork at a PINNED block in setUp: a CLI --fork-url on top of that panics
 # on the Isthmus L1Block and doubles the RPC load. Each has its own target (and CI job) below.
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "ERC20StrategyV2Test|LPAutoBalancerV2Integration|MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2V3Integration|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "ERC20StrategyV2Test|LPAutoBalancerV2Integration|MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|LPAutoBalancerV2V3Integration|LPAutoBalancerV2SetupTest|LPAutoBalancerV2V3SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
@@ -76,6 +76,11 @@ lp-auto-balancer-v2-v3:
 lp-v2-setup:
 	forge test --ffi --mc LPAutoBalancerV2SetupTest -vvv
 
+# Proposal 022 (WETH/cbBTC Slipstream V3 activation). Same op-revm note as lp-v2-setup: self-forks at a
+# PINNED block, NO --fork-url, excluded from `make test`.
+lp-v3-setup:
+	forge test --ffi --mc LPAutoBalancerV2V3SetupTest -vvv
+
 # Same op-revm note again. Both this target and lp-v2-setup are excluded from `make test`: they
 # build an FPS Addresses book, so their pinned block has to sit above the newest deployment in
 # addresses/8453.json, and at those blocks a CLI --fork-url triggers the panic.
@@ -111,7 +116,7 @@ leveraged-aero-setup:
 	forge test --ffi --match-path "test/LeveragedAeroSystemSetup.integration.t.sol" -vvv
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-v2-upgrade strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-auto-balancer-v2-v3 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-v2-upgrade strategy-multicall mamo-staking fee-splitter lp-auto-balancer-v2 lp-auto-balancer-v2-v3 lp-v2-setup lp-v3-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup
 
 # Tenderly Virtual TestNet harness: deploy LPAutoBalancerV2 to a Base-fork vnet and drive its real
 # lifecycle as broadcast txs (no-swap reset conservation, single-sided rebuild, fee/AERO skim, role
@@ -188,4 +193,4 @@ tenderly-leveraged-aero-account:
 tenderly-leveraged-aero-withdraw:
 	./script/tenderly/run-harness.sh leveraged-aero-withdraw
 
-.PHONY: strategy-v2-upgrade test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-auto-balancer-v2-v3 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
+.PHONY: strategy-v2-upgrade test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking lp-auto-balancer-v2 lp-auto-balancer-v2-v3 lp-v2-setup lp-v3-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup test-all tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw
