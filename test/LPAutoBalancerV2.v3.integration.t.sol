@@ -14,6 +14,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DeployLPAutoBalancerV2Pair} from "@script/DeployLPAutoBalancerV2Pair.s.sol";
 import {LPPairConfig} from "@script/LPPairConfig.sol";
 
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 interface ILeafVoterStatus {
@@ -311,9 +312,7 @@ contract LPAutoBalancerV2V3Integration is Test {
 
     /// @notice The pair deploy resolves NFPM/AERO per gauge version from the book and checks the V3 emission token.
     function test_v3_deployVenueResolvesPerGaugeVersion() public {
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        Addresses addresses = new Addresses("./addresses", chainIds);
+        Addresses addresses = AddressBookHarness.build("./addresses");
         DeployPairHarness h = new DeployPairHarness();
         LPPairConfig.Pair memory pair = LPPairConfig.wethCbbtcV3(addresses);
         assertEq(pair.pool, POOL, "book V3 pool");

@@ -15,11 +15,15 @@ abstract contract BaseTest is Test {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
         // Create a new addresses instance for testing
-        string memory addressesFolderPath = "./addresses";
+        addresses = _newAddressBook("./addresses");
+        vm.makePersistent(address(addresses));
+    }
+
+    /// @dev Pinned suites override this with AddressBookHarness.build, which tolerates entries
+    ///      deployed after their pin.
+    function _newAddressBook(string memory folder) internal virtual returns (Addresses) {
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
-        vm.makePersistent(address(addresses));
+        return new Addresses(folder, chainIds);
     }
 }

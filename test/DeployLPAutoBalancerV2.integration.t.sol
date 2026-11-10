@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {DeployLPAutoBalancerV2} from "../script/DeployLPAutoBalancerV2.s.sol";
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -26,10 +27,7 @@ contract DeployLPAutoBalancerV2Test is Test {
         vm.txGasPrice(0);
         vm.fee(0);
 
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        addresses = AddressBookHarness.build("./addresses");
         vm.makePersistent(address(addresses));
 
         deployScript = new DeployLPAutoBalancerV2();

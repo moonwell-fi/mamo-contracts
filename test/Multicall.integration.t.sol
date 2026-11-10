@@ -2,6 +2,8 @@
 pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -104,6 +106,10 @@ contract MulticallIntegrationTest is BaseTest {
     ///      addresses/8453.json, since the FPS book validates that every entry has code on the fork,
     ///      and below 52_956_135, where STRATEGY_MULTICALL ownership left MAMO_COMPOUNDER.
     uint256 internal constant PINNED_BLOCK = 52_915_000;
+
+    function _newAddressBook(string memory folder) internal override returns (Addresses) {
+        return AddressBookHarness.build(folder);
+    }
 
     function setUp() public override {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
