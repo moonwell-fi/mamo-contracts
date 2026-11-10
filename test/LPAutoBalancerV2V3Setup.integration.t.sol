@@ -6,6 +6,7 @@ import {LPAutoBalancerV2WethCbbtcV3Setup} from "../multisig/mamo-multisig/022_LP
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPGeometryLib} from "@contracts/libraries/LPGeometryLib.sol";
 import {Test} from "@forge-std/Test.sol";
+import {Vm} from "@forge-std/Vm.sol";
 import {ICLGauge} from "@interfaces/ICLGauge.sol";
 import {ICLPool} from "@interfaces/ICLPool.sol";
 import {ICLPositionManager} from "@interfaces/ICLPositionManager.sol";
@@ -14,6 +15,7 @@ import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 /// @notice Base-fork run of proposal 022 (WETH/cbBTC Slipstream V3 activation): mint the V3 NFT to
@@ -27,6 +29,8 @@ contract LPAutoBalancerV2V3SetupTest is Test {
     int24 constant HALF_WIDTH = 400;
     // Proposal 022's Safe batch: 2 guards + deposit + register + grant + 6 module/allowance setters.
     uint256 constant EXPECTED_ACTIONS = 11;
+    string constant BALANCER = "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3";
+    string constant MODULE = "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3";
 
     LPAutoBalancerV2WethCbbtcV3Setup proposal;
     Addresses addresses;
@@ -46,10 +50,12 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         vm.txGasPrice(0);
         vm.fee(0);
 
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses("./addresses", chainIds);
+        addresses = AddressBookHarness.build("./addresses");
         vm.makePersistent(address(addresses));
+        // After the real deploy the book records 022's contracts, which have no code at this pin:
+        // forget them so the replay deploys and registers its own.
+        if (addresses.isAddressSet(BALANCER)) AddressBookHarness.forget(addresses, BALANCER);
+        if (addresses.isAddressSet(MODULE)) AddressBookHarness.forget(addresses, MODULE);
 
         safe = addresses.getAddress("F-MAMO");
         pool = addresses.getAddress("WETH_CBBTC_V3_CL_POOL");
@@ -112,8 +118,20 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         return id;
     }
 
+    /// @dev Sum of `token` mints to `to` in the logs recorded since the last vm.recordLogs().
+    function _mintedTo(address token, address to) internal returns (uint256 sum) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 transferSig = keccak256("Transfer(address,address,uint256)");
+        for (uint256 i; i < logs.length; i++) {
+            if (
+                logs[i].emitter == token && logs[i].topics.length == 3 && logs[i].topics[0] == transferSig
+                    && logs[i].topics[1] == bytes32(0) && logs[i].topics[2] == bytes32(uint256(uint160(to)))
+            ) sum += abi.decode(logs[i].data, (uint256));
+        }
+    }
+
     function _lab() internal view returns (LPAutoBalancerV2) {
-        return LPAutoBalancerV2(payable(addresses.getAddress("MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3")));
+        return LPAutoBalancerV2(payable(addresses.getAddress(BALANCER)));
     }
 
     function _runProposal() internal {
@@ -124,12 +142,12 @@ contract LPAutoBalancerV2V3SetupTest is Test {
     }
 
     function test_proposal_lifecycle() public {
-        assertFalse(addresses.isAddressSet("MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3"), "not deployed before");
+        assertFalse(addresses.isAddressSet(BALANCER), "not deployed before (or forgotten in setUp)");
         assertEq(INonfungiblePositionManager(nfpm).ownerOf(tokenId), safe, "F-MAMO holds the V3 NFT");
 
         _runProposal();
         LPAutoBalancerV2 lab = _lab();
-        assertTrue(addresses.isAddressSet("MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3"), "module registered");
+        assertTrue(addresses.isAddressSet(MODULE), "module registered");
         (address[] memory targets,,) = proposal.getProposalActions();
         assertEq(targets.length, EXPECTED_ACTIONS, "Safe batch size");
         assertEq(INonfungiblePositionManager(nfpm).ownerOf(tokenId), address(lab), "balancer holds the NFT");
@@ -140,18 +158,44 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         assertEq(INonfungiblePositionManager(nfpm).ownerOf(tokenId), gauge, "NFT in the V3 gauge");
         assertTrue(ICLGauge(gauge).stakedContains(address(lab), tokenId), "staked for the balancer");
 
-        // Accrue well past the early-withdraw penalty window, then claim to DROP_AUTOMATION in AERO_V3.
+        // feeCollector == balancer: a claim keeps the AERO_V3 on the balancer; nothing reaches DROP.
         skip(2 hours);
         vm.roll(block.number + 3_600);
+        address module = addresses.getAddress(MODULE);
         address drop = addresses.getAddress("DROP_AUTOMATION");
         IERC20 aeroV3 = IERC20(addresses.getAddress("AERO_V3"));
         IERC20 aeroV1 = IERC20(addresses.getAddress("AERO"));
-        uint256 v3Before = aeroV3.balanceOf(drop);
-        uint256 v1Before = aeroV1.balanceOf(drop);
+        uint256 dropV3 = aeroV3.balanceOf(drop);
+        uint256 dropV1 = aeroV1.balanceOf(drop);
+        vm.recordLogs();
         vm.prank(rebalancerEOA);
         lab.claimEmissions();
-        assertGt(aeroV3.balanceOf(drop) - v3Before, 0, "AERO_V3 claimed to DROP_AUTOMATION");
-        assertEq(aeroV1.balanceOf(drop), v1Before, "no legacy AERO involved");
+        uint256 claimed = aeroV3.balanceOf(address(lab));
+        assertEq(claimed, _mintedTo(address(aeroV3), address(lab)), "balancer holds exactly its mint");
+        assertGt(claimed, 0, "claim kept AERO_V3 on the balancer");
+        assertEq(aeroV3.balanceOf(module), 0, "claim sends nothing to the module");
+
+        // compound(50%) splits the WHOLE balance, earlier claim included: half stays, half to the module.
+        skip(1 hours);
+        vm.roll(block.number + 1_800);
+        vm.prank(rebalancerEOA);
+        lab.compound(5_000);
+        uint256 kept = aeroV3.balanceOf(address(lab));
+        uint256 total = kept + aeroV3.balanceOf(module);
+        assertGt(total, claimed, "compound harvested fresh emissions");
+        assertEq(kept, total * 5_000 / 10_000, "drop share stays on the balancer");
+
+        // compound(100%) empties the balancer into the module: the path out of the drop share.
+        vm.prank(rebalancerEOA);
+        lab.compound(10_000);
+        assertEq(aeroV3.balanceOf(address(lab)), 0, "balancer emptied");
+        assertEq(aeroV3.balanceOf(module), total, "all of it to the module (same block: nothing fresh)");
+        assertEq(aeroV3.balanceOf(drop), dropV3, "DROP_AUTOMATION never receives AERO_V3");
+        assertEq(aeroV1.balanceOf(drop), dropV1, "no legacy AERO involved");
+
+        // Accrue again so exit's unstake claims something.
+        skip(1 hours);
+        vm.roll(block.number + 1_800);
 
         // Exit as F-MAMO: the recipient gets exactly the position's principal at the current price.
         (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = INonfungiblePositionManager(nfpm).positions(tokenId);
@@ -160,12 +204,23 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         assertGt(exp0, 0, "in-range: WETH leg");
         assertGt(exp1, 0, "in-range: cbBTC leg");
         address to = makeAddr("exitTo");
+        vm.recordLogs();
         vm.prank(safe);
         lab.exit(to);
+        uint256 exitMint = _mintedTo(address(aeroV3), address(lab));
         assertEq(IERC20(weth).balanceOf(to), exp0, "exact WETH principal");
         assertEq(IERC20(cbbtc).balanceOf(to), exp1, "exact cbBTC principal");
         (,,,,,,,,,,,,,,,,,,,, bool active) = lab.position();
         assertFalse(active, "inactive after exit");
+
+        // exit's unstake claim stays on the balancer (compound needs an active position): the Safe recovers it.
+        uint256 left = aeroV3.balanceOf(address(lab));
+        assertGt(left, 0, "exit claim kept on the balancer");
+        assertEq(left, exitMint, "exactly the exit mint");
+        assertEq(IERC20(aeroV3).balanceOf(to), 0, "exit recipient gets no AERO_V3");
+        vm.prank(safe);
+        lab.recoverERC20(address(aeroV3), safe, left);
+        assertEq(aeroV3.balanceOf(address(lab)), 0, "nothing stranded on the balancer");
     }
 
     /// @notice Pins every Safe action and its order; the armed delays equal the ctor default, so only
@@ -173,7 +228,7 @@ contract LPAutoBalancerV2V3SetupTest is Test {
     function test_actions_exactTargetsAndCalldata() public {
         _runProposal();
         LPAutoBalancerV2 lab = _lab();
-        address module = addresses.getAddress("MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3");
+        address module = addresses.getAddress(MODULE);
         (address[] memory t, uint256[] memory v, bytes[] memory d) = proposal.getProposalActions();
         assertEq(t.length, EXPECTED_ACTIONS, "Safe batch size");
         for (uint256 i; i < v.length; i++) {
@@ -206,6 +261,7 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         assertEq(c.pool, pool, "registered pool");
         assertEq(c.gauge, gauge, "registered gauge");
         assertEq(int256(c.tickSpacing), 1, "registered spacing");
+        assertEq(c.feeCollector, address(lab), "registered feeCollector is the balancer");
         _assertAction(
             t[4],
             d[4],
@@ -262,6 +318,23 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         proposal.build();
     }
 
+    /// @notice A V3 NFT on the right pool but emptied of liquidity is refused.
+    function test_build_rejectsZeroLiquidityPosition() public {
+        uint256 emptyId = _mintAllocation(address(this), pool, 1, TARGET_ALLOCATION_USD);
+        (,,,,,,, uint128 liq,,,,) = INonfungiblePositionManager(nfpm).positions(emptyId);
+        INonfungiblePositionManager(nfpm)
+            .decreaseLiquidity(
+                INonfungiblePositionManager.DecreaseLiquidityParams({
+                tokenId: emptyId, liquidity: liq, amount0Min: 0, amount1Min: 0, deadline: block.timestamp
+            })
+            );
+        INonfungiblePositionManager(nfpm).safeTransferFrom(address(this), safe, emptyId);
+        proposal.setTokenId(emptyId);
+        proposal.deploy();
+        vm.expectRevert("tokenId has no liquidity");
+        proposal.build();
+    }
+
     function test_build_rejectsTokenNotHeldBySafe() public {
         uint256 strayId = _mintAllocation(address(this), pool, 1, TARGET_ALLOCATION_USD);
         proposal.setTokenId(strayId);
@@ -284,12 +357,13 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         LPAutoBalancerV2WethCbbtcV3Setup p = new LPAutoBalancerV2WethCbbtcV3Setup();
         p.setPrimaryForkId(vm.activeFork());
         assertEq(p.tokenId(), 0, "tokenId starts unset");
+        // run() builds its own book: lend code to entries newer than the pin for that constructor.
+        address[] memory lent = AddressBookHarness.lendCodeToEntriesDeployedAfterThePin("./addresses");
         p.run();
-        assertEq(p.tokenId(), 424_242, "tokenId from INIT_TOKEN_ID");
-        assertEq(p.totalAllocationUsd(), 1_234_500_000_000, "allocation from TOTAL_ALLOCATION_USD");
-        assertEq(p.allocationToleranceBps(), 250, "tolerance from ALLOCATION_TOLERANCE_BPS");
+        AddressBookHarness.returnLoan(lent);
+        (uint256 id, uint256 alloc, uint16 tol) = (p.tokenId(), p.totalAllocationUsd(), p.allocationToleranceBps());
 
-        // vm.setEnv is process-global: restore the simulator defaults and clear the inputs.
+        // vm.setEnv is process-global: restore the defaults BEFORE asserting, so a failure cannot leak.
         vm.setEnv("DO_DEPLOY", "true");
         vm.setEnv("DO_BUILD", "true");
         vm.setEnv("DO_SIMULATE", "true");
@@ -298,5 +372,9 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         vm.setEnv("INIT_TOKEN_ID", "0");
         vm.setEnv("TOTAL_ALLOCATION_USD", "5000000000000");
         vm.setEnv("ALLOCATION_TOLERANCE_BPS", "500");
+
+        assertEq(id, 424_242, "tokenId from INIT_TOKEN_ID");
+        assertEq(alloc, 1_234_500_000_000, "allocation from TOTAL_ALLOCATION_USD");
+        assertEq(tol, 250, "tolerance from ALLOCATION_TOLERANCE_BPS");
     }
 }

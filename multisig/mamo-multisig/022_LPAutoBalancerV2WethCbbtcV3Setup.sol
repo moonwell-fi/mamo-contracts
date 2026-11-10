@@ -22,7 +22,9 @@ import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 /// @dev    PRECONDITION: F-MAMO holds a WETH/cbBTC position NFT of the V3 NFPM (tickSpacing 1),
 ///         passed as INIT_TOKEN_ID. The position is registered UNSTAKED; the rebalancer stakes it.
 ///         Deferred as in 011 (checker owner is not F-MAMO): AERO_V3 checker config and
-///         module.approveCowSwap(). AERO here is AERO_V3, which CHAINLINK_AERO_USD does not price.
+///         module.approveCowSwap(), assuming AERO_V3 prices at parity with CHAINLINK_AERO_USD (legacy AERO).
+///         feeCollector is the balancer itself, as on the live V1 balancer: DropAutomation cannot swap
+///         AERO_V3, so claimed AERO_V3 and LP fees stay on the balancer until compound() or recoverERC20.
 contract LPAutoBalancerV2WethCbbtcV3Setup is MultisigProposal {
     using LPPairConfig for LPPairConfig.Pair;
 
@@ -137,7 +139,7 @@ contract LPAutoBalancerV2WethCbbtcV3Setup is MultisigProposal {
         c.token1 = p.token1;
         c.tickSpacing = p.tickSpacing;
         c.gauge = p.gauge;
-        c.feeCollector = addresses.getAddress("DROP_AUTOMATION");
+        c.feeCollector = addresses.getAddress(p.balancerName());
         c.oracle0 = p.oracle0;
         c.oracle1 = p.oracle1;
         c.minWidth = p.minWidth;
@@ -205,7 +207,7 @@ contract LPAutoBalancerV2WethCbbtcV3Setup is MultisigProposal {
         assertEq(int256(c.tickSpacing), int256(p.tickSpacing), "tickSpacing");
         assertEq(c.gauge, p.gauge, "gauge");
         assertFalse(c.mainStaked, "registered unstaked");
-        assertEq(c.feeCollector, addresses.getAddress("DROP_AUTOMATION"), "feeCollector");
+        assertEq(c.feeCollector, address(lab), "feeCollector is the balancer");
         assertEq(c.oracle0, p.oracle0, "oracle0");
         assertEq(c.oracle1, p.oracle1, "oracle1");
         assertEq(c.minWidth, p.minWidth, "minWidth");
