@@ -29,8 +29,8 @@ contract LPAutoBalancerV2V3SetupTest is Test {
     int24 constant HALF_WIDTH = 400;
     // Proposal 022's Safe batch: 2 guards + deposit + register + grant + 6 module/allowance setters.
     uint256 constant EXPECTED_ACTIONS = 11;
-    string constant BALANCER = "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3";
-    string constant MODULE = "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3";
+    string constant BALANCER = "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3_CL10";
+    string constant MODULE = "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3_CL10";
 
     LPAutoBalancerV2WethCbbtcV3Setup proposal;
     Addresses addresses;
@@ -58,13 +58,13 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         if (addresses.isAddressSet(MODULE)) AddressBookHarness.forget(addresses, MODULE);
 
         safe = addresses.getAddress("F-MAMO");
-        pool = addresses.getAddress("WETH_CBBTC_V3_CL_POOL");
-        gauge = addresses.getAddress("WETH_CBBTC_V3_CL_GAUGE");
+        pool = addresses.getAddress("WETH_CBBTC_V3_CL10_POOL");
+        gauge = addresses.getAddress("WETH_CBBTC_V3_CL10_GAUGE");
         nfpm = addresses.getAddress("AERODROME_SLIPSTREAM_NFPM_V3");
         weth = addresses.getAddress("WETH");
         cbbtc = addresses.getAddress("cbBTC");
 
-        tokenId = _mintAllocation(safe, pool, 1, TARGET_ALLOCATION_USD);
+        tokenId = _mintAllocation(safe, pool, 10, TARGET_ALLOCATION_USD);
 
         proposal = new LPAutoBalancerV2WethCbbtcV3Setup();
         proposal.setPrimaryForkId(vm.activeFork());
@@ -260,7 +260,7 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         assertEq(c.mainTokenId, tokenId, "registered tokenId");
         assertEq(c.pool, pool, "registered pool");
         assertEq(c.gauge, gauge, "registered gauge");
-        assertEq(int256(c.tickSpacing), 1, "registered spacing");
+        assertEq(int256(c.tickSpacing), 10, "registered spacing");
         assertEq(c.feeCollector, address(lab), "registered feeCollector is the balancer");
         _assertAction(
             t[4],
@@ -308,10 +308,9 @@ contract LPAutoBalancerV2V3SetupTest is Test {
         proposal.validate();
     }
 
-    /// @notice A V3 NFT of another pool (CL10, tickSpacing 10) is refused before any action is recorded.
+    /// @notice A V3 NFT of another pool (CL1, tickSpacing 1) is refused before any action is recorded.
     function test_build_rejectsOtherPoolPosition() public {
-        address cl10Pool = ICLGauge(0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5).pool();
-        uint256 otherId = _mintAllocation(safe, cl10Pool, 10, TARGET_ALLOCATION_USD);
+        uint256 otherId = _mintAllocation(safe, addresses.getAddress("WETH_CBBTC_V3_CL_POOL"), 1, TARGET_ALLOCATION_USD);
         proposal.setTokenId(otherId);
         proposal.deploy();
         vm.expectRevert("tokenId is not a V3 pool position");
@@ -320,7 +319,7 @@ contract LPAutoBalancerV2V3SetupTest is Test {
 
     /// @notice A V3 NFT on the right pool but emptied of liquidity is refused.
     function test_build_rejectsZeroLiquidityPosition() public {
-        uint256 emptyId = _mintAllocation(address(this), pool, 1, TARGET_ALLOCATION_USD);
+        uint256 emptyId = _mintAllocation(address(this), pool, 10, TARGET_ALLOCATION_USD);
         (,,,,,,, uint128 liq,,,,) = INonfungiblePositionManager(nfpm).positions(emptyId);
         INonfungiblePositionManager(nfpm)
             .decreaseLiquidity(
@@ -336,7 +335,7 @@ contract LPAutoBalancerV2V3SetupTest is Test {
     }
 
     function test_build_rejectsTokenNotHeldBySafe() public {
-        uint256 strayId = _mintAllocation(address(this), pool, 1, TARGET_ALLOCATION_USD);
+        uint256 strayId = _mintAllocation(address(this), pool, 10, TARGET_ALLOCATION_USD);
         proposal.setTokenId(strayId);
         proposal.deploy();
         vm.expectRevert("F-MAMO does not hold tokenId");

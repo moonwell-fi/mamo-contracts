@@ -16,7 +16,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  *         (MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC): every module/guard value is read from that deployment.
  *
  * @dev Registers under `<pair name>_TEST`, never the plain pair name: proposal 022 deploys the F-MAMO
- *      balancer under MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3 and reverts if that name is taken.
+ *      balancer under MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3_CL10 and reverts if that name is taken.
  *
  *      Step 1, `run()`, any funded key: CREATEs + wiring with the deployer as temporary admin, then
  *      DEFAULT_ADMIN_ROLE moves to LP_ADMIN and the deployer renounces.

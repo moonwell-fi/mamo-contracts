@@ -14,12 +14,12 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 
 /// @title LPAutoBalancerV2WethCbbtcV3Setup
-/// @notice F-MAMO proposal activating LPAutoBalancerV2 on the WETH/cbBTC Slipstream V3 (CL1) pool.
+/// @notice F-MAMO proposal activating LPAutoBalancerV2 on the WETH/cbBTC Slipstream V3 (CL10) pool.
 ///         deploy(): balancer + compound module via DeployLPAutoBalancerV2Pair (V3 NFPM, AERO_V3),
-///         registered as MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3 / MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3.
+///         registered as MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3_CL10 / MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3_CL10.
 ///         build(), as F-MAMO: sequencer guard, oracle delays, deposit of the pre-minted V3 NFT,
 ///         registerPosition, REBALANCER_ROLE grant, compound-module setters. Same order as 011.
-/// @dev    PRECONDITION: F-MAMO holds a WETH/cbBTC position NFT of the V3 NFPM (tickSpacing 1),
+/// @dev    PRECONDITION: F-MAMO holds a WETH/cbBTC position NFT of the V3 NFPM (tickSpacing 10),
 ///         passed as INIT_TOKEN_ID. The position is registered UNSTAKED; the rebalancer stakes it.
 ///         Deferred as in 011 (checker owner is not F-MAMO): AERO_V3 checker config and
 ///         module.approveCowSwap(), assuming AERO_V3 prices at parity with CHAINLINK_AERO_USD (legacy AERO).
@@ -93,7 +93,7 @@ contract LPAutoBalancerV2WethCbbtcV3Setup is MultisigProposal {
     }
 
     function pair() public view returns (LPPairConfig.Pair memory) {
-        return LPPairConfig.wethCbbtcV3(addresses);
+        return LPPairConfig.wethCbbtcV3Cl10(addresses);
     }
 
     function deploy() public override {
