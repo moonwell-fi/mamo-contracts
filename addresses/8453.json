@@ -446,6 +446,11 @@
   },
   {
     "addr": "0xd4669fCee3BE73b51438ad1f1debEB3505Eab308",
+    "name": "LUKE",
+    "isContract": false
+  },
+  {
+    "addr": "0x1C7D22d4Ce5283B19d5FD17C3Ef480c687B3b030",
     "name": "MAMO_LP_REBALANCER",
     "isContract": false
   },
@@ -532,6 +537,16 @@
   {
     "addr": "0xAbb3fb6659e05847631896cB87A6D1b8bc0c6D8C",
     "name": "WETH_CBBTC_V3_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0xbB5507DaaE822ba89C4dA61BbfDf4b49a1666BAc",
+    "name": "WETH_CBBTC_V3_CL10_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5",
+    "name": "WETH_CBBTC_V3_CL10_GAUGE",
     "isContract": true
   }
 ]

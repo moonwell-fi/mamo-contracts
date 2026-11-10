@@ -38,7 +38,8 @@ Aerodrome Slipstream CL, Base. Verified onchain 2026-08-24.
 | Chainlink L2 sequencer uptime | `0xBCF85224fc0756B9Fa45aA7892530B47e10b6433` |
 | feeCollector | `DROP_AUTOMATION` in `addresses/8453.json` |
 | Balancer | `MAMO_LP_AUTO_BALANCER_V2` |
-| Rebalancer EOA (backend hot key) | `MAMO_LP_REBALANCER` — `0xd4669fCee3BE73b51438ad1f1debEB3505Eab308` |
+| Rebalancer EOA (backend hot key) | `MAMO_LP_REBALANCER` — `0x1C7D22d4Ce5283B19d5FD17C3Ef480c687B3b030` |
+| Test-pair owner (admin + guardian) | `LUKE` — `0xd4669fCee3BE73b51438ad1f1debEB3505Eab308` |
 | Compound module | `MAMO_LP_COMPOUND_MODULE` |
 
 Two things that bite if assumed rather than read:
@@ -283,7 +284,7 @@ cast call $LAB "swapLossAllowanceBps()(uint16)" --rpc-url $RPC   # 300
 
 # 3. our role
 cast call $LAB "hasRole(bytes32,address)(bool)" $(cast keccak "REBALANCER_ROLE") $BACKEND_EOA --rpc-url $RPC
-# BACKEND_EOA must equal MAMO_LP_REBALANCER (0xd4669fCe…) — the key 011 grants
+# BACKEND_EOA must equal MAMO_LP_REBALANCER (0x1C7D22d4…) — the key 011 grants
 
 # 4. post-audit ABI (a backend built to the pre-audit spec fails all of these)
 cast call $LAB "rebalanceAmountsBefore()(uint256,uint256,uint256,uint256)" --rpc-url $RPC  # exists; zeros when idle

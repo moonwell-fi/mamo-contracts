@@ -22,7 +22,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
  *
  *      Env:
  *        LP_PAIR        required — an LPPairConfig key, e.g. "WETH_USDC" or "WETH_CBBTC_V3"
- *        LP_ADMIN       optional — DEFAULT_ADMIN_ROLE; defaults to MAMO_LP_REBALANCER
+ *        LP_ADMIN       optional — DEFAULT_ADMIN_ROLE; defaults to LUKE
  *        LP_GUARDIAN    optional — defaults to LP_ADMIN
  *        LP_MANAGER     optional — defaults to address(0), granted later by the admin
  *        LP_REBALANCER  optional — defaults to address(0), granted later by the admin
@@ -33,7 +33,7 @@ import {Addresses} from "@fps/addresses/Addresses.sol";
 contract DeployLPAutoBalancerV2Pair is Script {
     using LPPairConfig for LPPairConfig.Pair;
 
-    function run() public returns (LPAutoBalancerV2 lab, LPCompoundModule module) {
+    function run() public virtual returns (LPAutoBalancerV2 lab, LPCompoundModule module) {
         string memory addressesFolderPath = "./addresses";
         uint256[] memory chainIds = new uint256[](1);
         chainIds[0] = block.chainid;
@@ -42,7 +42,7 @@ contract DeployLPAutoBalancerV2Pair is Script {
 
         LPPairConfig.Pair memory pair = LPPairConfig.byKey(addresses, vm.envString("LP_PAIR"));
 
-        address admin = vm.envOr("LP_ADMIN", addresses.getAddress("MAMO_LP_REBALANCER"));
+        address admin = vm.envOr("LP_ADMIN", addresses.getAddress("LUKE"));
         require(admin != address(0), "LP_ADMIN must be set");
         address guardian = vm.envOr("LP_GUARDIAN", admin);
         address manager = vm.envOr("LP_MANAGER", address(0));
