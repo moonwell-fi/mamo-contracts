@@ -14,6 +14,7 @@ import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,9 +49,9 @@ contract LPAutoBalancerV2SetupTest is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
 
-    // At or above the newest `isContract: true` entry in addresses/8453.json (51_441_832), which the
-    // Addresses constructor validates against this fork.
-    uint256 constant PINNED_BLOCK = 51_500_000;
+    // Inside [52_913_506, 52_918_312): at or above the newest book entry (WETH_CBBTC_V3_CL_GAUGE), and
+    // before the voter killed the V1 CL10 gauge (`isAlive` false from 52_918_312, `stake` reverts GK).
+    uint256 constant PINNED_BLOCK = 52_915_000;
     /// @dev Lower tick of the main position minted in setUp; the lifecycle test asserts spot is pushed below it.
     int24 internal mainTickLower;
     int24 constant TICK_SPACING = 10;
@@ -78,9 +79,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         vm.fee(0);
 
         // FPS addresses for this chain.
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses("./addresses", chainIds);
+        addresses = AddressBookHarness.build("./addresses");
         vm.makePersistent(address(addresses));
 
         safe = addresses.getAddress("F-MAMO");
@@ -313,21 +312,26 @@ contract LPAutoBalancerV2SetupTest is Test {
         assertTrue(p.totalAllocationUsd() != 1_234_500_000_000, "allocation default differs from the env value");
         assertTrue(p.allocationToleranceBps() != 250, "tolerance default differs from the env value");
 
+        // run() builds its own book: lend code to entries newer than the pin for that constructor.
+        address[] memory lent = AddressBookHarness.lendCodeToEntriesDeployedAfterThePin("./addresses");
         p.run();
+        AddressBookHarness.returnLoan(lent);
+        (uint256 id, uint256 alloc, uint16 tol) = (p.tokenId(), p.totalAllocationUsd(), p.allocationToleranceBps());
 
-        assertEq(p.tokenId(), 424_242, "tokenId read from INIT_TOKEN_ID");
-        assertEq(p.totalAllocationUsd(), 1_234_500_000_000, "allocation read from TOTAL_ALLOCATION_USD");
-        assertEq(p.allocationToleranceBps(), 250, "tolerance read from ALLOCATION_TOLERANCE_BPS");
-
-        // `vm.setEnv` is PROCESS-global, not test-scoped: it outlives this test and this suite.
-        // Left at "false", every proposal built by a later suite in the same `forge test` run
-        // skips deploy()/build() and dies on a missing address (MultiMarketStrategyTest:
-        // "MARKET_REGISTRY not set on chain: 8453"). Restore the simulator's defaults.
+        // `vm.setEnv` is PROCESS-global: a later suite would build with these values (DO_* "false"
+        // skips deploy and dies on a missing address). Restore BEFORE asserting so a failure cannot leak.
         vm.setEnv("DO_DEPLOY", "true");
         vm.setEnv("DO_BUILD", "true");
         vm.setEnv("DO_SIMULATE", "true");
         vm.setEnv("DO_VALIDATE", "true");
         vm.setEnv("DO_PRINT", "true");
+        vm.setEnv("INIT_TOKEN_ID", "0");
+        vm.setEnv("TOTAL_ALLOCATION_USD", "5000000000000");
+        vm.setEnv("ALLOCATION_TOLERANCE_BPS", "500");
+
+        assertEq(id, 424_242, "tokenId read from INIT_TOKEN_ID");
+        assertEq(alloc, 1_234_500_000_000, "allocation read from TOTAL_ALLOCATION_USD");
+        assertEq(tol, 250, "tolerance read from ALLOCATION_TOLERANCE_BPS");
     }
 
     /// @dev The PRODUCTION resolution path. Every other test injects a made-up rebalancer via

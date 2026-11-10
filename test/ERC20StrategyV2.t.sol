@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
 
 import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 
@@ -26,7 +27,13 @@ contract ERC20StrategyV2Test is BaseTest {
 
     uint256 public constant STRATEGY_TYPE_ID = 1;
 
+    function _newAddressBook(string memory folder) internal override returns (Addresses) {
+        return AddressBookHarness.build(folder);
+    }
+
     function setUp() public override {
+        // The address book needs every entry deployed; 52_915_000 is the repo's book pin. No --fork-url.
+        vm.createSelectFork({urlOrAlias: "base", blockNumber: 52_915_000});
         super.setUp();
         vm.createSelectFork({urlOrAlias: "base", blockNumber: 36224833});
 

@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {DeployLPAutoBalancerV2} from "../script/DeployLPAutoBalancerV2.s.sol";
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
 import {LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
@@ -13,8 +14,8 @@ contract DeployLPAutoBalancerV2Test is Test {
     // Pinned Base block — the constructor runs against a forked post-Isthmus block, which under
     // foundry 1.7.x panics on operator-fee refund unless gas/base fee are zeroed (see below).
     // Must stay at or above the newest `isContract: true` entry in addresses/8453.json, which the
-    // Addresses constructor validates against this fork (LP pair deploys landed at 51_441_832).
-    uint256 constant PINNED_BLOCK = 51_500_000;
+    // Addresses constructor validates against this fork (WETH_CBBTC_V3_CL_GAUGE, 52_913_506).
+    uint256 constant PINNED_BLOCK = 52_915_000;
 
     Addresses internal addresses;
     DeployLPAutoBalancerV2 internal deployScript;
@@ -26,10 +27,7 @@ contract DeployLPAutoBalancerV2Test is Test {
         vm.txGasPrice(0);
         vm.fee(0);
 
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        addresses = AddressBookHarness.build("./addresses");
         vm.makePersistent(address(addresses));
 
         deployScript = new DeployLPAutoBalancerV2();

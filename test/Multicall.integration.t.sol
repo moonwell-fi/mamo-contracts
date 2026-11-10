@@ -2,6 +2,8 @@
 pragma solidity 0.8.28;
 
 import {BaseTest} from "./BaseTest.t.sol";
+import {AddressBookHarness} from "./harness/AddressBookHarness.sol";
+import {Addresses} from "@fps/addresses/Addresses.sol";
 
 import {MamoMultiMarketStrategy} from "@contracts/MamoMultiMarketStrategy.sol";
 import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
@@ -101,8 +103,13 @@ contract MulticallIntegrationTest is BaseTest {
     ///      `accrueInterest` intermittently reverts `could not calculate block delta`. `make
     ///      strategy-multicall` drops `--fork-url base`; `vm.fee(0)`/`vm.txGasPrice(0)` is the op-revm
     ///      Isthmus operator-fee workaround. The pin must also sit ABOVE the newest deployment in
-    ///      addresses/8453.json, since the FPS book validates that every entry has code on the fork.
-    uint256 internal constant PINNED_BLOCK = 51_500_000;
+    ///      addresses/8453.json, since the FPS book validates that every entry has code on the fork,
+    ///      and below 52_956_135, where STRATEGY_MULTICALL ownership left MAMO_COMPOUNDER.
+    uint256 internal constant PINNED_BLOCK = 52_915_000;
+
+    function _newAddressBook(string memory folder) internal override returns (Addresses) {
+        return AddressBookHarness.build(folder);
+    }
 
     function setUp() public override {
         vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
@@ -430,9 +437,7 @@ contract MulticallIntegrationTest is BaseTest {
         // Prepare multicall that will trigger the malicious contract's reentrancy attempt
         Multicall.Call[] memory calls = new Multicall.Call[](1);
         calls[0] = Multicall.Call({
-            target: address(maliciousContract),
-            data: abi.encodeWithSignature("triggerReentrancy()"),
-            value: 0
+            target: address(maliciousContract), data: abi.encodeWithSignature("triggerReentrancy()"), value: 0
         });
 
         // The malicious contract will call this as the owner
@@ -462,9 +467,7 @@ contract MulticallIntegrationTest is BaseTest {
         // First, attempt reentrancy (should fail)
         Multicall.Call[] memory maliciousCalls = new Multicall.Call[](1);
         maliciousCalls[0] = Multicall.Call({
-            target: address(maliciousContract),
-            data: abi.encodeWithSignature("triggerReentrancy()"),
-            value: 0
+            target: address(maliciousContract), data: abi.encodeWithSignature("triggerReentrancy()"), value: 0
         });
 
         vm.startPrank(address(maliciousContract));
@@ -476,9 +479,7 @@ contract MulticallIntegrationTest is BaseTest {
         // Now verify that normal operations still work after the failed reentrancy
         Multicall.Call[] memory normalCalls = new Multicall.Call[](1);
         normalCalls[0] = Multicall.Call({
-            target: address(maliciousContract),
-            data: abi.encodeWithSignature("harmlessFunction()"),
-            value: 0
+            target: address(maliciousContract), data: abi.encodeWithSignature("harmlessFunction()"), value: 0
         });
 
         // This should succeed

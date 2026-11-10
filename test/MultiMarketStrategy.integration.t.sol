@@ -514,21 +514,22 @@ contract MultiMarketStrategyTest is Test {
         ERC1967Proxy proxy = new ERC1967Proxy(address(v1Impl), "");
         s = MamoMultiMarketStrategy(payable(address(proxy)));
 
-        LegacyV1Strategy(payable(address(s))).initializeLegacyForTest(
-            address(registry),
-            address(mToken),
-            address(metaMorphoVault),
-            address(underlying),
-            address(slippagePriceChecker),
-            admin,
-            _splitMToken,
-            _splitVault,
-            typeId,
-            owner,
-            100000,
-            100,
-            500
-        );
+        LegacyV1Strategy(payable(address(s)))
+            .initializeLegacyForTest(
+                address(registry),
+                address(mToken),
+                address(metaMorphoVault),
+                address(underlying),
+                address(slippagePriceChecker),
+                admin,
+                _splitMToken,
+                _splitVault,
+                typeId,
+                owner,
+                100000,
+                100,
+                500
+            );
         registry.addStrategy(owner, address(s));
         vm.stopPrank();
     }

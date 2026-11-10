@@ -460,12 +460,9 @@ contract LeveragedAeroTwoLegLifecycleUnitTest is Test {
         // the book to policy, which is what keeps the multisig off the post-fulfil path as well as the pre one.
         _adjustToPolicy();
         assertApproxEqAbs(
-            (
-                (
-                    _valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
-                        + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18)
-                ) * 10_000
-            ) / mUsdc.balanceOf(address(strategy)),
+            ((_valueUsdc(mLegB.borrowBalance(address(strategy)), P_LEG_B, 8)
+                        + _valueUsdc(mLegA.borrowBalance(address(strategy)), P_LEG_A, 18))
+                    * 10_000) / mUsdc.balanceOf(address(strategy)),
             uint256(TARGET_LTV_BPS),
             20,
             "restored to the standing target with no admin signature"

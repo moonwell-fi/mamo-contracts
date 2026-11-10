@@ -297,9 +297,10 @@ library LeveragedAeroManager {
             uint256 cbFloor;
             uint256 wethFloor;
             // `_sellable` mirrors `_sweepLegToUsdc`'s own gates, so the floor prices what will really sell.
-            try IRedeemSweepFloors(address(this)).redeemSweepFloors(
-                _sellable($.cbBTC, stayersCb), _sellable($.weth, stayersWeth)
-            ) returns (uint256 f0, uint256 f1) {
+            try IRedeemSweepFloors(address(this))
+                .redeemSweepFloors(_sellable($.cbBTC, stayersCb), _sellable($.weth, stayersWeth)) returns (
+                uint256 f0, uint256 f1
+            ) {
                 (cbFloor, wethFloor) = (f0, f1);
             } catch {
                 // Oracle / sequencer down: floors stay 0 so the deadman exit still completes, MARKED
@@ -1022,23 +1023,25 @@ library LeveragedAeroManager {
             (uint256 exp0, uint256 exp1) =
                 LiquidityAmounts.getAmountsForLiquidity(sqrtP, sqrtLower, sqrtUpper, liqToRemove);
             uint256 slip = uint256($.maxSlippageBps);
-            INonfungiblePositionManager(npm_).decreaseLiquidity(
-                INonfungiblePositionManager.DecreaseLiquidityParams({
+            INonfungiblePositionManager(npm_)
+                .decreaseLiquidity(
+                    INonfungiblePositionManager.DecreaseLiquidityParams({
                     tokenId: tokenId_,
                     liquidity: liqToRemove,
                     amount0Min: exp0 * (10000 - slip) / 10000,
                     amount1Min: exp1 * (10000 - slip) / 10000,
                     deadline: block.timestamp + 600
                 })
-            );
-            INonfungiblePositionManager(npm_).collect(
-                INonfungiblePositionManager.CollectParams({
+                );
+            INonfungiblePositionManager(npm_)
+                .collect(
+                    INonfungiblePositionManager.CollectParams({
                     tokenId: tokenId_,
                     recipient: address(this),
                     amount0Max: type(uint128).max,
                     amount1Max: type(uint128).max
                 })
-            );
+                );
         }
 
         // Re-stake only when remaining liquidity is non-zero.
@@ -1220,8 +1223,9 @@ library LeveragedAeroManager {
         (address tok0, address tok1) = _tokens01();
         IERC20(tok0).forceApprove(npm_, amt0);
         IERC20(tok1).forceApprove(npm_, amt1);
-        (uint128 liq,,) = INonfungiblePositionManager(npm_).increaseLiquidity(
-            INonfungiblePositionManager.IncreaseLiquidityParams({
+        (uint128 liq,,) = INonfungiblePositionManager(npm_)
+            .increaseLiquidity(
+                INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId_,
                 amount0Desired: amt0,
                 amount1Desired: amt1,
@@ -1229,7 +1233,7 @@ library LeveragedAeroManager {
                 amount1Min: amt1Min,
                 deadline: block.timestamp + 600
             })
-        );
+            );
         if (uint256(liq) < minLiquidity) revert InsufficientLiquidity();
     }
 

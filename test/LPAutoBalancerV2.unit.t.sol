@@ -5,6 +5,7 @@ import {LPSequencerFeedMock} from "./LPValuationLib.unit.t.sol";
 import {MockERC20} from "./MockERC20.sol";
 import {LPAutoBalancerV2Harness} from "./harness/LPAutoBalancerV2Harness.sol";
 import {MockCLGauge} from "./mocks/MockCLGauge.sol";
+import {MockCLGaugeV3, MockLeafVoter} from "./mocks/MockCLGaugeV3.sol";
 import {MockPriceFeed} from "./mocks/MockPriceFeed.sol";
 import {ILPCompoundModuleRebalance, LPAutoBalancerV2} from "@contracts/LPAutoBalancerV2.sol";
 import {LPCompoundModule} from "@contracts/LPCompoundModule.sol";
@@ -388,6 +389,13 @@ contract MockCLPoolV2 is ICLPool {
         _tickSpacing = ts;
     }
 
+    /// @notice The pool's own gauge pointer, read by the gauge binding check (both versions).
+    address public gauge;
+
+    function setGauge(address gauge_) external {
+        gauge = gauge_;
+    }
+
     function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16, uint16, uint16, bool unlocked) {
         return (sqrtPX96, currentTick, 0, 0, 0, true);
     }
@@ -481,11 +489,14 @@ contract LPAutoBalancerV2UnitTest is Test {
         // registerPosition cross-validates the pool descriptor: token0/token1/tickSpacing must match.
         mockPool.setTokens(token0, token1);
         mockPool.setTickSpacing(200);
-        // Bind the gauge to this pool so _validateAndStore's gauge->pool check passes.
+        // Bind the gauge to this pool from both sides so _validateAndStore's gauge<->pool check passes.
         mockGauge.setPool(pool);
+        mockPool.setGauge(gauge);
 
         // Rich PM mock with full position lifecycle (positions/decrease/collect/mint/burn).
         mockPM = new MockPositionManagerV2(address(0));
+        // The gauge accepts this position manager's NFTs (validateGauge's gauge->NFPM check).
+        mockGauge.setNft(address(mockPM));
 
         // Real mock feeds: registerPosition probes latestRoundData at set-time
         oracle0 = address(new MockPriceFeed(1e8, 8, block.timestamp));
@@ -1538,7 +1549,7 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.stake();
         mockGauge.setEarnedAmount(3e18);
         LPAutoBalancerV2.DecisionSnapshotV2 memory s = lab.getDecisionSnapshot();
-        assertGt(s.earnedAero, 0, "earned summed over staked nfts");
+        assertEq(s.earnedAero, 6e18, "earned summed over main + alt");
     }
 
     function test_getDecisionSnapshotV2_revertsOnInactive() public {
@@ -1787,6 +1798,383 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.setPositionConfig(200, 2000, 400, 1800, 200, 100, 0); // minWidth == tickSpacing
     }
 
+    // ─── Slipstream V3 gauge (no rewardToken/getReward; claimEmissions + earned(address,uint256[])) ───
+
+    /// @dev Swap the fixture's V1 gauge for a V3 mock bound from both sides (gauge.pool, pool.gauge).
+    function _useV3Gauge() internal returns (MockCLGaugeV3 v3) {
+        v3 = new MockCLGaugeV3(address(mockAero));
+        v3.setPool(pool);
+        v3.setNft(address(mockPM));
+        mockPool.setGauge(address(v3));
+        gauge = address(v3);
+    }
+
+    function test_isV3Gauge_classifiesBothVersions() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        assertTrue(LPPositionLib.isV3Gauge(address(v3)), "V3 mock");
+        assertFalse(LPPositionLib.isV3Gauge(address(mockGauge)), "V1 mock");
+        assertFalse(LPPositionLib.isV3Gauge(makeAddr("eoa")), "no code");
+    }
+
+    function test_v3Gauge_registerAcceptsPoolBoundGauge() public {
+        _useV3Gauge();
+        _register(true);
+        assertEq(lab.exposed_position().gauge, gauge, "V3 gauge stored");
+    }
+
+    function test_v3Gauge_registerRevertsWhenPoolNamesAnotherGauge() public {
+        _useV3Gauge();
+        mockPool.setGauge(makeAddr("otherGauge"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_v3Gauge_setGaugeRevertsWhenGaugeNamesAnotherPool() public {
+        _register(false);
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        v3.setPool(makeAddr("otherPool"));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(v3));
+    }
+
+    function test_v3Gauge_registerRevertsWhenGaugeAcceptsAnotherManager() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        v3.setNft(makeAddr("v1Nfpm"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_v3Gauge_claimEmissionsClaimsBothLegsInOneCall() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 14e18);
+        v3.setAeroPerId(7e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.claimCallCount(), 1, "one claim call");
+        assertEq(v3.lastClaimIdCount(), 2, "main + alt claimed");
+        assertEq(v3.lastClaimRecipient(), address(lab), "claimed to the balancer");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 14e18, "both legs forwarded");
+    }
+
+    function test_v3Gauge_compoundDropsAndForwardsToModule() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 1_000e18);
+        v3.setAeroPerId(1_000e18);
+        uint256 fcBefore = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.compound(7_000);
+        assertEq(v3.lastClaimIdCount(), 1, "main only (no alt)");
+        assertEq(mockAero.balanceOf(feeCollector) - fcBefore, 300e18, "30% dropped");
+        assertEq(mockAero.balanceOf(moduleSink), 700e18, "70% to module");
+    }
+
+    /// @notice Unstaked with nothing deferred, compound has nothing to harvest (the gauge would revert `NS`).
+    function test_v3Gauge_compoundUnstakedSkipsClaim() public {
+        _useV3Gauge();
+        _register(true);
+        _setModule();
+        vm.prank(rebalancer);
+        vm.expectRevert(LPAutoBalancerV2.NothingToCompound.selector);
+        lab.compound(5_000);
+    }
+
+    /// @notice Unstaked with nothing deferred, the claim skips the gauge (which would revert `NS`).
+    function test_v3Gauge_claimEmissionsUnstakedSkipsGauge() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.claimCallCount(), 0, "no claim while unstaked");
+    }
+
+    /// @notice L-1: emissions the gauge deferred on a failed withdraw-time mint stay claimable unstaked.
+    function test_v3Gauge_claimEmissionsSweepsDeferredWhileUnstaked() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 4e18, "snapshot shows deferred while unstaked");
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.lastClaimIdCount(), 0, "empty id list");
+        assertEq(v3.deferredEmissions(address(lab)), 0, "deferred swept");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 4e18, "deferred forwarded");
+    }
+
+    /// @notice Deferred emissions stay claimable after the position is released (inactive).
+    function test_v3Gauge_claimEmissionsSweepsDeferredAfterWithdrawPosition() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        vm.prank(admin);
+        lab.withdrawPosition(makeAddr("to"));
+        assertFalse(lab.exposed_position().active, "inactive");
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.lastClaimIdCount(), 0, "no legs claimed");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 4e18, "deferred forwarded after release");
+    }
+
+    /// @notice L-1: compound also sweeps deferred emissions while unstaked.
+    function test_v3Gauge_compoundSweepsDeferredWhileUnstaked() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        _setModule();
+        mockAero.mint(address(v3), 10e18);
+        v3.setDeferred(address(lab), 10e18);
+        uint256 fcBefore = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.compound(5_000);
+        assertEq(mockAero.balanceOf(moduleSink), 5e18, "half to module");
+        assertEq(mockAero.balanceOf(feeCollector) - fcBefore, 5e18, "other half to feeCollector");
+        assertEq(v3.deferredEmissions(address(lab)), 0, "deferred swept");
+    }
+
+    /// @notice A withdraw whose mint fails defers the emissions; a later claimEmissions sweeps them.
+    function test_v3Gauge_unstakeDefersThenClaimSweeps() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 5e18);
+        v3.setAeroPerId(5e18);
+        v3.setDeferOnWithdraw(true);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertEq(mockAero.balanceOf(feeCollector), before, "nothing paid on a deferred withdraw");
+        assertEq(v3.deferredEmissions(address(lab)), 5e18, "withdraw deferred the emissions");
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        assertEq(v3.deferredEmissions(address(lab)), 0, "deferred swept");
+        assertEq(mockAero.balanceOf(feeCollector) - before, 5e18, "deferred forwarded");
+    }
+
+    function test_v3Gauge_unstakeForwardsWithdrawClaim() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        mockAero.mint(address(v3), 5e18);
+        v3.setAeroPerId(5e18);
+        uint256 before = mockAero.balanceOf(feeCollector);
+        vm.prank(rebalancer);
+        lab.unstake();
+        assertEq(mockAero.balanceOf(feeCollector) - before, 5e18, "withdraw claim forwarded");
+    }
+
+    function test_v3Gauge_snapshotEarnedTolerant() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        v3.setEarned(3e18, false);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 6e18, "one earned call over main + alt");
+        // V3 `earned` adds the deferred amount once per call, so a per-leg read would count it twice.
+        v3.setDeferred(address(lab), 5e18);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 11e18, "deferred counted once");
+        v3.setEarned(3e18, true);
+        assertEq(lab.getDecisionSnapshot().earnedAero, 0, "reverting earned reads as 0");
+    }
+
+    /// @notice emergencyUnstake is admin-only.
+    function test_emergencyUnstake_revertsForNonAdmin() public {
+        _useV3Gauge();
+        _register(true);
+        vm.prank(rebalancer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, rebalancer, bytes32(0))
+        );
+        lab.emergencyUnstake();
+    }
+
+    /// @notice With the gauge factory's flag off, emergencyUnstake reverts with the gauge's `NE`.
+    function test_v3Gauge_emergencyUnstakeRevertsWhileFlagOff() public {
+        _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        vm.prank(admin);
+        vm.expectRevert(bytes("NE"));
+        lab.emergencyUnstake();
+    }
+
+    /// @notice With the flag on, emergencyUnstake pulls both legs back and clears the flags so exit works.
+    function test_v3Gauge_emergencyUnstakeClearsStakeAndExitSucceeds() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _registerWithAlt(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        v3.setEmergencyEnabled(true);
+        vm.expectEmit(true, false, false, true, address(lab));
+        emit LPAutoBalancerV2.Unstaked(TOKEN_ID, address(v3));
+        vm.expectEmit(true, false, false, true, address(lab));
+        emit LPAutoBalancerV2.Unstaked(ALT_TOKEN_ID, address(v3));
+        vm.prank(admin);
+        lab.emergencyUnstake();
+        (bool mainStaked, bool altStaked) = _readStakeFlags();
+        assertFalse(mainStaked || altStaked, "stake flags cleared");
+        assertFalse(v3.stakedContains(address(lab), TOKEN_ID), "main back from the gauge");
+        assertFalse(v3.stakedContains(address(lab), ALT_TOKEN_ID), "alt back from the gauge");
+        vm.prank(admin);
+        lab.exit(admin);
+        assertFalse(lab.exposed_position().active, "exit completed");
+    }
+
+    /// @notice A V1 gauge has no emergencyWithdraw, so emergencyUnstake reverts with empty data.
+    function test_emergencyUnstake_revertsOnV1Gauge() public {
+        _register(true);
+        vm.prank(rebalancer);
+        lab.stake();
+        vm.prank(admin);
+        (bool ok, bytes memory ret) = address(lab).call(abi.encodeCall(LPAutoBalancerV2.emergencyUnstake, ()));
+        assertFalse(ok, "V1 reverts");
+        assertEq(ret.length, 0, "no such function on V1");
+    }
+
+    /// @notice setGauge refuses to leave a V3 gauge holding deferred emissions until they are claimed.
+    function test_v3Gauge_setGaugeRevertsWhileDeferredPending() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed once deferred is claimed");
+    }
+
+    /// @dev Registered V3 gauge holding 4e18 deferred, with a readable LeafVoter in the given state.
+    function _deferredWithVoter(bool registered, uint8 chainStatus) internal {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        MockLeafVoter voter = new MockLeafVoter();
+        voter.set(registered, chainStatus);
+        v3.setVoter(address(voter));
+        v3.setDeferred(address(lab), 4e18);
+    }
+
+    /// @notice The guard holds while the voter would mint (registered, chain Active).
+    function test_v3Gauge_deferredGuardHoldsWhileVoterCanMint() public {
+        _deferredWithVoter(true, 1);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice The guard also holds on a Sunset chain, which still mints.
+    function test_v3Gauge_deferredGuardHoldsOnSunsetChain() public {
+        _deferredWithVoter(true, 4);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice An unregistered old gauge can never mint, so re-pointing is allowed despite deferred > 0.
+    function test_v3Gauge_deferredGuardSkippedWhenGaugeUnregistered() public {
+        _deferredWithVoter(false, 1);
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed");
+    }
+
+    /// @notice A Paused/Suspended chain refuses every mint, so re-pointing is allowed despite deferred > 0.
+    function test_v3Gauge_deferredGuardSkippedWhenChainNotMinting() public {
+        _deferredWithVoter(true, 3);
+        vm.prank(admin);
+        lab.setGauge(address(0));
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed");
+    }
+
+    /// @notice A reverting `gauge.voter()` read keeps the guard on, even where the voter would let it skip.
+    function test_v3Gauge_deferredGuardHoldsWhenVoterReadReverts() public {
+        _deferredWithVoter(true, 3);
+        vm.mockCallRevert(gauge, abi.encodeWithSignature("voter()"), "VOTER_DOWN");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice A short `gauge.voter()` return keeps the guard on.
+    function test_v3Gauge_deferredGuardHoldsWhenVoterReadShort() public {
+        _deferredWithVoter(true, 3);
+        vm.mockCall(gauge, abi.encodeWithSignature("voter()"), abi.encodePacked(uint8(1)));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice A reverting `chainStatus()` read keeps the guard on, even with a status that would skip it.
+    function test_v3Gauge_deferredGuardHoldsWhenChainStatusReadReverts() public {
+        _deferredWithVoter(true, 3);
+        address voter = MockCLGaugeV3(gauge).voter();
+        vm.mockCallRevert(voter, abi.encodeWithSignature("chainStatus()"), "STATUS_DOWN");
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setGauge(address(0));
+    }
+
+    /// @notice registerPosition after a withdraw is guarded too (its own path through _validateAndStore).
+    function test_v3Gauge_registerRevertsWhileDeferredPending() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(admin);
+        lab.withdrawPosition(makeAddr("to"));
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.registerPosition(cfg);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.registerPosition(cfg);
+        assertTrue(lab.exposed_position().active, "registered once deferred is claimed");
+    }
+
+    /// @notice setPool after exit refuses to drop a V3 gauge holding deferred emissions.
+    function test_v3Gauge_setPoolRevertsWhileDeferredPending() public {
+        MockCLGaugeV3 v3 = _useV3Gauge();
+        _register(true);
+        vm.prank(admin);
+        lab.exit(admin);
+        mockAero.mint(address(v3), 4e18);
+        v3.setDeferred(address(lab), 4e18);
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(false);
+        cfg.mainTokenId = NEW_TOKEN_ID;
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.DeferredEmissionsPending.selector);
+        lab.setPool(cfg);
+        vm.prank(rebalancer);
+        lab.claimEmissions();
+        vm.prank(admin);
+        lab.setPool(cfg);
+        assertEq(lab.exposed_position().gauge, address(0), "re-pointed once deferred is claimed");
+    }
+
     /// @dev F5: a gauge whose rewardToken != AERO must be rejected at registration.
     function test_registerPosition_revertGaugeRewardMismatch() public {
         MockCLGauge badGauge = new MockCLGauge(makeAddr("notAero")); // rewardToken != AERO
@@ -1816,6 +2204,37 @@ contract LPAutoBalancerV2UnitTest is Test {
         vm.prank(admin);
         vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
         lab.setGauge(address(wrongPoolGauge));
+    }
+
+    /// @dev The gauge<->pool binding is checked from both sides on V1 too: a gauge that names this
+    ///      pool is still rejected when the pool names a different gauge.
+    function test_registerPosition_revertWhenPoolNamesAnotherGauge() public {
+        mockPool.setGauge(makeAddr("otherGauge"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    /// @dev A gauge for this pool that accepts another position manager's NFTs would register and
+    ///      then revert deep inside stake(): the gauge->NFPM binding rejects it up front.
+    function test_registerPosition_revertWhenGaugeAcceptsAnotherManager() public {
+        mockGauge.setNft(makeAddr("otherNfpm"));
+        LPAutoBalancerV2.ManagedPositionV2 memory cfg = _defaultConfig(true);
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.registerPosition(cfg);
+    }
+
+    function test_setGauge_revertWhenGaugeAcceptsAnotherManager() public {
+        _register(false);
+        MockCLGauge otherNfpmGauge = new MockCLGauge(address(mockAero));
+        otherNfpmGauge.setPool(pool);
+        otherNfpmGauge.setNft(makeAddr("otherNfpm"));
+        mockPool.setGauge(address(otherNfpmGauge));
+        vm.prank(admin);
+        vm.expectRevert(LPAutoBalancerV2.PoolMismatch.selector);
+        lab.setGauge(address(otherNfpmGauge));
     }
 
     /// @dev Widths are uint24 but downstream tick math casts them to int24, which bit-reinterprets
@@ -3057,17 +3476,21 @@ contract LPAutoBalancerV2UnitTest is Test {
         lab.unstake();
     }
 
+    /// @notice Never registered (no gauge): nothing to claim from, so it reverts.
     function test_claimEmissions_revertsNotActive() public {
         vm.prank(rebalancer);
         vm.expectRevert(LPAutoBalancerV2.NotActive.selector);
         lab.claimEmissions();
     }
 
-    function test_claimEmissions_revertsNotStaked() public {
+    /// @notice Unstaked on V1 there is nothing to claim: no gauge call, nothing forwarded.
+    function test_claimEmissions_unstakedIsNoOp() public {
         _register(true); // registered but never staked
+        uint256 before = mockAero.balanceOf(feeCollector);
         vm.prank(rebalancer);
-        vm.expectRevert(LPAutoBalancerV2.NotStaked.selector);
         lab.claimEmissions();
+        assertEq(mockGauge.getRewardCallCount(), 0, "no getReward while unstaked");
+        assertEq(mockAero.balanceOf(feeCollector), before, "nothing forwarded");
     }
 
     /// @dev MOO-729. claimEmissions() routes 100% of the gauge's pending AERO to the feeCollector,

@@ -446,6 +446,11 @@
   },
   {
     "addr": "0xd4669fCee3BE73b51438ad1f1debEB3505Eab308",
+    "name": "LUKE",
+    "isContract": false
+  },
+  {
+    "addr": "0x1C7D22d4Ce5283B19d5FD17C3Ef480c687B3b030",
     "name": "MAMO_LP_REBALANCER",
     "isContract": false
   },
@@ -507,6 +512,51 @@
   {
     "addr": "0x461BdB37099A30dD5242F7216B440Fcc1C38b9cC",
     "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC",
+    "isContract": true
+  },
+  {
+    "addr": "0x4857DB576eE0e45F10525eC59527BfD10beeC60b",
+    "name": "AERODROME_SLIPSTREAM_NFPM_V3",
+    "isContract": true
+  },
+  {
+    "addr": "0x3f5bF3EdAc59d650D8fDf9657a71F2f904A3a4Ee",
+    "name": "AERO_V3",
+    "isContract": true
+  },
+  {
+    "addr": "0x49d7d4f17Ec56Ef8fA04E464AF5D1A4942CC31e6",
+    "name": "AERODROME_V3_VOTER",
+    "isContract": true
+  },
+  {
+    "addr": "0xeC3c3755b9DED4a2960ef50C9b48C1694CE274C2",
+    "name": "WETH_CBBTC_V3_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0xAbb3fb6659e05847631896cB87A6D1b8bc0c6D8C",
+    "name": "WETH_CBBTC_V3_CL_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0xbB5507DaaE822ba89C4dA61BbfDf4b49a1666BAc",
+    "name": "WETH_CBBTC_V3_CL10_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5",
+    "name": "WETH_CBBTC_V3_CL10_GAUGE",
+    "isContract": true
+  },
+  {
+    "addr": "0xF5f2ae75d762B7e2B42D53f48018436f52Ce5401",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3_CL10_TEST",
+    "isContract": true
+  },
+  {
+    "addr": "0x018dfD8f12773072EB073d8b1B92E701dfBa190B",
+    "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3_CL10_TEST",
     "isContract": true
   }
 ]
