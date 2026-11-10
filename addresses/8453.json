@@ -548,5 +548,15 @@
     "addr": "0x5b14d6D194E49330647eB4717010aDe1B1B3f8B5",
     "name": "WETH_CBBTC_V3_CL10_GAUGE",
     "isContract": true
+  },
+  {
+    "addr": "0xF5f2ae75d762B7e2B42D53f48018436f52Ce5401",
+    "name": "MAMO_LP_AUTO_BALANCER_V2_WETH_CBBTC_V3_CL10_TEST",
+    "isContract": true
+  },
+  {
+    "addr": "0x018dfD8f12773072EB073d8b1B92E701dfBa190B",
+    "name": "MAMO_LP_COMPOUND_MODULE_WETH_CBBTC_V3_CL10_TEST",
+    "isContract": true
   }
 ]
