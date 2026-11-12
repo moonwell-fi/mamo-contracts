@@ -1,0 +1,112 @@
+{
+  "tokens": [
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xf5fcb9cdafce67d50afef298f88e709d2b946ba6",
+      "source": "PoolTwap",
+      "symbol": "AAPLc",
+      "token": "0xb200000000000000000000c2e324d24d7eecd1fb"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x532e0f46d1e528507fc9454d5847c231f23bddf6",
+      "source": "PoolTwap",
+      "symbol": "AMZNc",
+      "token": "0xb200000000000000000000d9192b6B456483C2E8"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x16c70f04c3080a127486cdf5a4c33c066bbf47c3",
+      "source": "PoolTwap",
+      "symbol": "GOOGLc",
+      "token": "0xb2000000000000000000002d0ba3164cc74f58b7"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xd072410fa13d242e1d53721bcf7af02e3455dc96",
+      "source": "PoolTwap",
+      "symbol": "METAc",
+      "token": "0xb2000000000000000000008bc8786b856e61707c"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x2740c0faab738f6e346e545fde02aef9b1a01ee7",
+      "source": "PoolTwap",
+      "symbol": "MSFTc",
+      "token": "0xB200000000000000000000Ab99cFa739E253872B"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x66dcd42e6314b287110922ae36cb2a8bdeecc153",
+      "source": "PoolTwap",
+      "symbol": "MSTRc",
+      "token": "0xb2000000000000000000004884b426556b92883d"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x41e21950362b1014bc629252ecfff8fca5f1646c",
+      "source": "PoolTwap",
+      "symbol": "MUc",
+      "token": "0xb200000000000000000000Fd2f87532B90095211"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xf668e21993f0acd7ab00bb1cfbaed0df28a3c8ec",
+      "source": "PoolTwap",
+      "symbol": "NVDAc",
+      "token": "0xb20000000000000000000078ee7ce2fE4908108C"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0xa0473ced0cd1bfb857e3e04b5fa4b6af18c5e44d",
+      "source": "PoolTwap",
+      "symbol": "PLTRc",
+      "token": "0xb2000000000000000000007d16372840dF4dAbbe"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x2836e062a3fe75943a7f4a552e2365b98e414e75",
+      "source": "PoolTwap",
+      "symbol": "SNDKc",
+      "token": "0xb200000000000000000000397293Cb8cda9a10c5"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x880db7dda4407d99508574e680d067d1164b3cfe",
+      "source": "PoolTwap",
+      "symbol": "SPCXc",
+      "token": "0xb2000000000000000000007b9fcbd005511aCBd5"
+    },
+    {
+      "chainlinkFeed": "0x0000000000000000000000000000000000000000",
+      "decimals": 8,
+      "heartbeat": 0,
+      "pool": "0x7a33000372f3f028f074182ccb9d16cbeefbf920",
+      "source": "PoolTwap",
+      "symbol": "TSLAc",
+      "token": "0xb2000000000000000000001e800a7f5189430cD0"
+    }
+  ]
+}

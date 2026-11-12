@@ -15,11 +15,13 @@ import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.s
 
 import {Test} from "@forge-std/Test.sol";
 import {Addresses} from "@fps/addresses/Addresses.sol";
+
 import {IERC4626} from "@interfaces/IERC4626.sol";
 import {IMToken} from "@interfaces/IMToken.sol";
 import {IMamoStrategyRegistry} from "@interfaces/IMamoStrategyRegistry.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 contract MultiMarketStrategyFactoryTest is Test {
     Addresses public addresses;
@@ -46,9 +48,7 @@ contract MultiMarketStrategyFactoryTest is Test {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
         string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses(addressesFolderPath, chainIds);
+        addresses = PinnedAddresses.load(addressesFolderPath);
 
         string memory environment = vm.envOr("DEPLOY_ENV", string("8453_PROD"));
         string memory configPath = string(abi.encodePacked("./deploy/", environment, ".json"));

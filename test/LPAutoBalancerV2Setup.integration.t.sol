@@ -15,6 +15,7 @@ import {IPriceFeed} from "@interfaces/IPriceFeed.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Addresses} from "@fps/addresses/Addresses.sol";
+import {PinnedAddresses} from "@test/utils/PinnedAddresses.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LPAutoBalancerV2SetupTest — REAL Base-fork exercise of the FPS phase-1 setup proposal.
@@ -78,9 +79,7 @@ contract LPAutoBalancerV2SetupTest is Test {
         vm.fee(0);
 
         // FPS addresses for this chain.
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-        addresses = new Addresses("./addresses", chainIds);
+        addresses = PinnedAddresses.load("./addresses");
         vm.makePersistent(address(addresses));
 
         safe = addresses.getAddress("F-MAMO");
@@ -313,7 +312,9 @@ contract LPAutoBalancerV2SetupTest is Test {
         assertTrue(p.totalAllocationUsd() != 1_234_500_000_000, "allocation default differs from the env value");
         assertTrue(p.allocationToleranceBps() != 250, "tolerance default differs from the env value");
 
+        address[] memory lent = PinnedAddresses.lend("./addresses");
         p.run();
+        PinnedAddresses.repay(lent);
 
         assertEq(p.tokenId(), 424_242, "tokenId read from INIT_TOKEN_ID");
         assertEq(p.totalAllocationUsd(), 1_234_500_000_000, "allocation read from TOTAL_ALLOCATION_USD");

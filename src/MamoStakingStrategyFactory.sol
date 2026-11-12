@@ -120,8 +120,9 @@ contract MamoStakingStrategyFactory is AccessControl {
         strategy = Create2.deploy(0, salt, bytecode);
 
         // Initialize the strategy with the parameters
-        MamoStakingStrategy(payable(strategy)).initialize(
-            MamoStakingStrategy.InitParams({
+        MamoStakingStrategy(payable(strategy))
+            .initialize(
+                MamoStakingStrategy.InitParams({
                 mamoStrategyRegistry: mamoStrategyRegistry,
                 stakingRegistry: stakingRegistry,
                 multiRewards: multiRewards,
@@ -129,7 +130,7 @@ contract MamoStakingStrategyFactory is AccessControl {
                 strategyTypeId: strategyTypeId,
                 owner: user
             })
-        );
+            );
 
         // Register the strategy with the MamoStrategyRegistry
         mamoStrategyRegistryInterface.addStrategy(user, strategy);

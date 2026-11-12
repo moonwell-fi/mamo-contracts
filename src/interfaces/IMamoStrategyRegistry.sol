@@ -37,13 +37,6 @@ interface IMamoStrategyRegistry {
     function whitelistedImplementations(address implementation) external view returns (bool);
 
     /**
-     * @notice Gets the strategy ID for an implementation
-     * @param implementation The address of the implementation
-     * @return The strategy ID as a uint256 value
-     */
-    function implementationId(address implementation) external view returns (uint256);
-
-    /**
      * @notice Gets the latest implementation for a strategy ID
      * @param strategyId The strategy ID as a uint256 value
      * @return The address of the latest implementation for the strategy ID
@@ -57,14 +50,6 @@ interface IMamoStrategyRegistry {
      * @param strategy The address of the strategy to add
      */
     function addStrategy(address user, address strategy) external;
-
-    /**
-     * @notice Removes a strategy for a user
-     * @dev Only callable by accounts with the BACKEND_ROLE
-     * @param user The address of the user
-     * @param strategy The address of the strategy to remove
-     */
-    function removeStrategy(address user, address strategy) external;
 
     /**
      * @notice Updates the implementation of a strategy
@@ -88,13 +73,6 @@ interface IMamoStrategyRegistry {
      * @return True if the strategy belongs to the user, false otherwise
      */
     function isUserStrategy(address user, address strategy) external view returns (bool);
-
-    /**
-     * @notice Gets the implementation address for a strategy
-     * @param strategy The address of the strategy (proxy)
-     * @return implementation The address of the implementation
-     */
-    function getStrategyImplementation(address strategy) external view returns (address);
 
     /**
      * @notice Gets the backend address (first member of the BACKEND_ROLE)
