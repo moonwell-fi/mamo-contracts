@@ -27,8 +27,10 @@ contract UpgradeV1Strategies is MultisigProposal {
         0xf8CFdEf5068929e022a50315983043b61E9987f8,
         0x14bA47Ef0286B345E2B74d26243767268290eE28
     ];
-    // Type-7 stock factory, not in main's address book
+    // Type-7 stock factory (STOCK_ACCOUNT_STRATEGY_FACTORY; a constant because the frozen rehearsal book predates it)
     address internal constant STOCK_FACTORY = 0x54fa54F8bDE08A5718022ec878044EdcF97eD144;
+    // BACKEND_ROLE member count read before the batch; zero on a validate-only run
+    uint256 internal roleCountBefore;
 
     function run() public override {
         uint256[] memory chainIds = new uint256[](1);
@@ -78,7 +80,7 @@ contract UpgradeV1Strategies is MultisigProposal {
         }
     }
 
-    function preBuildMock() public view override {
+    function preBuildMock() public override {
         MamoStrategyRegistry registry = _registry();
         assertEq(registry.latestImplementationById(1), OLD_IMPL, "type 1 should run the old implementation");
         assertEq(registry.latestImplementationById(4), OLD_IMPL_V2, "type 4 should run the old implementation");
@@ -91,17 +93,13 @@ contract UpgradeV1Strategies is MultisigProposal {
         assertFalse(addresses.isAddressSet("MARKET_REGISTRY"), "proposal 011 must not have run");
 
         bytes32 role = registry.BACKEND_ROLE();
-        assertEq(registry.getRoleMemberCount(role), 7, "BACKEND_ROLE should have seven members");
-        address[7] memory members = [
-            addresses.getAddress("STRATEGY_MULTICALL"),
-            oldFactories[0],
-            oldFactories[1],
-            oldFactories[2],
-            addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED"),
-            addresses.getAddress("MAMO_STAKING_STRATEGY_FACTORY"),
-            STOCK_FACTORY
+        // The other members change with unrelated proposals (017 swapped the staking factories), so only
+        // the ones this batch touches or relies on are named; validate() checks the count did not move
+        roleCountBefore = registry.getRoleMemberCount(role);
+        address[5] memory members = [
+            addresses.getAddress("STRATEGY_MULTICALL"), oldFactories[0], oldFactories[1], oldFactories[2], STOCK_FACTORY
         ];
-        for (uint256 i; i < 7; i++) {
+        for (uint256 i; i < 5; i++) {
             assertTrue(registry.hasRole(role, members[i]), "expected BACKEND_ROLE member missing");
         }
     }
@@ -180,7 +178,11 @@ contract UpgradeV1Strategies is MultisigProposal {
             addresses.getAddress("STRATEGY_MULTICALL"),
             "BACKEND_ROLE index 0 must not move"
         );
-        assertEq(registry.getRoleMemberCount(role), 7, "BACKEND_ROLE should still have seven members");
+        // Three grants and three revokes: the set keeps its size, and the stock factory keeps its role
+        if (roleCountBefore != 0) {
+            assertEq(registry.getRoleMemberCount(role), roleCountBefore, "BACKEND_ROLE member count moved");
+        }
+        assertTrue(registry.hasRole(role, STOCK_FACTORY), "stock factory should keep BACKEND_ROLE");
         assertFalse(
             registry.hasRole(role, addresses.getAddress("MAMO_BACKEND")), "MAMO_BACKEND must not hold BACKEND_ROLE"
         );

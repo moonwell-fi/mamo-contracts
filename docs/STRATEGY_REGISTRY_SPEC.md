@@ -136,8 +136,10 @@ today includes the per-asset factories as well as the operator. This is delibera
 principal set the factory half of every operation already accepted, so the two halves of a repair
 (factory `setDefaultSplitBps` + strategy `updatePosition`) finally agree on who may perform it.
 
-The half of that widening worth naming is not the factories. All seven current holders were checked,
-including `0x54fa54F8bDE08A5718022ec878044EdcF97eD144` (`StockAccountStrategyFactory`, type 7), whose only
+The half of that widening worth naming is not the factories. All six current holders were checked
+(the set after proposal 017 replaced the two staking factories with the staking V2 factory
+`0x0Ce2e3b59FAd9baec5b8430870f63F0b52dFab8d`, type 3), including
+`0x54fa54F8bDE08A5718022ec878044EdcF97eD144` (`StockAccountStrategyFactory`, type 7), whose only
 external entry point that touches the registry is `createStrategyForUser`: it initialises a fresh proxy
 and cannot be pointed at an existing account. None is a proxy (ERC-1967 slots zero, so no upgrade route to an arbitrary-call surface) and no
 factory takes a caller-chosen target or calldata — their only calls are `new ERC1967Proxy` /

@@ -9,36 +9,10 @@ import {MultisigProposal} from "@fps/src/proposals/MultisigProposal.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /**
- * @title SlippagePriceCheckerOracleHardening
- * @notice Ships the Sherlock oracle-hardening fixes to the live SlippagePriceChecker proxy AND turns
- *         them on in the same release.
- * @dev The implementation alone is inert. `_requireSequencerUp()` returns early while
- *      `sequencerUptimeFeed == address(0)`, which is deliberately the state an in-place upgrade lands
- *      in so the upgrade itself cannot brick pricing — but it also means MOO-741 stays exactly as
- *      unmitigated as before unless the same release calls `setSequencerUptimeFeed`. This proposal
- *      batches the four steps the Safe must execute atomically:
- *
- *        1. `upgradeToAndCall(newImplementation, "")` on CHAINLINK_SWAP_CHECKER_PROXY.
- *        2. `setSequencerUptimeFeed(CHAINLINK_L2_SEQUENCER_UPTIME_FEED, 3600)` — Base's Chainlink
- *           "L2 Sequencer Uptime Status Feed" (0xBCF8...6433, verified on chain: answer 0 = up).
- *        3. `backfillPairCount(...)` for every token pair configured BEFORE `configuredPairCount`
- *           existed. The nested `tokenPairOracleData` mapping cannot be enumerated on chain, so
- *           without this step `isRewardToken()` answers for those tokens only through the legacy
- *           `maxTimePriceValid` flag and `removeTokenConfiguration` cannot distinguish "the last
- *           pair was just removed" from "this pair was never counted" (MOO-726 / counter skew).
- *        4. `addTokenConfiguration(...)` for xWELL -> WETH and MORPHO -> WETH, rewriting each pair
- *           with the same two hops but raising the ETH/USD leg's heartbeat from 1200s to 3600s. The
- *           live 1200s bound is below that feed's own ~1230s cadence, so those quotes revert
- *           "Price feed update time exceeds heartbeat" during the tail of every update cycle. This
- *           is a production liveness bug, and it must ship WITH the upgrade: step 3's pairCounted
- *           bookkeeping only exists in the new implementation, so rewriting the pairs beforehand
- *           would not be counted.
- *
- *      `validate()` asserts the guard ends up ENABLED and that both WETH pairs keep exactly their
- *      two hops with the corrected bound — which is what makes the MOO-741 claim true on the day
- *      this lands, and what stops the step-4 rewrite from silently reordering a quote path.
+ * @title SlippagePriceCheckerHardening
+ * @notice Proposal 013's four checker-hardening steps (documented on it below), shared with proposal 017, which ships them
  */
-contract SlippagePriceCheckerOracleHardening is MultisigProposal {
+abstract contract SlippagePriceCheckerHardening is MultisigProposal {
     /// @notice Seconds the sequencer must have been back up before prices are trusted again
     uint256 public constant SEQUENCER_GRACE_PERIOD = 3600;
 
@@ -55,51 +29,14 @@ contract SlippagePriceCheckerOracleHardening is MultisigProposal {
     /// @notice Max age for a reward token's own USD feed, carried over from the live configuration
     uint256 public constant REWARD_TOKEN_USD_HEARTBEAT = 86400;
 
-    function _initializeAddresses() internal {
-        string memory addressesFolderPath = "./addresses";
-        uint256[] memory chainIds = new uint256[](1);
-        chainIds[0] = block.chainid;
-
-        addresses = new Addresses(addressesFolderPath, chainIds);
-        vm.makePersistent(address(addresses));
-    }
-
-    function run() public override {
-        _initializeAddresses();
-
-        if (DO_DEPLOY) {
-            deploy();
-            addresses.updateJson();
-            addresses.printJSONChanges();
-        }
-
-        if (DO_PRE_BUILD_MOCK) preBuildMock();
-        if (DO_BUILD) build();
-        if (DO_SIMULATE) simulate();
-        if (DO_VALIDATE) validate();
-        if (DO_PRINT) print();
-        if (DO_UPDATE_ADDRESS_JSON) addresses.updateJson();
-    }
-
-    function name() public pure override returns (string memory) {
-        return "013_SlippagePriceCheckerOracleHardening";
-    }
-
-    function description() public pure override returns (string memory) {
-        return
-        "Upgrade SlippagePriceChecker and enable the L2 sequencer uptime guard and pair-count backfill in the same release";
-    }
-
-    function deploy() public override {
-        address slippagePriceCheckerImplementation = address(new SlippagePriceChecker());
-        addresses.changeAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION", slippagePriceCheckerImplementation, true);
-    }
-
-    function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
+    /// @dev Steps 1-4 as the caller's multisig batch. Skips the upgrade when the proxy already runs the
+    ///      hardened implementation, so the steps can follow an earlier execution of 013
+    function _buildOracleHardening() internal {
         address proxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
-        address implementation = addresses.getAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION");
 
-        UUPSUpgradeable(proxy).upgradeToAndCall(implementation, "");
+        if (!_checkerHardened()) {
+            UUPSUpgradeable(proxy).upgradeToAndCall(addresses.getAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION"), "");
+        }
 
         SlippagePriceChecker priceChecker = SlippagePriceChecker(proxy);
 
@@ -143,9 +80,7 @@ contract SlippagePriceCheckerOracleHardening is MultisigProposal {
     {
         feeds = new ISlippagePriceChecker.TokenFeedConfiguration[](2);
         feeds[0] = ISlippagePriceChecker.TokenFeedConfiguration({
-            chainlinkFeed: rewardTokenUsdFeed,
-            reverse: false,
-            heartbeat: REWARD_TOKEN_USD_HEARTBEAT
+            chainlinkFeed: rewardTokenUsdFeed, reverse: false, heartbeat: REWARD_TOKEN_USD_HEARTBEAT
         });
         feeds[1] = ISlippagePriceChecker.TokenFeedConfiguration({
             chainlinkFeed: addresses.getAddress("CHAINLINK_ETH_USD"),
@@ -154,11 +89,7 @@ contract SlippagePriceCheckerOracleHardening is MultisigProposal {
         });
     }
 
-    function simulate() public override {
-        _simulateActions(addresses.getAddress("MAMO_MULTISIG"));
-    }
-
-    function validate() public view override {
+    function _validateOracleHardening() internal view {
         address proxy = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY");
         SlippagePriceChecker priceChecker = SlippagePriceChecker(proxy);
 
@@ -238,5 +169,99 @@ contract SlippagePriceCheckerOracleHardening is MultisigProposal {
         buyTokens[1] = addresses.getAddress("cbBTC");
         buyTokens[2] = addresses.getAddress("WETH");
         buyTokens[3] = addresses.getAddress("MAMO");
+    }
+
+    /// @dev Only the hardened implementation has the sequencerUptimeFeed() getter; the one before it reverts
+    function _checkerHardened() internal view returns (bool hardened) {
+        (hardened,) = addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY")
+            .staticcall(abi.encodeWithSignature("sequencerUptimeFeed()"));
+    }
+}
+
+/**
+ * @title SlippagePriceCheckerOracleHardening
+ * @notice Ships the Sherlock oracle-hardening fixes to the live SlippagePriceChecker proxy AND turns
+ *         them on in the same release.
+ * @dev The implementation alone is inert. `_requireSequencerUp()` returns early while
+ *      `sequencerUptimeFeed == address(0)`, which is deliberately the state an in-place upgrade lands
+ *      in so the upgrade itself cannot brick pricing — but it also means MOO-741 stays exactly as
+ *      unmitigated as before unless the same release calls `setSequencerUptimeFeed`. This proposal
+ *      batches the four steps the Safe must execute atomically:
+ *
+ *        1. `upgradeToAndCall(newImplementation, "")` on CHAINLINK_SWAP_CHECKER_PROXY.
+ *        2. `setSequencerUptimeFeed(CHAINLINK_L2_SEQUENCER_UPTIME_FEED, 3600)` — Base's Chainlink
+ *           "L2 Sequencer Uptime Status Feed" (0xBCF8...6433, verified on chain: answer 0 = up).
+ *        3. `backfillPairCount(...)` for every token pair configured BEFORE `configuredPairCount`
+ *           existed. The nested `tokenPairOracleData` mapping cannot be enumerated on chain, so
+ *           without this step `isRewardToken()` answers for those tokens only through the legacy
+ *           `maxTimePriceValid` flag and `removeTokenConfiguration` cannot distinguish "the last
+ *           pair was just removed" from "this pair was never counted" (MOO-726 / counter skew).
+ *        4. `addTokenConfiguration(...)` for xWELL -> WETH and MORPHO -> WETH, rewriting each pair
+ *           with the same two hops but raising the ETH/USD leg's heartbeat from 1200s to 3600s. The
+ *           live 1200s bound is below that feed's own ~1230s cadence, so those quotes revert
+ *           "Price feed update time exceeds heartbeat" during the tail of every update cycle. This
+ *           is a production liveness bug, and it must ship WITH the upgrade: step 3's pairCounted
+ *           bookkeeping only exists in the new implementation, so rewriting the pairs beforehand
+ *           would not be counted.
+ *
+ *      `validate()` asserts the guard ends up ENABLED and that both WETH pairs keep exactly their
+ *      two hops with the corrected bound — which is what makes the MOO-741 claim true on the day
+ *      this lands, and what stops the step-4 rewrite from silently reordering a quote path.
+ *
+ *      Not executed on its own: proposal 017_DeployStockDrop opens its MAMO_MULTISIG batch with the same four
+ *      steps (shared through {SlippagePriceCheckerHardening}), so the stock drop launch ships the hardening. This
+ *      contract stays for the SlippagePriceChecker integration suite, which runs the steps on their own, and 017
+ *      skips the upgrade if this were ever executed first.
+ */
+contract SlippagePriceCheckerOracleHardening is SlippagePriceCheckerHardening {
+    function _initializeAddresses() internal {
+        string memory addressesFolderPath = "./addresses";
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+
+        addresses = new Addresses(addressesFolderPath, chainIds);
+        vm.makePersistent(address(addresses));
+    }
+
+    function run() public override {
+        _initializeAddresses();
+
+        if (DO_DEPLOY) {
+            deploy();
+            addresses.updateJson();
+            addresses.printJSONChanges();
+        }
+
+        if (DO_PRE_BUILD_MOCK) preBuildMock();
+        if (DO_BUILD) build();
+        if (DO_SIMULATE) simulate();
+        if (DO_VALIDATE) validate();
+        if (DO_PRINT) print();
+        if (DO_UPDATE_ADDRESS_JSON) addresses.updateJson();
+    }
+
+    function name() public pure override returns (string memory) {
+        return "013_SlippagePriceCheckerOracleHardening";
+    }
+
+    function description() public pure override returns (string memory) {
+        return "Upgrade SlippagePriceChecker and enable the L2 sequencer uptime guard and pair-count backfill in the same release";
+    }
+
+    function deploy() public override {
+        address slippagePriceCheckerImplementation = address(new SlippagePriceChecker());
+        addresses.changeAddress("CHAINLINK_SWAP_CHECKER_IMPLEMENTATION", slippagePriceCheckerImplementation, true);
+    }
+
+    function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
+        _buildOracleHardening();
+    }
+
+    function simulate() public override {
+        _simulateActions(addresses.getAddress("MAMO_MULTISIG"));
+    }
+
+    function validate() public view override {
+        _validateOracleHardening();
     }
 }
