@@ -62,6 +62,12 @@ contract StrategyV1UpgradeTest is BaseTest {
     address internal constant GEN1_PROXY = 0xC06C044378528D97C96138A385473cF6a746f5Cd;
     address internal constant GEN1_OWNER = 0xDe29a250A94F8d277DBDd1A449b912860539DAaf;
 
+    /// @dev Old cbBTC and WETH factory StrategyCreated logs (blocks 52.2M-52.9M), both funded on Moonwell
+    address internal constant CBBTC_PROXY = 0x43BFC761a5D872ad142ad588fDfdEf5Ed19bCc74;
+    address internal constant CBBTC_OWNER = 0x1B6891DB50377c5bE23878c3C83564e5Df881b30;
+    address internal constant WETH_PROXY = 0xF9BbbBEB33878eE746E4806BBD4B4F5C1BeC182A;
+    address internal constant WETH_OWNER = 0x5fD41eCe257465e201398dD97ACc444F4Fa70260;
+
     UpgradeV1Strategies internal upgrade;
     MamoStrategyRegistry internal registry;
     StrategyFactory internal liveFactory;
@@ -417,7 +423,47 @@ contract StrategyV1UpgradeTest is BaseTest {
         vm.stopPrank();
     }
 
-    function test_initializeVaultSplit_ownerOnly_runsOnce_usdcOnly() public {
+    function test_initializeVaultSplit_fundedCbBtcAndWethLegacyProxies() public {
+        address[2] memory proxies = [CBBTC_PROXY, WETH_PROXY];
+        address[2] memory owners = [CBBTC_OWNER, WETH_OWNER];
+        string[2] memory implKeys = ["MOONWELL_MORPHO_STRATEGY_IMPL", "MOONWELL_MORPHO_STRATEGY_IMPL_V2"];
+        uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        for (uint256 i; i < 2; i++) {
+            ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(proxies[i]));
+            IERC20 asset = s.token();
+            IERC20 m = IERC20(address(s.mToken()));
+            IERC20 v = IERC20(address(s.metaMorphoVault()));
+            uint256 mBalance = m.balanceOf(proxies[i]);
+            uint256 vBalance = v.balanceOf(proxies[i]);
+            assertGt(mBalance, 0, "account should hold a Moonwell position");
+
+            address impl = upgrade.addresses().getAddress(implKeys[i]);
+            vm.prank(owners[i]);
+            registry.upgradeStrategy(proxies[i], impl);
+            assertEq(s.owner(), owners[i]);
+            assertEq(address(s.token()), address(asset));
+            assertEq(s.splitMToken(), 10_000, "the upgrade alone leaves the split on Moonwell");
+
+            vm.prank(owners[i]);
+            s.initializeVaultSplit();
+            assertEq(s.splitMToken(), 0);
+            assertEq(s.splitVault(), 10_000);
+            assertEq(m.balanceOf(proxies[i]), mBalance, "nothing moved");
+            vm.prank(owners[i]);
+            vm.expectRevert(Initializable.InvalidInitialization.selector);
+            s.initializeVaultSplit();
+
+            deal(address(asset), owners[i], amounts[i]);
+            vm.startPrank(owners[i]);
+            asset.approve(proxies[i], amounts[i]);
+            s.deposit(amounts[i]);
+            vm.stopPrank();
+            assertGt(v.balanceOf(proxies[i]), vBalance, "new deposit lands in the vault");
+            assertEq(m.balanceOf(proxies[i]), mBalance, "Moonwell share untouched");
+        }
+    }
+
+    function test_initializeVaultSplit_ownerOnly_runsOnce() public {
         ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
         address stranger = makeAddr("stranger");
         address[2] memory notOwners = [stranger, backend];
@@ -432,14 +478,6 @@ contract StrategyV1UpgradeTest is BaseTest {
         vm.prank(EMPTY_OWNER);
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         s.initializeVaultSplit();
-
-        StrategyFactory f = StrategyFactory(upgrade.addresses().getAddress("cbBTC_STRATEGY_FACTORY"));
-        address user = makeAddr("cbBTC");
-        vm.startPrank(user);
-        ERC20MoonwellMorphoStrategy c = ERC20MoonwellMorphoStrategy(payable(f.createStrategyForUser(user)));
-        vm.expectRevert("Not a USDC account");
-        c.initializeVaultSplit();
-        vm.stopPrank();
     }
 
     function test_unupgradedLegacyProxy_depositStillGoesToMoonwell() public {
