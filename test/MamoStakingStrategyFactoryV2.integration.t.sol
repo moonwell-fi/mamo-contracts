@@ -27,6 +27,7 @@ contract MamoStakingStrategyFactoryV2IntegrationTest is BaseTest {
     address public stakingStrategyImplementation;
 
     function setUp() public override {
+        _forkBefore017();
         super.setUp();
 
         // Get existing contract instances from addresses
