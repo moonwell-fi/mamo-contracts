@@ -9,6 +9,8 @@ The system is designed with a clear separation of concerns:
 - **Swapping**: Convert collected tokens to MAMO/cbBTC with flexible routing
 - **Distribution**: Forward rewards to the F-MAMO Safe for staker distribution
 
+`DropAutomationV2` replaces `DropAutomation` at the stock drop cutover (`multisig/f-mamo/006_StockDropCutover`): it funds MultiRewards directly as the distributor of each reward token instead of going through the Safe module. The same batch adds WETH, USDC and the B20 stocks as MultiRewards reward tokens distributed by `DropAutomationV2`, which pays them out as they are. The drop flow below still describes `DropAutomation`; the gauge management section describes `DropAutomationV2` and notes where V1 differs.
+
 ## Core Components
 
 ### DropAutomation Contract
@@ -60,7 +62,8 @@ function claimGaugeRewards() external onlyDedicatedMsgSender
 function createDrop(
     address[] calldata swapTokens_,
     int24[] calldata tickSpacings_,
-    bool[] calldata swapDirectToCbBtc_
+    bool[] calldata swapDirectToCbBtc_,
+    uint256[] calldata minAmountOuts_
 ) external onlyDedicatedMsgSender
 ```
 
@@ -75,6 +78,7 @@ function createDrop(
 | `swapTokens_` | `address[]` | Array of token addresses to swap |
 | `tickSpacings_` | `int24[]` | Tick spacing for each token's pool (Aerodrome CL) |
 | `swapDirectToCbBtc_` | `bool[]` | Routing flag: `true` = direct swap to cbBTC, `false` = swap through MAMO |
+| `minAmountOuts_` | `uint256[]` | Minimum cbBTC each token must end up as, computed off-chain from fair prices |
 
 **Example Call:**
 
@@ -100,7 +104,9 @@ swapDirectToCbBtc[2] = false; // EDGE → MAMO → cbBTC
 swapDirectToCbBtc[3] = false; // VIRTUALS → MAMO → cbBTC
 swapDirectToCbBtc[4] = true;  // AERO → cbBTC (direct, no MAMO pool)
 
-dropAutomation.createDrop(tokens, tickSpacings, swapDirectToCbBtc);
+uint256[] memory minAmountOuts = new uint256[](5); // cbBTC floors, computed off-chain
+
+dropAutomation.createDrop(tokens, tickSpacings, swapDirectToCbBtc, minAmountOuts);
 ```
 
 **Process:**
@@ -165,7 +171,7 @@ sequenceDiagram
 
     Note over Gelato: Wait for transaction confirmation
 
-    Gelato->>DropAutomation: 2. createDrop(tokens, tickSpacings, routing)
+    Gelato->>DropAutomation: 2. createDrop(tokens, tickSpacings, routing, minAmountOuts)
 
     loop For each token
         DropAutomation->>AerodromeRouter: Swap token to MAMO/cbBTC
@@ -190,32 +196,33 @@ sequenceDiagram
 ### Adding a Gauge
 
 ```solidity
-function addGauge(address gauge_) external onlyOwner
+function addGauge(address gauge) external onlyOwner
 ```
 
 **Requirements:**
-- Gauge must be a valid contract
-- Gauge must have valid `rewardToken()` and `stakingToken()`
 - Gauge must not already be configured
+- `stakingToken()` must return a non-zero address
+
+Nothing else is checked: a contract with no `rewardToken()`, or one returning the zero address from it, is accepted. V1 also required deployed code and a non-zero `rewardToken()`.
 
 **What happens:**
-- Gauge is added to `aerodromeGauges` array
-- `isConfiguredGauge[gauge]` set to true
+- Gauge is added to the `gauges` array
+- `isGauge[gauge]` set to true
 - Emits `GaugeAdded(gauge)` event
 
 ### Removing a Gauge
 
 ```solidity
-function removeGauge(address gauge_) external onlyOwner
+function removeGauge(address gauge) external onlyOwner
 ```
 
-**Use case:** Stop claiming rewards from a gauge (e.g., if LP position is withdrawn)
+**Use case:** Stop claiming rewards from a gauge (e.g., if LP position is withdrawn). V2 claims the gauge's pending rewards first (a failed claim is ignored), then removes it from `gauges` and clears `isGauge`.
 
 ### Withdrawing from Gauge
 
 ```solidity
 function withdrawGauge(
-    address gauge_,
+    address gauge,
     uint256 amount,
     address recipient
 ) external onlyOwner
@@ -375,8 +382,8 @@ forge script 005_DropAutomationSetup.sol --fork-url base --broadcast
    - Review approval handling: `forceApprove` before each swap
 
 3. **Gauge Management:**
-   - Verify gauge validation in `addGauge()`: checks for valid reward/staking tokens
-   - Confirm gauge removal properly cleans up state: index mapping and array
+   - Verify gauge validation in `addGauge()`: V2 checks only for a non-zero `stakingToken()`
+   - Confirm gauge removal properly cleans up state: the `gauges` array and `isGauge`
    - Validate withdrawal logic: `withdrawGauge()` properly transfers LP tokens
 
 4. **Reentrancy:**
@@ -386,7 +393,7 @@ forge script 005_DropAutomationSetup.sol --fork-url base --broadcast
 5. **Edge Cases:**
    - Zero balance handling: `if (amountIn == 0) continue;`
    - Array length validation: `require(swapTokens_.length == tickSpacings_.length)`
-   - Empty gauge array: `require(gaugeCount > 0)`
+   - Empty gauge array: `require(gaugeCount > 0)` in V1; V2's `claimGaugeRewards()` simply does nothing
 
 **Architecture Decisions:**
 

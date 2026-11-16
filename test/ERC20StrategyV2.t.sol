@@ -27,10 +27,11 @@ contract ERC20StrategyV2Test is BaseTest {
     uint256 public constant STRATEGY_TYPE_ID = 1;
 
     function setUp() public override {
-        // The address book is built at the chain head (every entry has code there); the suite runs without --fork-url
-        vm.createSelectFork({urlOrAlias: "base"});
-        super.setUp();
+        // The fork comes first so the address book is built for Base rather than the default chain,
+        // and so the run never switches forks: selecting this pre-Isthmus block from a chain-head fork
+        // panics the runner, which is why this suite must not be given --fork-url.
         vm.createSelectFork({urlOrAlias: "base", blockNumber: 36224833});
+        super.setUp();
 
         // create account with old implementation
         string memory usdcFactoryName = "USDC_STRATEGY_FACTORY_DEPRECATED";
