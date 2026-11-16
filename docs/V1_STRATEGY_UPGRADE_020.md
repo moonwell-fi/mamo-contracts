@@ -1,10 +1,10 @@
-# Proposal 020: v1 strategy upgrade (claim-time fee, USDC vault only)
+# Proposal 020: v1 strategy upgrade (claim-time fee, new accounts vault only)
 
 `multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol` (`UpgradeV1Strategies`). Rehearsed by `make v1-upgrade`.
 
 ## 1. Deploy (DEPLOYER_EOA)
 
-Five contracts: `ERC20MoonwellMorphoStrategy` twice (type 1, type 4), then the v1 `StrategyFactory` for USDC (0 / 10000), cbBTC and WETH (10000 / 0), all with fee recipient `MAMO_MULTISIG`.
+Five contracts: `ERC20MoonwellMorphoStrategy` twice (type 1, type 4), then the v1 `StrategyFactory` for USDC, cbBTC and WETH, all three with split 0 / 10000 (vault only) and fee recipient `MAMO_MULTISIG`.
 
 ```bash
 DO_DEPLOY=true DO_UPDATE_ADDRESS_JSON=true \
@@ -60,12 +60,13 @@ The proposal does not hard-code this set: before the batch it requires the strat
 - types 1 and 4 point to the new implementations, both whitelisted under those ids; the old ones stay whitelisted under 1 and 4 (un-upgraded proxies keep an upgrade path);
 - the two new implementations share bytecode (bar UUPS's own-address immutable), refuse `initialize` with `InvalidInitialization()` and sign for the `1.3.0` appData;
 - the three new factories hold `BACKEND_ROLE`, the three old ones do not; `getBackendAddress()` is still `STRATEGY_MULTICALL`;
-- each new factory pins its type's new implementation and keeps the old one's type id, token, mToken, vault, price checker, hook gas and slippage; split USDC 0 / 10000, cbBTC and WETH 10000 / 0; `feeRecipient == MAMO_MULTISIG`, `compoundFee == 500`, `mamoBackend == MAMO_BACKEND`;
+- each new factory pins its type's new implementation and keeps the old one's type id, token, mToken, vault, price checker, hook gas and slippage; split 0 / 10000 on all three; `feeRecipient == MAMO_MULTISIG`, `compoundFee == 500`, `mamoBackend == MAMO_BACKEND`;
 - the old USDC factory's `createStrategyForUser` reverts with `AccessControlUnauthorizedAccount`.
 
 ## 5. App and backend handoff
 
 - The factory addresses flip at execution: the app and backend create accounts through the new keys from then on.
+- New USDC, cbBTC and WETH accounts all start at 0 / 10000 (vault only). Existing cbBTC and WETH accounts keep their current split after upgrading: `initializeVaultSplit()` is USDC only, so the backend moves them with `updatePosition(0, 10000)`.
 - An existing USDC account is switched by its owner, through the app, with two calls sent back to back: `registry.upgradeStrategy(proxy, newImpl)`, then `initializeVaultSplit()` on the account. The second call is owner-only, runs once, and sets the split to 0 / 10000 without moving funds, so the next deposit lands in the vault. Wallets that support EIP-5792 batching sign both at once; plain wallets sign two transactions. The compounder's `updatePosition(0, 10000)` then moves whatever Moonwell can redeem now and leaves the rest (emitting `MoonwellRedeemLimited`), and reruns as cash returns; it selects accounts by their Moonwell position, not by `splitMToken`, which reads 0 once the switch is done. The app gates USDC deposits on an existing account until it is upgraded and reads `splitVault() == 10000`.
 - On the new implementation `onlyBackend` is `BACKEND_ROLE` membership: any member listed in §3 may call `updatePosition`, `claimRewards` and `setFeeRecipient`. `MAMO_BACKEND` is not a member, so the backend keeps sending through `STRATEGY_MULTICALL` (index 0), which un-upgraded proxies require anyway.
 - `withdrawAll` and `updatePosition` no longer revert when Moonwell cannot redeem: they take the cash there is and emit `MoonwellRedeemLimited(cashRedeemed, mTokenLeft, underlyingLeft)`. Likewise, when MetaMorpho is short they redeem up to `maxRedeem` and emit `VaultRedeemLimited(sharesRedeemed, sharesLeft)`. The backend indexes both and re-runs `updatePosition(0, 10000)` for flagged accounts as liquidity recovers; the app reads `mToken.balanceOf(proxy) > 0` or vault shares > 0 after `withdrawAll` and shows the amount still held.
