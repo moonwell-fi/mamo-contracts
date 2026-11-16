@@ -38,17 +38,18 @@ forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc
   --fork-url base --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 -vv
 ```
 
-`BACKEND_ROLE` members by index (`getRoleMember`, read on chain at block 52,991,934). Grants append at 7, 8, 9; each revoke swap-and-pops the last member into the freed slot; index 0 never moves:
+`BACKEND_ROLE` members by index (`getRoleMember`, read on chain at block 58,277,032, after proposal 017 swapped the staking factories). Grants append at 6, 7, 8; each revoke swap-and-pops the last member into the freed slot; index 0 never moves:
 
 | # | Before | After |
 | --- | --- | --- |
 | 0 | `STRATEGY_MULTICALL` 0x7cb24EFA3fe76650388145b9B0823De6600f1f4c | `STRATEGY_MULTICALL` |
 | 1 | `USDC_STRATEGY_FACTORY` 0x3098360e627E84Fb9dD621F01ea03E325cCEE2c6 | new `WETH_STRATEGY_FACTORY` |
 | 2 | `cbBTC_STRATEGY_FACTORY` 0xf8CFdEf5068929e022a50315983043b61E9987f8 | new `cbBTC_STRATEGY_FACTORY` |
-| 3 | `MAMO_STAKING_STRATEGY_FACTORY_DEPRECATED` 0xd7C3f474761B9A0ca4a8634570E8DCD4f5c92239 | unchanged |
-| 4 | `MAMO_STAKING_STRATEGY_FACTORY` 0xd034Bf87003A216F9A451A55A2f4f7176AAE23C8 | unchanged |
+| 3 | `STOCK_ACCOUNT_STRATEGY_FACTORY` 0x54fa54F8bDE08A5718022ec878044EdcF97eD144 (type 7) | unchanged |
+| 4 | staking V2 factory 0x0Ce2e3b59FAd9baec5b8430870f63F0b52dFab8d (type 3, granted by 017, not in main's book) | unchanged |
 | 5 | `WETH_STRATEGY_FACTORY` 0x14bA47Ef0286B345E2B74d26243767268290eE28 | new `USDC_STRATEGY_FACTORY` |
-| 6 | type-7 stock factory 0x54fa54F8bDE08A5718022ec878044EdcF97eD144 (not in main's book) | unchanged |
+
+The proposal does not hard-code this set: before the batch it requires the strategy multicall at index 0 and the role on the three old factories and the stock factory, and afterwards it requires the member count unchanged. Members that unrelated proposals add or remove do not break it, so read the set again right before signing and vet any holder not listed here: on the new implementation every member may call `updatePosition`, `claimRewards` and `setFeeRecipient`.
 
 - Proposal 011 (`011_DeployMultiMarketSystem`, never executed) whitelists a different implementation under type ids 1 and 4 and revokes `BACKEND_ROLE` from whatever `<token>_STRATEGY_FACTORY` names: it must not be executed after 020 without being reworked for the v1 fleet. `preBuildMock()` refuses to run if the book already has `MARKET_REGISTRY`.
 
