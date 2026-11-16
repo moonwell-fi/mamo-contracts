@@ -55,7 +55,7 @@ contract UpgradeV1Strategies is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Whitelist a new v1 ERC20MoonwellMorphoStrategy for type ids 1 and 4 and move BACKEND_ROLE from the USDC, cbBTC and WETH factories to new ones, the USDC factory defaulting to the vault only";
+        return "Whitelist a new v1 ERC20MoonwellMorphoStrategy for type ids 1 and 4 and move BACKEND_ROLE from the USDC, cbBTC and WETH factories to new ones that all default to the vault only";
     }
 
     function deploy() public override {
@@ -153,7 +153,6 @@ contract UpgradeV1Strategies is MultisigProposal {
         for (uint256 i; i < 3; i++) {
             StrategyFactory factory = StrategyFactory(_factory(i));
             StrategyFactory old = StrategyFactory(oldFactories[i]);
-            uint256 splitVault = i == 0 ? 10_000 : 0; // USDC vault only, cbBTC and WETH Moonwell only
 
             assertTrue(registry.hasRole(role, address(factory)), "new factory should hold BACKEND_ROLE");
             assertFalse(registry.hasRole(role, address(old)), "old factory should not hold BACKEND_ROLE");
@@ -165,8 +164,8 @@ contract UpgradeV1Strategies is MultisigProposal {
             assertEq(factory.slippagePriceChecker(), old.slippagePriceChecker(), "slippagePriceChecker");
             assertEq(factory.hookGasLimit(), old.hookGasLimit(), "hookGasLimit");
             assertEq(factory.allowedSlippageInBps(), old.allowedSlippageInBps(), "allowedSlippageInBps");
-            assertEq(factory.splitMToken(), 10_000 - splitVault, "splitMToken");
-            assertEq(factory.splitVault(), splitVault, "splitVault");
+            assertEq(factory.splitMToken(), 0, "splitMToken"); // every new account defaults to the vault only
+            assertEq(factory.splitVault(), 10_000, "splitVault");
             assertEq(factory.feeRecipient(), addresses.getAddress("MAMO_MULTISIG"), "feeRecipient");
             assertEq(factory.compoundFee(), 500, "compoundFee");
             assertEq(factory.mamoBackend(), addresses.getAddress("MAMO_BACKEND"), "mamoBackend");

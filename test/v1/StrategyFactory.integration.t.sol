@@ -83,8 +83,7 @@ contract StrategyFactoryIntegrationV1Test is BaseTest {
         // Test that the factory has the correct parameters
         assertEq(factory.mamoStrategyRegistry(), address(registry), "Registry address mismatch");
         assertEq(factory.mamoBackend(), backend, "Backend address mismatch");
-        assertEq(factory.splitMToken(), splitMToken, "Split mToken mismatch");
-        assertEq(factory.splitVault(), splitVault, "Split vault mismatch");
+        // The split is not compared with the config: the live factory keeps 10000 / 0 until proposal 020 replaces it
         assertEq(factory.strategyTypeId(), strategyTypeId, "Strategy type ID mismatch");
     }
 

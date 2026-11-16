@@ -260,7 +260,7 @@ contract StrategyV1UpgradeTest is BaseTest {
         assertApproxEqAbs(usdc.balanceOf(EMPTY_OWNER), 100e6, 1);
     }
 
-    function test_newCbBtcAndWethAccounts_defaultToMoonwell() public {
+    function test_newCbBtcAndWethAccounts_defaultToVault() public {
         string[2] memory assets = ["cbBTC", "WETH"];
         uint256[2] memory amounts = [uint256(0.01e8), 1e18];
         for (uint256 i; i < 2; i++) {
@@ -274,11 +274,13 @@ contract StrategyV1UpgradeTest is BaseTest {
             vm.startPrank(user);
             asset.approve(address(s), amounts[i]);
             s.deposit(amounts[i]);
-            assertGt(IERC20(address(s.mToken())).balanceOf(address(s)), 0);
-            assertEq(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
+            assertEq(s.splitVault(), 10_000);
+            assertGt(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
+            assertEq(IERC20(address(s.mToken())).balanceOf(address(s)), 0);
             s.withdrawAll();
             vm.stopPrank();
-            assertApproxEqRel(asset.balanceOf(user), amounts[i], 1e13); // mToken exchange-rate rounding
+            assertEq(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
+            assertApproxEqRel(asset.balanceOf(user), amounts[i], 1e13); // vault share rounding
         }
     }
 

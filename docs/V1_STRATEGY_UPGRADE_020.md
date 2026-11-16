@@ -1,10 +1,10 @@
-# Proposal 020: v1 strategy upgrade (claim-time fee, USDC vault only)
+# Proposal 020: v1 strategy upgrade (claim-time fee, new accounts vault only)
 
 `multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol` (`UpgradeV1Strategies`). Rehearsed by `make v1-upgrade`.
 
 ## 1. Deploy (DEPLOYER_EOA)
 
-Five contracts: `ERC20MoonwellMorphoStrategy` twice (type 1, type 4), then the v1 `StrategyFactory` for USDC (0 / 10000), cbBTC and WETH (10000 / 0), all with fee recipient `MAMO_MULTISIG`.
+Five contracts: `ERC20MoonwellMorphoStrategy` twice (type 1, type 4), then the v1 `StrategyFactory` for USDC, cbBTC and WETH, all three with split 0 / 10000 (vault only) and fee recipient `MAMO_MULTISIG`.
 
 ```bash
 DO_DEPLOY=true DO_UPDATE_ADDRESS_JSON=true \
@@ -60,12 +60,13 @@ The proposal does not hard-code this set: before the batch it requires the strat
 - types 1 and 4 point to the new implementations, both whitelisted under those ids; the old ones stay whitelisted under 1 and 4 (un-upgraded proxies keep an upgrade path);
 - the two new implementations share bytecode (bar UUPS's own-address immutable), refuse `initialize` with `InvalidInitialization()` and sign for the `1.3.0` appData;
 - the three new factories hold `BACKEND_ROLE`, the three old ones do not; `getBackendAddress()` is still `STRATEGY_MULTICALL`;
-- each new factory pins its type's new implementation and keeps the old one's type id, token, mToken, vault, price checker, hook gas and slippage; split USDC 0 / 10000, cbBTC and WETH 10000 / 0; `feeRecipient == MAMO_MULTISIG`, `compoundFee == 500`, `mamoBackend == MAMO_BACKEND`;
+- each new factory pins its type's new implementation and keeps the old one's type id, token, mToken, vault, price checker, hook gas and slippage; split 0 / 10000 on all three; `feeRecipient == MAMO_MULTISIG`, `compoundFee == 500`, `mamoBackend == MAMO_BACKEND`;
 - the old USDC factory's `createStrategyForUser` reverts with `AccessControlUnauthorizedAccount`.
 
 ## 5. App and backend handoff
 
 - The factory addresses flip at execution: the app and backend create accounts through the new keys from then on.
+- New USDC, cbBTC and WETH accounts all start at 0 / 10000 (vault only). Existing cbBTC and WETH accounts keep their current split after upgrading: `initializeVaultSplit()` is USDC only, so the backend moves them with `updatePosition(0, 10000)`, which needs Moonwell to redeem the whole position.
 - An existing USDC account is switched by its owner, through the app, with two calls sent back to back: `registry.upgradeStrategy(proxy, newImpl)`, then `initializeVaultSplit()` on the account. The second call is owner-only, runs once, and sets the split to 0 / 10000 without moving funds: new deposits go to the vault, the Moonwell share stays where it is. Wallets that support EIP-5792 batching sign both at once; plain wallets sign two transactions. The compounder's migrate-to-vault loop performs the real move with `updatePosition(0, 10000)`, which redeems the whole Moonwell position, so its cash gate keeps that to accounts whose position Moonwell can redeem in full. The loop must select accounts by their Moonwell position, not by `splitMToken`: after `initializeVaultSplit()` that reads 0 while Moonwell still holds the share. The app gates USDC deposits on an existing account until it is upgraded and reads `splitVault() == 10000`.
 - On the new implementation `onlyBackend` is `BACKEND_ROLE` membership: any member listed in §3 may call `updatePosition`, `claimRewards` and `setFeeRecipient`. `MAMO_BACKEND` is not a member, so the backend keeps sending through `STRATEGY_MULTICALL` (index 0), which un-upgraded proxies require anyway.
 - After `initializeVaultSplit()` on a funded account, `withdraw(amount)` routes the whole amount to the vault: it works up to the vault balance and reverts above it (inside MetaMorpho), even while Moonwell has some cash. `withdrawAll` reverts (`Failed to redeem mToken`) until Moonwell can redeem the whole Moonwell share. The window closes when the compounder's loop moves the account with `updatePosition(0, 10000)`, which it does once Moonwell's cash covers the share; from then on both work. Nothing can point the account back at Moonwell in the meantime, since `updatePosition` also needs Moonwell to pay the whole share. The app quotes the withdrawable amount from the split: the vault's `maxWithdraw` while the split is 0 / 10000, and up to Moonwell's cash while it is 10000 / 0. Decided 2026-10-29 to ship this way; the availability-aware `withdraw` that removes the window is #126.
