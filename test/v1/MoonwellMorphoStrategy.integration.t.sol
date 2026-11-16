@@ -169,6 +169,14 @@ contract MoonwellMorphoStrategyV1Test is Test {
         registry.upgradeStrategy(address(strategy), impl);
         assertEq(ERC1967Proxy(payable(address(strategy))).getImplementation(), impl);
 
+        // The suite exercises the Moonwell leg every legacy account has, whatever split the factory defaults to
+        if (splitMToken != 10000) {
+            vm.prank(registry.getBackendAddress());
+            strategy.updatePosition(10000, 0);
+            splitMToken = 10000;
+            splitVault = 0;
+        }
+
         vm.warp(block.timestamp + 1 minutes);
     }
 
