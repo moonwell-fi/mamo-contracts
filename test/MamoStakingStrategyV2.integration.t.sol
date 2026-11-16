@@ -41,6 +41,7 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
     address payable public userStrategy;
 
     function setUp() public override {
+        _forkBefore017();
         super.setUp();
 
         // Get existing contract instances from addresses

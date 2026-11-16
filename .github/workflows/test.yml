@@ -663,6 +663,13 @@ jobs:
       - name: Run staking V2 tests
         run: make mamo-staking-v2
 
+      # Left make test with proposal 017: these self-fork at the last block their contracts were live
+      - name: Run v1 staking tests
+        run: make mamo-staking
+
+      - name: Run v1 drop module tests
+        run: make rewards-distributor-module
+
   stock-drop-setup:
     name: Stock Drop Proposal Tests
     runs-on: ubuntu-latest
