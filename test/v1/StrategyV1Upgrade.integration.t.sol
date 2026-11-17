@@ -481,28 +481,28 @@ contract StrategyV1UpgradeTest is BaseTest {
             s.initializeVaultSplit();
             asset.approve(proxies[i], amounts[i]);
             s.deposit(amounts[i]);
-            // Partial withdrawals come from the vault only, whatever Moonwell could pay
-            uint256 maxOut = v.maxWithdraw(proxies[i]);
-            vm.expectRevert();
-            s.withdraw(maxOut + 1);
-            s.withdraw(maxOut);
-            vm.expectRevert();
-            s.withdraw(1);
             vm.stopPrank();
 
-            // Moonwell out of cash: no full exit, and the backend cannot move the account
+            // Moonwell out of cash: withdrawals stop at the vault balance, nothing reverts for the backend
             uint256 cash = asset.balanceOf(address(m));
             uint256 share = m.balanceOfUnderlying(proxies[i]);
+            uint256 mBalance = m.balanceOf(proxies[i]);
             deal(address(asset), address(m), 0);
-            vm.prank(owners[i]);
-            vm.expectRevert("Failed to redeem mToken");
-            s.withdrawAll();
+            uint256 maxOut = v.maxWithdraw(proxies[i]);
+            vm.startPrank(owners[i]);
+            vm.expectRevert("Moonwell cannot pay the remainder now");
+            s.withdraw(maxOut + 1);
+            s.withdraw(maxOut);
+            s.withdrawAll(); // best-effort: leaves the Moonwell share in place
+            vm.stopPrank();
             vm.prank(backend);
-            vm.expectRevert("Failed to redeem mToken");
             s.updatePosition(0, 10_000);
+            assertEq(m.balanceOf(proxies[i]), mBalance, "Moonwell share still in place");
 
-            // Cash covers the share again: the backend moves it and the owner exits in full
+            // Cash back: the owner reaches Moonwell directly, then the backend moves the rest
             deal(address(asset), address(m), cash + 2 * share);
+            vm.prank(owners[i]);
+            s.withdraw(share / 2);
             uint256 total = m.balanceOfUnderlying(proxies[i]) + v.maxWithdraw(proxies[i]);
             vm.prank(backend);
             s.updatePosition(0, 10_000);
