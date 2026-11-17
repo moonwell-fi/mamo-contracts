@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import {UpgradeV1Strategies} from "../../multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol";
+import {UpgradeV1Strategies} from "../../multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultDefault.sol";
 import {BaseTest} from "../BaseTest.t.sol";
 
 import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
@@ -251,6 +251,57 @@ contract StrategyV1UpgradeTest is BaseTest {
             vm.stopPrank();
             assertGt(v.balanceOf(proxies[i]), vBalance, "new deposit lands in the vault");
             assertEq(m.balanceOf(proxies[i]), mBalance, "Moonwell share untouched");
+        }
+    }
+
+    function test_fundedCbBtcAndWethLegacyProxies_vaultSplit_withdrawalsAndMigration() public {
+        address[2] memory proxies = [CBBTC_PROXY, WETH_PROXY];
+        address[2] memory owners = [CBBTC_OWNER, WETH_OWNER];
+        string[2] memory implKeys = ["MOONWELL_MORPHO_STRATEGY_IMPL", "MOONWELL_MORPHO_STRATEGY_IMPL_V2"];
+        uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        for (uint256 i; i < 2; i++) {
+            ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(proxies[i]));
+            IERC20 asset = s.token();
+            IMToken m = IMToken(address(s.mToken()));
+            IERC4626 v = IERC4626(address(s.metaMorphoVault()));
+            address impl = upgrade.addresses().getAddress(implKeys[i]);
+            deal(address(asset), owners[i], amounts[i]);
+
+            vm.startPrank(owners[i]);
+            registry.upgradeStrategy(proxies[i], impl);
+            s.initializeVaultSplit();
+            asset.approve(proxies[i], amounts[i]);
+            s.deposit(amounts[i]);
+            // Partial withdrawals come from the vault only, whatever Moonwell could pay
+            uint256 maxOut = v.maxWithdraw(proxies[i]);
+            vm.expectRevert();
+            s.withdraw(maxOut + 1);
+            s.withdraw(maxOut);
+            vm.expectRevert();
+            s.withdraw(1);
+            vm.stopPrank();
+
+            // Moonwell out of cash: no full exit, and the backend cannot move the account
+            uint256 cash = asset.balanceOf(address(m));
+            uint256 share = m.balanceOfUnderlying(proxies[i]);
+            deal(address(asset), address(m), 0);
+            vm.prank(owners[i]);
+            vm.expectRevert("Failed to redeem mToken");
+            s.withdrawAll();
+            vm.prank(backend);
+            vm.expectRevert("Failed to redeem mToken");
+            s.updatePosition(0, 10_000);
+
+            // Cash covers the share again: the backend moves it and the owner exits in full
+            deal(address(asset), address(m), cash + 2 * share);
+            uint256 total = m.balanceOfUnderlying(proxies[i]) + v.maxWithdraw(proxies[i]);
+            vm.prank(backend);
+            s.updatePosition(0, 10_000);
+            assertEq(m.balanceOf(proxies[i]), 0, "Moonwell share moved to the vault");
+            uint256 ownerBefore = asset.balanceOf(owners[i]);
+            vm.prank(owners[i]);
+            s.withdrawAll();
+            assertApproxEqAbs(asset.balanceOf(owners[i]) - ownerBefore, total, 3); // vault share rounding
         }
     }
 

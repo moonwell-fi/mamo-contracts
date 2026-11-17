@@ -1,6 +1,6 @@
 # Proposal 020: v1 strategy upgrade (claim-time fee, new accounts vault only)
 
-`multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol` (`UpgradeV1Strategies`). Rehearsed by `make v1-upgrade`.
+`multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultDefault.sol` (`UpgradeV1Strategies`). Rehearsed by `make v1-upgrade`.
 
 ## 1. Deploy (DEPLOYER_EOA)
 
@@ -8,7 +8,7 @@ Five contracts: `ERC20MoonwellMorphoStrategy` twice (type 1, type 4), then the v
 
 ```bash
 DO_DEPLOY=true DO_UPDATE_ADDRESS_JSON=true \
-forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol:UpgradeV1Strategies \
+forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultDefault.sol:UpgradeV1Strategies \
   --fork-url base --account mamo-test --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 --broadcast --verify --slow -vv
 ```
 
@@ -34,7 +34,7 @@ In order: `whitelistImplementation(newImpl, 1)`, `whitelistImplementation(newImp
 
 ```bash
 DO_DEPLOY=false DO_UPDATE_ADDRESS_JSON=false \
-forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultOnlyUsdc.sol:UpgradeV1Strategies \
+forge script multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultDefault.sol:UpgradeV1Strategies \
   --fork-url base --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 -vv
 ```
 
