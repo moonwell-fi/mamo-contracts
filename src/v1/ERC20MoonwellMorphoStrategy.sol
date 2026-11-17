@@ -403,7 +403,7 @@ contract ERC20MoonwellMorphoStrategy is Initializable, UUPSUpgradeable, BaseStra
      * @notice Deposits funds into the strategy
      * @notice This function assumes that the exact `amount` of tokens is received after the transfer.
      *      It does not support fee-on-transfer tokens where the received amount would be less than the transfer amount.
-     * @dev Only callable by the user who owns this strategy
+     * @dev Permissionless: pulls `amount` from the caller
      * @param amount The amount of tokens to deposit
      */
     function deposit(uint256 amount) external {

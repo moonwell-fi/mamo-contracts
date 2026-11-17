@@ -15,6 +15,7 @@ import {IMToken} from "@interfaces/IMToken.sol";
 import {GPv2Order} from "@libraries/GPv2Order.sol";
 import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
@@ -201,7 +202,7 @@ contract StrategyV1UpgradeTest is BaseTest {
 
         uint256 maxOut = IERC4626(address(vault)).maxWithdraw(FUNDED_PROXY);
         vm.startPrank(FUNDED_OWNER);
-        vm.expectRevert();
+        _expectVaultShort(IERC4626(address(vault)), FUNDED_PROXY, maxOut + 1);
         s.withdraw(maxOut + 1);
         s.withdraw(maxOut);
         // #126 lifts these: withdraw past the vault balance and withdrawAll before Moonwell can pay the share
@@ -209,7 +210,7 @@ contract StrategyV1UpgradeTest is BaseTest {
         s.withdrawAll();
         // Some Moonwell cash back, below the share: still out of reach until the compounder moves the account
         deal(address(usdc), address(mToken), 10_000);
-        vm.expectRevert();
+        _expectVaultShort(IERC4626(address(vault)), FUNDED_PROXY, 1);
         s.withdraw(1);
         vm.stopPrank();
     }
@@ -274,10 +275,10 @@ contract StrategyV1UpgradeTest is BaseTest {
             s.deposit(amounts[i]);
             // Partial withdrawals come from the vault only, whatever Moonwell could pay
             uint256 maxOut = v.maxWithdraw(proxies[i]);
-            vm.expectRevert();
+            _expectVaultShort(v, proxies[i], maxOut + 1);
             s.withdraw(maxOut + 1);
             s.withdraw(maxOut);
-            vm.expectRevert();
+            _expectVaultShort(v, proxies[i], 1);
             s.withdraw(1);
             vm.stopPrank();
 
@@ -352,6 +353,13 @@ contract StrategyV1UpgradeTest is BaseTest {
     function test_newCbBtcAndWethAccounts_defaultToVault() public {
         string[2] memory assets = ["cbBTC", "WETH"];
         uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        address distributor = addresses.getAddress("MERKLE_PROTOCOL_DISTRIBUTOR");
+        vm.etch(distributor, type(MockMerkl).runtimeCode);
+        deal(xwell, distributor, 1_000e18);
+        address[] memory tokens = new address[](1);
+        tokens[0] = xwell;
+        uint256[] memory claimed = new uint256[](1);
+        claimed[0] = 100e18;
         for (uint256 i; i < 2; i++) {
             StrategyFactory f =
                 StrategyFactory(upgrade.addresses().getAddress(string.concat(assets[i], "_STRATEGY_FACTORY")));
@@ -366,8 +374,18 @@ contract StrategyV1UpgradeTest is BaseTest {
             assertEq(s.splitVault(), 10_000);
             assertGt(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
             assertEq(IERC20(address(s.mToken())).balanceOf(address(s)), 0);
-            s.withdrawAll();
+            s.withdraw(amounts[i] / 3);
+            assertEq(asset.balanceOf(user), amounts[i] / 3);
             vm.stopPrank();
+
+            uint256 recipientBefore = IERC20(xwell).balanceOf(s.feeRecipient());
+            vm.prank(backend);
+            s.claimRewards(tokens, claimed, new bytes32[][](1));
+            assertEq(IERC20(xwell).balanceOf(s.feeRecipient()) - recipientBefore, 5e18, "5% of the claim");
+            assertEq(IERC20(xwell).balanceOf(address(s)), 95e18);
+
+            vm.prank(user);
+            s.withdrawAll();
             assertEq(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
             assertApproxEqRel(asset.balanceOf(user), amounts[i], 1e13); // vault share rounding
         }
@@ -506,6 +524,18 @@ contract StrategyV1UpgradeTest is BaseTest {
         registry.upgradeStrategy(proxy, address(newImpl));
         assertEq(ERC1967Proxy(payable(proxy)).getImplementation(), address(newImpl));
         return ERC20MoonwellMorphoStrategy(payable(proxy));
+    }
+
+    /// @dev The vault leg reverts when the account holds fewer shares than `amount` needs
+    function _expectVaultShort(IERC4626 v, address proxy, uint256 amount) internal {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientBalance.selector,
+                proxy,
+                IERC20(address(v)).balanceOf(proxy),
+                v.previewWithdraw(amount)
+            )
+        );
     }
 
     function _deposit(ERC20MoonwellMorphoStrategy s, address owner, uint256 amount) internal {
