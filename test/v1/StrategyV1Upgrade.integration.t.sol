@@ -561,6 +561,13 @@ contract StrategyV1UpgradeTest is BaseTest {
     function test_newCbBtcAndWethAccounts_defaultToVault() public {
         string[2] memory assets = ["cbBTC", "WETH"];
         uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        address distributor = addresses.getAddress("MERKLE_PROTOCOL_DISTRIBUTOR");
+        vm.etch(distributor, type(MockMerkl).runtimeCode);
+        deal(xwell, distributor, 1_000e18);
+        address[] memory tokens = new address[](1);
+        tokens[0] = xwell;
+        uint256[] memory claimed = new uint256[](1);
+        claimed[0] = 100e18;
         for (uint256 i; i < 2; i++) {
             StrategyFactory f =
                 StrategyFactory(upgrade.addresses().getAddress(string.concat(assets[i], "_STRATEGY_FACTORY")));
@@ -575,8 +582,18 @@ contract StrategyV1UpgradeTest is BaseTest {
             assertEq(s.splitVault(), 10_000);
             assertGt(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
             assertEq(IERC20(address(s.mToken())).balanceOf(address(s)), 0);
-            s.withdrawAll();
+            s.withdraw(amounts[i] / 3);
+            assertEq(asset.balanceOf(user), amounts[i] / 3);
             vm.stopPrank();
+
+            uint256 recipientBefore = IERC20(xwell).balanceOf(s.feeRecipient());
+            vm.prank(backend);
+            s.claimRewards(tokens, claimed, new bytes32[][](1));
+            assertEq(IERC20(xwell).balanceOf(s.feeRecipient()) - recipientBefore, 5e18, "5% of the claim");
+            assertEq(IERC20(xwell).balanceOf(address(s)), 95e18);
+
+            vm.prank(user);
+            s.withdrawAll();
             assertEq(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
             assertApproxEqRel(asset.balanceOf(user), amounts[i], 1e13); // vault share rounding
         }
