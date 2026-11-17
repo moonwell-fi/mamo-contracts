@@ -7,6 +7,7 @@ import {
     SlippagePriceCheckerOracleHardening
 } from "../multisig/mamo-multisig/013_SlippagePriceCheckerOracleHardening.sol";
 import {BaseTest} from "./BaseTest.t.sol";
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
 import {SlippagePriceChecker} from "@contracts/SlippagePriceChecker.sol";
 import {DeployConfig} from "@script/DeployConfig.sol";
 import {DeploySlippagePriceChecker} from "@script/DeploySlippagePriceChecker.s.sol";
@@ -704,6 +705,32 @@ contract SlippagePriceCheckerTest is BaseTest {
         return SlippagePriceChecker(address(slippagePriceChecker));
     }
 
+    /// @dev The implementation the live checker ran until proposal 017 upgraded it
+    address internal constant PRE_017_CHECKER_IMPL = 0x413C38B68fe730F2bC30d8Cde965967D1C7BC599;
+
+    /// @dev The live checker already took this upgrade (017), with its pairs backfilled and the sequencer
+    ///      feed set. Tests that need the state an in-place upgrade starts from rebuild it: a fresh proxy
+    ///      on the pre-017 implementation, given the live WELL pairs, then upgraded.
+    function _upgradeCheckerFromPre017() internal returns (SlippagePriceChecker) {
+        ISlippagePriceChecker live = slippagePriceChecker;
+        slippagePriceChecker = ISlippagePriceChecker(
+            address(new ERC1967Proxy(PRE_017_CHECKER_IMPL, abi.encodeCall(SlippagePriceChecker.initialize, (owner))))
+        );
+
+        address[] memory buyTokens = _candidateBuyTokens();
+        vm.startPrank(owner);
+        for (uint256 i = 0; i < buyTokens.length; i++) {
+            ISlippagePriceChecker.TokenFeedConfiguration[] memory configs =
+                live.tokenPairOracleInformation(address(well), buyTokens[i]);
+            if (configs.length == 0) continue;
+            slippagePriceChecker.addTokenConfiguration(address(well), buyTokens[i], configs);
+        }
+        slippagePriceChecker.setMaxTimePriceValid(address(well), 1 hours);
+        vm.stopPrank();
+
+        return _upgradeChecker();
+    }
+
     /// @notice MOO-734: the implementation must not be initializable directly.
     function testImplementationInitializersAreDisabled() public {
         SlippagePriceChecker implementation = new SlippagePriceChecker();
@@ -813,7 +840,7 @@ contract SlippagePriceCheckerTest is BaseTest {
     ///      pre-outage answer -- and the configured slippage cannot cap the loss, because slippage is
     ///      measured against that same stale answer.
     function testSequencerUptimeGuard() public {
-        SlippagePriceChecker checker = _upgradeChecker();
+        SlippagePriceChecker checker = _upgradeCheckerFromPre017();
 
         MockChainlinkFeed uptimeFeedContract = new MockChainlinkFeed(8);
         address uptimeFeed = address(uptimeFeedContract);
@@ -1016,7 +1043,7 @@ contract SlippagePriceCheckerTest is BaseTest {
     ///      pair X->A (count 0); add X->B (count 1); remove X->A (count 0) while X->B is still live.
     ///      With no legacy flag, isRewardToken(X) then reads false for a token that IS configured.
     function testRemovingPreUpgradePairKeepsCountForLivePairs() public {
-        SlippagePriceChecker checker = _upgradeChecker();
+        SlippagePriceChecker checker = _upgradeCheckerFromPre017();
 
         // WELL -> underlying is configured on chain, i.e. before this bookkeeping existed.
         assertGt(
@@ -1059,7 +1086,7 @@ contract SlippagePriceCheckerTest is BaseTest {
     ///      without backfillPairCount a pre-upgrade pair reports isRewardToken() == false the moment
     ///      the legacy maxTimePriceValid flag is not set (or is cleared).
     function testBackfillPairCountRegistersPreUpgradePairs() public {
-        SlippagePriceChecker checker = _upgradeChecker();
+        SlippagePriceChecker checker = _upgradeCheckerFromPre017();
 
         vm.prank(owner);
         checker.setMaxTimePriceValid(address(well), 0);

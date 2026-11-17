@@ -1,0 +1,548 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity 0.8.28;
+
+import {UpgradeV1Strategies} from "../../multisig/mamo-multisig/020_UpgradeV1StrategiesClaimFeeVaultDefault.sol";
+import {BaseTest} from "../BaseTest.t.sol";
+
+import {ERC1967Proxy} from "@contracts/ERC1967Proxy.sol";
+import {MamoStrategyRegistry} from "@contracts/MamoStrategyRegistry.sol";
+import {ERC20MoonwellMorphoStrategy} from "@contracts/v1/ERC20MoonwellMorphoStrategy.sol";
+import {StrategyFactory} from "@contracts/v1/StrategyFactory.sol";
+
+import {Addresses} from "@fps/addresses/Addresses.sol";
+import {IERC4626} from "@interfaces/IERC4626.sol";
+import {IMToken} from "@interfaces/IMToken.sol";
+import {GPv2Order} from "@libraries/GPv2Order.sol";
+import {Initializable} from "@openzeppelin-upgradeable/contracts/proxy/utils/Initializable.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+
+/// @dev Merkl stand-in: pays each account its cumulative amount minus what it already paid
+contract MockMerkl {
+    mapping(address => mapping(address => uint256)) public paid;
+
+    function claim(
+        address[] calldata users,
+        address[] calldata tokens,
+        uint256[] calldata amounts,
+        bytes32[][] calldata
+    ) external {
+        for (uint256 i; i < users.length; i++) {
+            uint256 owed = amounts[i] - paid[users[i]][tokens[i]];
+            paid[users[i]][tokens[i]] = amounts[i];
+            IERC20(tokens[i]).transfer(users[i], owed);
+        }
+    }
+}
+
+contract StrategyV1UpgradeTest is BaseTest {
+    using GPv2Order for GPv2Order.Data;
+
+    /// @dev Recent block where Moonwell USDC getCash() == 0 (fully borrowed), so any Moonwell redeem reverts
+    uint256 internal constant PINNED_BLOCK = 52_946_409;
+    /// @dev Live USDC factory StrategyCreated logs (blocks 40M-42M), first with MOONWELL_USDC.balanceOf > 0
+    address internal constant FUNDED_PROXY = 0x891a1A6a5838fC4239dE32ae02F00f7a6C60356C;
+    address internal constant FUNDED_OWNER = 0x082784c86D4D6E9cA0E19e93da1F78B116bd8307;
+    /// @dev Same logs (blocks 52.5M-52.95M), first with no mToken, vault or USDC balance
+    address internal constant EMPTY_PROXY = 0x835CcBa42DfDC7E57b2eB015F3B9BA37391e2275;
+    address internal constant EMPTY_OWNER = 0xE0539c243946181F8298255e0500380B9579093d;
+    /// @dev Deprecated factory 0x1Eeb…E286 StrategyCreated log at block 32,040,908, still on first-gen impl 0x5fAB…3A35
+    address internal constant GEN1_PROXY = 0xC06C044378528D97C96138A385473cF6a746f5Cd;
+    address internal constant GEN1_OWNER = 0xDe29a250A94F8d277DBDd1A449b912860539DAaf;
+
+    /// @dev Old cbBTC and WETH factory StrategyCreated logs (blocks 52.2M-52.9M), both funded on Moonwell
+    address internal constant CBBTC_PROXY = 0x43BFC761a5D872ad142ad588fDfdEf5Ed19bCc74;
+    address internal constant CBBTC_OWNER = 0x1B6891DB50377c5bE23878c3C83564e5Df881b30;
+    address internal constant WETH_PROXY = 0xF9BbbBEB33878eE746E4806BBD4B4F5C1BeC182A;
+    address internal constant WETH_OWNER = 0x5fD41eCe257465e201398dD97ACc444F4Fa70260;
+
+    UpgradeV1Strategies internal upgrade;
+    MamoStrategyRegistry internal registry;
+    StrategyFactory internal liveFactory;
+    StrategyFactory internal factory;
+    ERC20MoonwellMorphoStrategy internal newImpl;
+    IERC20 internal usdc;
+    IMToken internal mToken;
+    IERC20 internal vault;
+    address internal xwell;
+    address internal backend;
+
+    function setUp() public override {
+        vm.createSelectFork(vm.envString("BASE_RPC_URL"), PINNED_BLOCK);
+        vm.txGasPrice(0);
+        vm.fee(0);
+        // Frozen pre-020 book: the live one moves to contracts that do not exist at the pin
+        vm.setEnv("ADDRESSES_PATH", "./addresses/rehearsal-020");
+        uint256[] memory chainIds = new uint256[](1);
+        chainIds[0] = block.chainid;
+        addresses = new Addresses("./addresses/rehearsal-020", chainIds);
+        vm.makePersistent(address(addresses));
+
+        registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
+        liveFactory = StrategyFactory(addresses.getAddress("USDC_STRATEGY_FACTORY")); // pre-proposal book
+        usdc = IERC20(addresses.getAddress("USDC"));
+        mToken = IMToken(addresses.getAddress("MOONWELL_USDC"));
+        vault = IERC20(addresses.getAddress("USDC_METAMORPHO_VAULT"));
+        xwell = addresses.getAddress("xWELL_PROXY");
+        backend = registry.getBackendAddress();
+        assertEq(mToken.getCash(), 0, "pin must sit where Moonwell USDC has no cash");
+
+        upgrade = new UpgradeV1Strategies();
+        vm.makePersistent(address(upgrade));
+        upgrade.run();
+        vm.setEnv("ADDRESSES_PATH", "./addresses");
+        newImpl = ERC20MoonwellMorphoStrategy(payable(upgrade.addresses().getAddress("MOONWELL_MORPHO_STRATEGY_IMPL")));
+        factory = StrategyFactory(upgrade.addresses().getAddress("USDC_STRATEGY_FACTORY"));
+        assertEq(factory.feeRecipient(), addresses.getAddress("MAMO_MULTISIG"), "factory fee recipient");
+    }
+
+    function test_liveFactory_canNoLongerCreate() public {
+        address user = makeAddr("user");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, address(liveFactory), registry.BACKEND_ROLE()
+            )
+        );
+        vm.prank(user);
+        liveFactory.createStrategyForUser(user);
+    }
+
+    function test_newAccount_vaultOnly_withdrawsAtZeroCash() public {
+        address user = makeAddr("user");
+        vm.prank(user);
+        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(factory.createStrategyForUser(user)));
+        assertEq(s.feeRecipient(), addresses.getAddress("MAMO_MULTISIG"));
+
+        _deposit(s, user, 1_000e6);
+        assertGt(vault.balanceOf(address(s)), 0);
+        assertEq(IERC20(address(mToken)).balanceOf(address(s)), 0);
+
+        vm.startPrank(user);
+        s.withdraw(500e6);
+        s.withdrawAll();
+        vm.stopPrank();
+        assertEq(vault.balanceOf(address(s)), 0);
+        assertApproxEqAbs(usdc.balanceOf(user), 1_000e6, 1);
+    }
+
+    function test_fundedLegacyProxy_zeroCash_fullRedeemStillReverts() public {
+        // PR B lifts this: updatePosition and withdrawAll still redeem the whole mToken position here
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        vm.prank(backend);
+        vm.expectRevert("Failed to redeem mToken");
+        s.updatePosition(0, 10_000);
+        vm.prank(FUNDED_OWNER);
+        vm.expectRevert("Failed to redeem mToken");
+        s.withdrawAll();
+    }
+
+    function test_firstGenerationProxy_upgradesStraightToV1() public {
+        assertEq(ERC1967Proxy(payable(GEN1_PROXY)).getImplementation(), 0x5fAB373f43079CE488C2b8579751791982C03A35);
+        ERC20MoonwellMorphoStrategy s = _upgrade(GEN1_PROXY, GEN1_OWNER);
+        assertEq(s.compoundFee(), 500);
+        assertEq(address(s.token()), address(usdc));
+    }
+
+    function test_claimRewards_refusesADuplicateToken() public {
+        address distributor = addresses.getAddress("MERKLE_PROTOCOL_DISTRIBUTOR");
+        vm.etch(distributor, type(MockMerkl).runtimeCode);
+        deal(xwell, distributor, 1_000e18);
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+
+        address[] memory tokens = new address[](2);
+        (tokens[0], tokens[1]) = (xwell, xwell);
+        uint256[] memory amounts = new uint256[](2);
+        (amounts[0], amounts[1]) = (100e18, 200e18);
+        vm.prank(backend);
+        vm.expectRevert("Duplicate reward token");
+        s.claimRewards(tokens, amounts, new bytes32[][](2));
+
+        // Unique but descending by address: accepted
+        address morpho = addresses.getAddress("MORPHO");
+        deal(morpho, distributor, 1_000e18);
+        (tokens[0], tokens[1]) = (morpho, xwell);
+        vm.prank(backend);
+        s.claimRewards(tokens, amounts, new bytes32[][](2));
+
+        // Non-adjacent duplicate: refused
+        tokens = new address[](3);
+        (tokens[0], tokens[1], tokens[2]) = (xwell, morpho, xwell);
+        amounts = new uint256[](3);
+        (amounts[0], amounts[1], amounts[2]) = (300e18, 300e18, 400e18);
+        vm.prank(backend);
+        vm.expectRevert("Duplicate reward token");
+        s.claimRewards(tokens, amounts, new bytes32[][](3));
+    }
+
+    function test_onlyBackend_isRoleMembership() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        vm.prank(address(factory)); // any BACKEND_ROLE member, not only index 0
+        s.updatePosition(0, 10_000);
+        vm.prank(addresses.getAddress("MAMO_BACKEND")); // the operator EOA holds no role today
+        vm.expectRevert("Not backend");
+        s.updatePosition(0, 10_000);
+        vm.prank(EMPTY_OWNER);
+        vm.expectRevert("Not backend");
+        s.updatePosition(0, 10_000);
+    }
+
+    function test_initializeVaultSplit_pointsAFundedLegacyProxyAtTheVault() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
+        vm.prank(FUNDED_OWNER); // the app sends this right after the upgrade
+        s.initializeVaultSplit();
+        assertEq(s.splitMToken(), 0);
+        assertEq(s.splitVault(), 10_000);
+        assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "nothing moved");
+        _deposit(s, FUNDED_OWNER, 100e6);
+        assertGt(vault.balanceOf(FUNDED_PROXY), 0, "new deposit lands in the vault");
+        assertEq(mToken.balanceOf(FUNDED_PROXY), mBalance, "Moonwell share untouched");
+
+        uint256 maxOut = IERC4626(address(vault)).maxWithdraw(FUNDED_PROXY);
+        vm.startPrank(FUNDED_OWNER);
+        _expectVaultShort(IERC4626(address(vault)), FUNDED_PROXY, maxOut + 1);
+        s.withdraw(maxOut + 1);
+        s.withdraw(maxOut);
+        // #126 lifts these: withdraw past the vault balance and withdrawAll before Moonwell can pay the share
+        vm.expectRevert("Failed to redeem mToken");
+        s.withdrawAll();
+        // Some Moonwell cash back, below the share: still out of reach until the compounder moves the account
+        deal(address(usdc), address(mToken), 10_000);
+        _expectVaultShort(IERC4626(address(vault)), FUNDED_PROXY, 1);
+        s.withdraw(1);
+        vm.stopPrank();
+    }
+
+    function test_initializeVaultSplit_fundedCbBtcAndWethLegacyProxies() public {
+        address[2] memory proxies = [CBBTC_PROXY, WETH_PROXY];
+        address[2] memory owners = [CBBTC_OWNER, WETH_OWNER];
+        string[2] memory implKeys = ["MOONWELL_MORPHO_STRATEGY_IMPL", "MOONWELL_MORPHO_STRATEGY_IMPL_V2"];
+        uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        for (uint256 i; i < 2; i++) {
+            ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(proxies[i]));
+            IERC20 asset = s.token();
+            IERC20 m = IERC20(address(s.mToken()));
+            IERC20 v = IERC20(address(s.metaMorphoVault()));
+            uint256 mBalance = m.balanceOf(proxies[i]);
+            uint256 vBalance = v.balanceOf(proxies[i]);
+            assertGt(mBalance, 0, "account should hold a Moonwell position");
+
+            address impl = upgrade.addresses().getAddress(implKeys[i]);
+            vm.prank(owners[i]);
+            registry.upgradeStrategy(proxies[i], impl);
+            assertEq(s.owner(), owners[i]);
+            assertEq(address(s.token()), address(asset));
+            assertEq(s.splitMToken(), 10_000, "the upgrade alone leaves the split on Moonwell");
+
+            vm.prank(owners[i]);
+            s.initializeVaultSplit();
+            assertEq(s.splitMToken(), 0);
+            assertEq(s.splitVault(), 10_000);
+            assertEq(m.balanceOf(proxies[i]), mBalance, "nothing moved");
+            vm.prank(owners[i]);
+            vm.expectRevert(Initializable.InvalidInitialization.selector);
+            s.initializeVaultSplit();
+
+            deal(address(asset), owners[i], amounts[i]);
+            vm.startPrank(owners[i]);
+            asset.approve(proxies[i], amounts[i]);
+            s.deposit(amounts[i]);
+            vm.stopPrank();
+            assertGt(v.balanceOf(proxies[i]), vBalance, "new deposit lands in the vault");
+            assertEq(m.balanceOf(proxies[i]), mBalance, "Moonwell share untouched");
+        }
+    }
+
+    function test_fundedCbBtcAndWethLegacyProxies_vaultSplit_withdrawalsAndMigration() public {
+        address[2] memory proxies = [CBBTC_PROXY, WETH_PROXY];
+        address[2] memory owners = [CBBTC_OWNER, WETH_OWNER];
+        string[2] memory implKeys = ["MOONWELL_MORPHO_STRATEGY_IMPL", "MOONWELL_MORPHO_STRATEGY_IMPL_V2"];
+        uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        for (uint256 i; i < 2; i++) {
+            ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(proxies[i]));
+            IERC20 asset = s.token();
+            IMToken m = IMToken(address(s.mToken()));
+            IERC4626 v = IERC4626(address(s.metaMorphoVault()));
+            address impl = upgrade.addresses().getAddress(implKeys[i]);
+            deal(address(asset), owners[i], amounts[i]);
+
+            vm.startPrank(owners[i]);
+            registry.upgradeStrategy(proxies[i], impl);
+            s.initializeVaultSplit();
+            asset.approve(proxies[i], amounts[i]);
+            s.deposit(amounts[i]);
+            // Partial withdrawals come from the vault only, whatever Moonwell could pay
+            uint256 maxOut = v.maxWithdraw(proxies[i]);
+            _expectVaultShort(v, proxies[i], maxOut + 1);
+            s.withdraw(maxOut + 1);
+            s.withdraw(maxOut);
+            _expectVaultShort(v, proxies[i], 1);
+            s.withdraw(1);
+            vm.stopPrank();
+
+            // Moonwell out of cash: no full exit, and the backend cannot move the account
+            uint256 cash = asset.balanceOf(address(m));
+            uint256 share = m.balanceOfUnderlying(proxies[i]);
+            deal(address(asset), address(m), 0);
+            vm.prank(owners[i]);
+            vm.expectRevert("Failed to redeem mToken");
+            s.withdrawAll();
+            vm.prank(backend);
+            vm.expectRevert("Failed to redeem mToken");
+            s.updatePosition(0, 10_000);
+
+            // Cash covers the share again: the backend moves it and the owner exits in full
+            deal(address(asset), address(m), cash + 2 * share);
+            uint256 total = m.balanceOfUnderlying(proxies[i]) + v.maxWithdraw(proxies[i]);
+            vm.prank(backend);
+            s.updatePosition(0, 10_000);
+            assertEq(m.balanceOf(proxies[i]), 0, "Moonwell share moved to the vault");
+            uint256 ownerBefore = asset.balanceOf(owners[i]);
+            vm.prank(owners[i]);
+            s.withdrawAll();
+            assertApproxEqAbs(asset.balanceOf(owners[i]) - ownerBefore, total, 3); // vault share rounding
+        }
+    }
+
+    function test_initializeVaultSplit_ownerOnly_runsOnce() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        address stranger = makeAddr("stranger");
+        address[2] memory notOwners = [stranger, backend];
+        for (uint256 i; i < 2; i++) {
+            vm.prank(notOwners[i]);
+            vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", notOwners[i]));
+            s.initializeVaultSplit();
+        }
+        vm.prank(EMPTY_OWNER);
+        s.initializeVaultSplit();
+        assertEq(s.splitVault(), 10_000);
+        vm.prank(EMPTY_OWNER);
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        s.initializeVaultSplit();
+    }
+
+    function test_unupgradedLegacyProxy_depositStillGoesToMoonwell() public {
+        // Why the app gates deposits until upgrade + initializeVaultSplit
+        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(FUNDED_PROXY));
+        uint256 mBalance = mToken.balanceOf(FUNDED_PROXY);
+        _deposit(s, FUNDED_OWNER, 100e6);
+        assertGt(mToken.balanceOf(FUNDED_PROXY), mBalance);
+        assertEq(vault.balanceOf(FUNDED_PROXY), 0);
+    }
+
+    function test_emptyLegacyProxy_fullLifecycle() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        vm.prank(backend);
+        s.updatePosition(0, 10_000);
+        _deposit(s, EMPTY_OWNER, 100e6);
+        assertGt(vault.balanceOf(EMPTY_PROXY), 0);
+        assertEq(mToken.balanceOf(EMPTY_PROXY), 0);
+
+        vm.startPrank(EMPTY_OWNER);
+        s.withdraw(40e6);
+        assertEq(mToken.balanceOf(EMPTY_PROXY), 0);
+        s.withdrawAll();
+        vm.stopPrank();
+        assertEq(vault.balanceOf(EMPTY_PROXY), 0);
+        assertEq(mToken.balanceOf(EMPTY_PROXY), 0);
+        assertApproxEqAbs(usdc.balanceOf(EMPTY_OWNER), 100e6, 1);
+    }
+
+    function test_newCbBtcAndWethAccounts_defaultToVault() public {
+        string[2] memory assets = ["cbBTC", "WETH"];
+        uint256[2] memory amounts = [uint256(0.01e8), 1e18];
+        address distributor = addresses.getAddress("MERKLE_PROTOCOL_DISTRIBUTOR");
+        vm.etch(distributor, type(MockMerkl).runtimeCode);
+        deal(xwell, distributor, 1_000e18);
+        address[] memory tokens = new address[](1);
+        tokens[0] = xwell;
+        uint256[] memory claimed = new uint256[](1);
+        claimed[0] = 100e18;
+        for (uint256 i; i < 2; i++) {
+            StrategyFactory f =
+                StrategyFactory(upgrade.addresses().getAddress(string.concat(assets[i], "_STRATEGY_FACTORY")));
+            address user = makeAddr(assets[i]);
+            vm.prank(user);
+            ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(f.createStrategyForUser(user)));
+            IERC20 asset = s.token();
+            deal(address(asset), user, amounts[i]);
+            vm.startPrank(user);
+            asset.approve(address(s), amounts[i]);
+            s.deposit(amounts[i]);
+            assertEq(s.splitVault(), 10_000);
+            assertGt(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
+            assertEq(IERC20(address(s.mToken())).balanceOf(address(s)), 0);
+            s.withdraw(amounts[i] / 3);
+            assertEq(asset.balanceOf(user), amounts[i] / 3);
+            vm.stopPrank();
+
+            uint256 recipientBefore = IERC20(xwell).balanceOf(s.feeRecipient());
+            vm.prank(backend);
+            s.claimRewards(tokens, claimed, new bytes32[][](1));
+            assertEq(IERC20(xwell).balanceOf(s.feeRecipient()) - recipientBefore, 5e18, "5% of the claim");
+            assertEq(IERC20(xwell).balanceOf(address(s)), 95e18);
+
+            vm.prank(user);
+            s.withdrawAll();
+            assertEq(IERC20(address(s.metaMorphoVault())).balanceOf(address(s)), 0);
+            assertApproxEqRel(asset.balanceOf(user), amounts[i], 1e13); // vault share rounding
+        }
+    }
+
+    function test_fundedLegacyProxy_withdrawUpToMoonwellCash_beforeVaultSplit() public {
+        // The deployed withdraw path is intact for accounts still on 10000/0
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        assertEq(s.splitMToken(), 10_000);
+        deal(address(usdc), address(mToken), 10_000); // sets the balance: equals adding only because setUp pins cash at 0
+        uint256 ownerBefore = usdc.balanceOf(FUNDED_OWNER);
+        vm.startPrank(FUNDED_OWNER);
+        vm.expectRevert("Failed to redeem mToken");
+        s.withdraw(10_001);
+        s.withdraw(10_000);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(FUNDED_OWNER) - ownerBefore, 10_000);
+    }
+
+    function test_fundedLegacyProxy_vaultSplit_thenCashReturns_compounderMigratesAndOwnerExits() public {
+        ERC20MoonwellMorphoStrategy s = _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        vm.prank(FUNDED_OWNER);
+        s.initializeVaultSplit();
+        _deposit(s, FUNDED_OWNER, 100e6);
+        uint256 total = mToken.balanceOfUnderlying(FUNDED_PROXY) + IERC4626(address(vault)).maxWithdraw(FUNDED_PROXY);
+        deal(address(usdc), address(mToken), 1e6); // Moonwell can now pay the whole share
+        vm.prank(backend);
+        s.updatePosition(0, 10_000);
+        assertEq(mToken.balanceOf(FUNDED_PROXY), 0, "Moonwell share moved to the vault");
+        uint256 ownerBefore = usdc.balanceOf(FUNDED_OWNER);
+        vm.prank(FUNDED_OWNER);
+        s.withdrawAll();
+        assertApproxEqAbs(usdc.balanceOf(FUNDED_OWNER) - ownerBefore, total, 3);
+    }
+
+    function test_implementation_refusesInitialize() public {
+        ERC20MoonwellMorphoStrategy.InitParams memory params;
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        newImpl.initialize(params);
+    }
+
+    function test_emptyLegacyProxy_updatePositionNoLongerReverts() public {
+        vm.prank(backend);
+        vm.expectRevert("Nothing to rebalance");
+        ERC20MoonwellMorphoStrategy(payable(EMPTY_PROXY)).updatePosition(0, 10_000);
+
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        vm.prank(backend);
+        s.updatePosition(0, 10_000);
+        assertEq(s.splitMToken(), 0);
+        assertEq(s.splitVault(), 10_000);
+    }
+
+    function test_claimRewards_chargesCompoundFeeOnTheClaimDeltaOnly() public {
+        address distributor = addresses.getAddress("MERKLE_PROTOCOL_DISTRIBUTOR");
+        vm.etch(distributor, type(MockMerkl).runtimeCode);
+        deal(xwell, distributor, 1_000e18);
+
+        ERC20MoonwellMorphoStrategy s = _upgrade(EMPTY_PROXY, EMPTY_OWNER);
+        deal(xwell, EMPTY_PROXY, 7e18); // pre-existing balance, never charged
+        address recipient = s.feeRecipient();
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = xwell;
+        uint256[] memory amounts = new uint256[](1);
+        uint256[] memory fees = new uint256[](1);
+        bytes32[][] memory proofs = new bytes32[][](1);
+
+        // Cumulative 100 then 150 then 150 again: fee on 100, then 50, then nothing
+        uint256[3] memory cumulative = [uint256(100e18), 150e18, 150e18];
+        uint256[3] memory paidOut = [uint256(100e18), 50e18, 0];
+        for (uint256 i; i < 3; i++) {
+            amounts[0] = cumulative[i];
+            fees[0] = (paidOut[i] * s.compoundFee()) / 10_000;
+            uint256 recipientBefore = IERC20(xwell).balanceOf(recipient);
+            uint256 strategyBefore = IERC20(xwell).balanceOf(EMPTY_PROXY);
+
+            vm.expectEmit(EMPTY_PROXY);
+            emit ERC20MoonwellMorphoStrategy.CompoundFeeCollected(recipient, tokens, fees);
+            vm.prank(backend);
+            s.claimRewards(tokens, amounts, proofs);
+
+            assertEq(IERC20(xwell).balanceOf(recipient) - recipientBefore, fees[0]);
+            assertEq(IERC20(xwell).balanceOf(EMPTY_PROXY) - strategyBefore, paidOut[i] - fees[0]);
+        }
+        assertEq(IERC20(xwell).balanceOf(EMPTY_PROXY), 7e18 + 150e18 - (150e18 * s.compoundFee()) / 10_000);
+    }
+
+    function test_isValidSignature_acceptsOnlyTheHookFreeAppData() public {
+        ERC20MoonwellMorphoStrategy s = ERC20MoonwellMorphoStrategy(payable(FUNDED_PROXY));
+        uint256 sellAmount = 1_000e18;
+        // The document the old implementation required: a transferFrom pre-hook paying the fee
+        bytes memory hook = abi.encodeCall(
+            IERC20.transferFrom, (FUNDED_PROXY, s.feeRecipient(), (sellAmount * s.compoundFee()) / 10_000)
+        );
+        string memory oldDoc = string.concat(
+            '{"appCode":"Mamo","metadata":{"hooks":{"pre":[{"callData":"',
+            vm.toString(hook),
+            '","gasLimit":"',
+            vm.toString(s.hookGasLimit()),
+            '","target":"',
+            Strings.toHexString(uint160(xwell), 20),
+            '"}],"version":"0.1.0"}},"version":"1.3.0"}'
+        );
+        GPv2Order.Data memory order = GPv2Order.Data({
+            sellToken: IERC20(xwell),
+            buyToken: usdc,
+            receiver: FUNDED_PROXY,
+            sellAmount: sellAmount,
+            buyAmount: s.slippagePriceChecker().getExpectedOut(sellAmount, xwell, address(usdc)),
+            validTo: uint32(block.timestamp + 29 minutes),
+            appData: keccak256(bytes(oldDoc)),
+            feeAmount: 0,
+            kind: GPv2Order.KIND_SELL,
+            partiallyFillable: false,
+            sellTokenBalance: GPv2Order.BALANCE_ERC20,
+            buyTokenBalance: GPv2Order.BALANCE_ERC20
+        });
+
+        // Before the upgrade the hooked document is the one that validates
+        assertEq(s.isValidSignature(order.hash(s.DOMAIN_SEPARATOR()), abi.encode(order)), bytes4(0x1626ba7e));
+
+        _upgrade(FUNDED_PROXY, FUNDED_OWNER);
+        (, bytes32 hash) = s.expectedAppData();
+        assertEq(hash, keccak256(bytes('{"appCode":"Mamo","metadata":{},"version":"1.3.0"}')));
+        bytes32 digest = order.hash(s.DOMAIN_SEPARATOR());
+        vm.expectRevert("Invalid app data");
+        s.isValidSignature(digest, abi.encode(order));
+
+        order.appData = hash;
+        assertEq(s.isValidSignature(order.hash(s.DOMAIN_SEPARATOR()), abi.encode(order)), bytes4(0x1626ba7e));
+    }
+
+    function _upgrade(address proxy, address owner) internal returns (ERC20MoonwellMorphoStrategy) {
+        vm.prank(owner);
+        registry.upgradeStrategy(proxy, address(newImpl));
+        assertEq(ERC1967Proxy(payable(proxy)).getImplementation(), address(newImpl));
+        return ERC20MoonwellMorphoStrategy(payable(proxy));
+    }
+
+    /// @dev The vault leg reverts when the account holds fewer shares than `amount` needs
+    function _expectVaultShort(IERC4626 v, address proxy, uint256 amount) internal {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientBalance.selector,
+                proxy,
+                IERC20(address(v)).balanceOf(proxy),
+                v.previewWithdraw(amount)
+            )
+        );
+    }
+
+    function _deposit(ERC20MoonwellMorphoStrategy s, address owner, uint256 amount) internal {
+        deal(address(usdc), owner, amount);
+        vm.startPrank(owner);
+        usdc.approve(address(s), amount);
+        s.deposit(amount);
+        vm.stopPrank();
+    }
+}

@@ -36,6 +36,7 @@ contract RewardsDistributorSafeModuleIntegrationTest is BaseTest {
     event RewardsNotified(uint256 token1Amount, uint256 token2Amount, uint256 notifiedAt);
 
     function setUp() public override {
+        _forkBefore017();
         super.setUp();
 
         mamoToken = IERC20(addresses.getAddress("MAMO"));
