@@ -13,4 +13,5 @@ interface IMToken {
     ///      TOKEN_INSUFFICIENT_CASH error code rather than reverting, so a caller that does not read
     ///      it first turns "this market is fully lent out" into a hard revert of the whole call.
     function getCash() external view returns (uint256);
+    function exchangeRateStored() external view returns (uint256);
 }
