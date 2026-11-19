@@ -119,6 +119,12 @@ stock-pool-readiness:
 	rm -rf script/stock-accounts/addresses-dryrun && mkdir -p script/stock-accounts/addresses-dryrun && cp addresses/*.json script/stock-accounts/addresses-dryrun/
 	ADDRESSES_PATH=$(ADDRESSES_PATH) DEPLOY_ENV=$(DEPLOY_ENV) forge script script/StockAccountsPoolReadiness.s.sol:StockAccountsPoolReadiness --fork-url base --sender 0xDca82E03057329f53Ed4173429D46B0511E46Fb8 -vv
 
+# Pre-listing checks for one stock token (identity, pool, TWAP, zero-liquidity history, Safe simulation),
+# ending in the listToken calldata and a Safe Transaction Builder file. Read-only; needs cast and BASE_RPC_URL.
+# See docs/STOCK_ACCOUNT_LISTING.md. ARGS passes extra flags (--recheck, --hours, --to-block, --out, --pool).
+stock-list-check:
+	python3 script/stock-accounts/list-token-check.py $(TOKEN) $(ARGS)
+
 # Broadcasts increaseObservationCardinalityNext on every pool stock-pool-readiness reports as short.
 stock-pool-grow:
 	rm -rf script/stock-accounts/addresses-dryrun && mkdir -p script/stock-accounts/addresses-dryrun && cp addresses/*.json script/stock-accounts/addresses-dryrun/
@@ -255,4 +261,4 @@ tenderly-leveraged-aero-withdraw:
 test-all:
 	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking mamo-staking-v2 fee-splitter stock-price-checker stock-router-swap stock-accounts-setup stock-drop-setup lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas
 
-.PHONY:shell-lint stock-price-checker stock-accounts-setup stock-drop-setup deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking mamo-staking-v2 test-all stock-router-swap lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas stock-pool-grow
+.PHONY:shell-lint stock-price-checker stock-accounts-setup stock-drop-setup deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking mamo-staking-v2 test-all stock-router-swap lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas stock-pool-grow stock-list-check
