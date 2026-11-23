@@ -64,6 +64,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
     address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
+    uint24 internal constant TICK_BOUND_MARGIN = 443_636;
     address internal constant STRANGER = 0x000000000000000000000000000000000000dEaD;
 
     /// @dev Swap inputs large enough to run the pool to the sqrt-price limit the helpers set; the
@@ -101,7 +102,12 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         // code-bearing stand-in (this test contract) and repointed once the real checker exists.
         registry = _deployRegistry();
         checker = new StockAccountPriceChecker(
-            registry, USDC, existingChecker, CHAINLINK_L2_SEQUENCER_UPTIME_FEED, SEQUENCER_GRACE_PERIOD
+            registry,
+            USDC,
+            existingChecker,
+            CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
+            SEQUENCER_GRACE_PERIOD,
+            TICK_BOUND_MARGIN
         );
         vm.prank(admin);
         registry.setPriceChecker(checker);
@@ -934,7 +940,12 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
 
         StockAccountRegistry poolRegistry = _deployRegistry();
         StockAccountPriceChecker poolChecker = new StockAccountPriceChecker(
-            poolRegistry, USDC, existingChecker, CHAINLINK_L2_SEQUENCER_UPTIME_FEED, SEQUENCER_GRACE_PERIOD
+            poolRegistry,
+            USDC,
+            existingChecker,
+            CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
+            SEQUENCER_GRACE_PERIOD,
+            TICK_BOUND_MARGIN
         );
         vm.startPrank(admin);
         poolRegistry.setPriceChecker(poolChecker);

@@ -8,6 +8,8 @@ contract MockCLPoolObserve {
     int24 public tickSpacing = 10;
     int56 public cumulativeAtWindow;
     int56 public cumulativeNow;
+    uint160 public secondsPerLiquidityAtWindow;
+    uint160 public secondsPerLiquidityNow;
     bool public revertOld;
     /// @dev Longest window this pool has history for; 0 means any window
     uint32 public maxObservableWindow;
@@ -28,6 +30,12 @@ contract MockCLPoolObserve {
     function setMeanTick(int24 tick, uint32 window) external {
         cumulativeAtWindow = 0;
         cumulativeNow = int56(tick) * int56(uint56(window));
+    }
+
+    /// @notice Sets the two secondsPerLiquidityCumulativeX128 values `observe([window, 0])` returns
+    function setSecondsPerLiquidity(uint160 atWindow, uint160 now_) external {
+        secondsPerLiquidityAtWindow = atWindow;
+        secondsPerLiquidityNow = now_;
     }
 
     function setFactory(address value) external {
@@ -55,5 +63,7 @@ contract MockCLPoolObserve {
         tickCumulatives[0] = cumulativeAtWindow;
         tickCumulatives[1] = cumulativeNow;
         secondsPerLiquidityCumulativeX128 = new uint160[](2);
+        secondsPerLiquidityCumulativeX128[0] = secondsPerLiquidityAtWindow;
+        secondsPerLiquidityCumulativeX128[1] = secondsPerLiquidityNow;
     }
 }

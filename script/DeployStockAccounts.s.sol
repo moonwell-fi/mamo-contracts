@@ -46,6 +46,8 @@ contract DeployStockAccounts is Script {
 
     /// @notice Price checker's sequencer grace period, same as proposal 013
     uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
+    /// @dev Mean TWAP ticks are refused outside (-443,636, 443,636): a price ratio of 2^±64.
+    uint24 internal constant TICK_BOUND_MARGIN = 443_636;
 
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
@@ -141,7 +143,8 @@ contract DeployStockAccounts is Script {
             addresses.getAddress(config.asset),
             ISlippagePriceChecker(addresses.getAddress(config.existingPriceChecker)),
             addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
-            SEQUENCER_GRACE_PERIOD
+            SEQUENCER_GRACE_PERIOD,
+            TICK_BOUND_MARGIN
         );
         vm.stopBroadcast();
 
