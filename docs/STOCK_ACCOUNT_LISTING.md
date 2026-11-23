@@ -21,7 +21,7 @@ nothing in range.
 # needs cast (Foundry) and BASE_RPC_URL (environment or ./.env); read-only
 make stock-list-check TOKEN=0xb20000000000000000000016e38FD364d271Ba28
 python3 script/stock-accounts/list-token-check.py <token> [--pool <pool>] [--hours 24] [--out <dir>]
-python3 script/stock-accounts/list-token-check.py <token> --recheck      # a token that is already listed
+python3 script/stock-accounts/list-token-check.py <token> --recheck      # a token that is already listed (uses the registry's pool)
 python3 script/stock-accounts/list-token-check.py <token> --to-block <n> # replay a past state
 ```
 
@@ -57,7 +57,7 @@ whose LP leaves such moments is not ready to be priced from, which is why a day 
 required rather than a snapshot. The checker-side handling of such a window is MOO-1164.
 
 The scan follows every `Mint`, `Burn` and `Swap` of the pool over the window. It seeds the
-in-range liquidity from `slot0` and `liquidity()` at the window's first block, adjusts it for every
+in-range liquidity from `slot0` and `liquidity()` at the block before the window opens, adjusts it for every
 position that covers the live tick, and resyncs it at every swap (the `Swap` event carries the
 pool's liquidity). A window where it reaches zero is a FAIL even if no swap landed in it.
 

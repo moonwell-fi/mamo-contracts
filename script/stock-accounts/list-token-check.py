@@ -345,6 +345,14 @@ def main():
     section("Pool")
     pool = args.pool
     found = []
+    cfg_pool = addr_word(cfg[2]) if status_now != 0 else None
+    if args.recheck and cfg_pool and cfg_pool != ZERO:
+        # The checker prices from tokenConfig.pool; a recheck has to look at that pool, not the factory's first.
+        if pool and pool.lower() != cfg_pool.lower():
+            rep.warn("--pool differs from the registry's pool", "%s configured, checking %s as asked" % (cfg_pool, pool))
+        else:
+            pool = cfg_pool
+            rep.info("pool from registry", pool)
     if not pool:
         for ts_ in (1, 10, 50, 100, 200, 2000):
             p = ch.addr(factory, "getPool(address,address,int24)", token, asset, ts_)
@@ -422,10 +430,15 @@ def main():
         rep.fail("pool log scan", "failed: %s" % e)
         logs = None
     if logs is not None:
-        # Seed the in-range liquidity from the pool state at the start block, then follow every Mint/Burn/Swap.
-        seed = words(ch.call(pool, "slot0()", block=hex(start)))
-        tick = signed(seed[1])
-        liq = ch.u(pool, "liquidity()", block=hex(start))
+        # Seed the in-range liquidity from the state BEFORE block start (the log replay from start is inclusive,
+        # so seeding at start would count that block's Mint/Burn twice). A pool created in block start had none.
+        if start > created:
+            seed = words(ch.call(pool, "slot0()", block=hex(start - 1)))
+            tick = signed(seed[1])
+            liq = ch.u(pool, "liquidity()", block=hex(start - 1))
+        else:
+            tick = signed(words(ch.call(pool, "slot0()", block=hex(start)))[1])
+            liq = 0
         seed_liq = liq
         swaps = 0
         first_swap = None
@@ -446,7 +459,8 @@ def main():
                 vol += abs(a0 if not token_is_0 else a1) / 10 ** quote_dec
                 if liq == 0:
                     zero_after += 1
-                if tick <= MIN_TICK or tick >= MAX_TICK:
+                # A downward sweep ends at MIN_TICK; an upward one at MAX_TICK - 1 (the router's limit is MAX_SQRT_RATIO - 1).
+                if tick <= MIN_TICK or tick >= MAX_TICK - 1:
                     sweeps.append((bn, tick, lg["transactionHash"]))
                 if gap_open is not None:
                     gaps.append((gap_open, bn - gap_open))
