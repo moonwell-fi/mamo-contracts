@@ -37,3 +37,6 @@ script/tenderly/mine-ticker.log
 script/tenderly/.mine-ticker.pid
 
 script/tenderly/harness-results-leveraged-aero-withdraw.log
+
+# Python helper caches
+__pycache__/
