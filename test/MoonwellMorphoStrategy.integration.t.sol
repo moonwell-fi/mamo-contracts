@@ -91,6 +91,19 @@ contract MoonwellMorphoStrategyTest is Test {
     DeployConfig.DeploymentConfig public config;
     DeployAssetConfig.Config public assetConfig;
 
+    /// @dev Moonwell cut the cbBTC supply cap to 460 on 2026-11-16 and the suite deposits 1,000 units: lift it on the fork
+    function _liftSupplyCap() internal {
+        address comptroller = addresses.getAddress("MOONWELL_COMPTROLLER");
+        (, bytes memory admin) = comptroller.staticcall(abi.encodeWithSignature("admin()"));
+        address[] memory markets = new address[](1);
+        markets[0] = address(mToken);
+        vm.prank(abi.decode(admin, (address)));
+        (bool ok,) = comptroller.call(
+            abi.encodeWithSignature("_setMarketSupplyCaps(address[],uint256[])", markets, new uint256[](1))
+        );
+        require(ok, "supply cap not lifted");
+    }
+
     function setUp() public {
         vm.makePersistent(DEFAULT_TEST_CONTRACT);
 
@@ -124,14 +137,16 @@ contract MoonwellMorphoStrategyTest is Test {
         underlying = IERC20(addresses.getAddress(assetConfig.token));
         well = IERC20(addresses.getAddress("xWELL_PROXY"));
         mToken = IMToken(addresses.getAddress(assetConfig.moonwellMarket));
+        _liftSupplyCap();
         metaMorphoVault = IERC4626(addresses.getAddress(assetConfig.metamorphoVault));
         slippagePriceChecker = ISlippagePriceChecker(addresses.getAddress("CHAINLINK_SWAP_CHECKER_PROXY"));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
         marketRegistry = MarketRegistry(addresses.getAddress("MARKET_REGISTRY"));
 
-        splitMToken = assetConfig.strategyParams.splitMToken;
-        splitVault = assetConfig.strategyParams.splitVault;
+        // The multi-market factory takes its default split from markets[], not the v1 strategyParams
+        splitMToken = assetConfig.markets[0].splitBps;
+        splitVault = assetConfig.markets[1].splitBps;
         multicall = addresses.getAddress("STRATEGY_MULTICALL");
 
         // Create strategy for owner using the deployed factory

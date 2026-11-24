@@ -1,6 +1,6 @@
 {
   "lib/forge-proposal-simulator": {
-    "rev": "896ea50203a2631b54ecd3d0da08d21773c9c44a"
+    "rev": "6de9a570a6cb2b0356d4b6385df6da27f26480bc"
   },
   "lib/forge-std": {
     "rev": "3b20d60d14b343ee4f908cb8079495c07f5e8981"
