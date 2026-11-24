@@ -54,8 +54,9 @@ contract MamoStakingStrategyV2IntegrationTest is BaseTest {
         multiRewards = IMultiRewards(addresses.getAddress("MAMO_MULTI_REWARDS"));
         stakingStrategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
-        // Get the cbBTC strategy factory for testing reward distribution
-        cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
+        // Get the cbBTC strategy factory for testing reward distribution: the one live at the pinned
+        // block, since 020's replacement has no code there.
+        cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY_DEPRECATED_2"));
 
         // The implementation the live factory points at is the bytecode deployed on Base before this
         // branch. Every proxy the factory creates delegatecalls into it, so without this the whole

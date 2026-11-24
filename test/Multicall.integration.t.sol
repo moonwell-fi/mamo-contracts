@@ -131,7 +131,8 @@ contract MulticallIntegrationTest is BaseTest {
         deployer = addresses.getAddress(config.deployer);
         mamoMultisig = admin;
 
-        factory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
+        // The factory live at the pinned block: 020's replacement has no code there.
+        factory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY_DEPRECATED_2"));
         multicall = Multicall(payable(addresses.getAddress("STRATEGY_MULTICALL")));
 
         registry = MamoStrategyRegistry(addresses.getAddress("MAMO_STRATEGY_REGISTRY"));
