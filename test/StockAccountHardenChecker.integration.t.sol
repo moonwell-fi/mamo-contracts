@@ -63,7 +63,7 @@ contract StockAccountHardenCheckerTest is Test {
     }
 
     function test_hardenStockPriceChecker() public {
-        address checker = addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_V2");
+        address checker = addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER");
 
         proposal.build();
         proposal.simulate();

@@ -21,8 +21,9 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
  */
 contract HardenStockPriceChecker is MultisigProposal {
     string internal constant REGISTRY_KEY = "STOCK_ACCOUNT_REGISTRY";
-    string internal constant OLD_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER";
-    string internal constant NEW_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER_V2";
+    /// @dev The new checker takes over the live key, as in 019; the replaced one moves to this key
+    string internal constant CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER";
+    string internal constant OLD_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER_PRE_023";
 
     uint24 public constant TICK_BOUND_MARGIN = 443_636;
     uint8 internal constant STOCK_DECIMALS = 8;
@@ -56,9 +57,9 @@ contract HardenStockPriceChecker is MultisigProposal {
     }
 
     function deploy() public override {
-        if (addresses.isAddressSet(NEW_CHECKER_KEY)) return;
+        if (addresses.isAddressSet(OLD_CHECKER_KEY)) return;
 
-        StockAccountPriceChecker old = _oldChecker();
+        StockAccountPriceChecker old = StockAccountPriceChecker(addresses.getAddress(CHECKER_KEY));
 
         vm.startBroadcast(addresses.getAddress("DEPLOYER_EOA"));
         StockAccountPriceChecker checker = new StockAccountPriceChecker(
@@ -71,7 +72,8 @@ contract HardenStockPriceChecker is MultisigProposal {
         );
         vm.stopBroadcast();
 
-        addresses.addAddress(NEW_CHECKER_KEY, address(checker), true);
+        addresses.changeAddress(CHECKER_KEY, address(checker), true);
+        addresses.addAddress(OLD_CHECKER_KEY, address(old), true);
     }
 
     function preBuildMock() public override {
@@ -96,7 +98,7 @@ contract HardenStockPriceChecker is MultisigProposal {
     }
 
     function build() public override buildModifier(addresses.getAddress("MAMO_MULTISIG")) {
-        _registry().setPriceChecker(ISlippagePriceChecker(addresses.getAddress(NEW_CHECKER_KEY)));
+        _registry().setPriceChecker(ISlippagePriceChecker(addresses.getAddress(CHECKER_KEY)));
     }
 
     function simulate() public override {
@@ -108,7 +110,7 @@ contract HardenStockPriceChecker is MultisigProposal {
 
         StockAccountRegistry stockRegistry = _registry();
         StockAccountPriceChecker old = _oldChecker();
-        StockAccountPriceChecker checker = StockAccountPriceChecker(addresses.getAddress(NEW_CHECKER_KEY));
+        StockAccountPriceChecker checker = StockAccountPriceChecker(addresses.getAddress(CHECKER_KEY));
 
         assertEq(address(stockRegistry.priceChecker()), address(checker), "Registry should use the new checker");
         assertEq(_parameters(), _parametersBefore, "A registry parameter changed");
@@ -134,6 +136,11 @@ contract HardenStockPriceChecker is MultisigProposal {
     /// @dev Every value the admin, guardian or a setter can change, other than the price checker
     function _parameters() internal view returns (bytes32) {
         StockAccountRegistry r = _registry();
+        address[] memory tokens = r.allTokens();
+        IStockAccountRegistry.TokenConfig[] memory configs = new IStockAccountRegistry.TokenConfig[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            configs[i] = r.tokenConfig(tokens[i]);
+        }
         return keccak256(
             abi.encode(
                 r.aerodromeRouter(),
@@ -150,7 +157,8 @@ contract HardenStockPriceChecker is MultisigProposal {
                 r.minStrategyDeposit(),
                 r.maxStrategyDeposit(),
                 r.maxOrderValue(),
-                r.allTokens()
+                tokens,
+                configs
             )
         );
     }
