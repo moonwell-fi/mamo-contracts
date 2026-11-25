@@ -31,10 +31,10 @@ contract StockAccountPriceCheckerWindowIntegrationTest is Test {
     address internal constant ANTC = 0xb20000000000000000000016e38FD364d271Ba28; // 8 dec, pool token1
     address internal constant ANTC_POOL = 0x599C4225FE90214795a0be228D20d7680f8CED15;
     uint32 internal constant WINDOW = 180;
-    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    /// @dev The TWAP window may stray at most 2,000 ticks (~22%) from the 30 minutes before it; the largest genuine 14-day move was 1,371
     uint32 internal constant BASELINE_WINDOW = 1800;
-    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
-    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 2000;
+    /// @dev Below every listed pool's 14-day low (1.37e11) and above every full-range floor (at most 4.4e9)
     uint128 internal constant MIN_HARMONIC_LIQUIDITY = 1e11;
 
     StockAccountRegistry internal registry = StockAccountRegistry(REGISTRY);
@@ -126,6 +126,32 @@ contract StockAccountPriceCheckerWindowIntegrationTest is Test {
         hardened.getExpectedOut(1e8, ANTC, USDC);
         _expectZeroLiquidity();
         hardened.checkPrice(1e8, ANTC, USDC, 1, 100);
+    }
+
+    /// @notice NVDAc's genuine ~14% move at block 61,262,205 (deep liquidity) quotes at 2,000 ticks and would be
+    ///         refused at 1,000.
+    function test_genuineNvdacMove_quotesWithinTheDeviationBound() public {
+        _forkAt(61_262_205);
+        address nvdac = 0xb20000000000000000000078ee7ce2fE4908108C;
+        address nvdacPool = 0xF668e21993f0ACd7ab00BB1cFbAeD0df28A3C8EC;
+        assertGt(hardened.getExpectedOut(1e8, nvdac, USDC), 0);
+
+        StockAccountPriceChecker tight = new StockAccountPriceChecker(
+            IStockAccountRegistry(REGISTRY),
+            USDC,
+            live.existingChecker(),
+            live.sequencerUptimeFeed(),
+            live.sequencerGracePeriod(),
+            BASELINE_WINDOW,
+            1000,
+            MIN_HARMONIC_LIQUIDITY
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.TwapDeviatesFromBaseline.selector, nvdacPool, int24(-4834), int24(-3463)
+            )
+        );
+        tight.getExpectedOut(1e8, nvdac, USDC);
     }
 
     /// @notice The live checker lets the registry list ANTc in the mild window; the hardened one does not.

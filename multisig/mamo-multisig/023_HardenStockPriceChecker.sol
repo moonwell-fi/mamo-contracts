@@ -15,8 +15,9 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 /**
  * @title HardenStockPriceChecker
  * @notice Multisig proposal that points the stock registry at a StockAccountPriceChecker that refuses a pool
- *         TWAP whose window held zero in-range liquidity or strays from the 30 minutes before it (MOO-1164)
- * @dev The new checker copies every constructor argument from the live one except the two new guards. B20 stocks
+ *         TWAP whose window held zero in-range liquidity, strays from the 30 minutes before it, or held too little
+ *         liquidity across both (MOO-1164)
+ * @dev The new checker copies every constructor argument from the live one except the three new guards. B20 stocks
  *      are stood in as in proposal 016; every listed stock is 8 decimals.
  */
 contract HardenStockPriceChecker is MultisigProposal {
@@ -25,10 +26,10 @@ contract HardenStockPriceChecker is MultisigProposal {
     string internal constant CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER";
     string internal constant OLD_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER_PRE_023";
 
-    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    /// @dev The TWAP window may stray at most 2,000 ticks (~22%) from the 30 minutes before it; the largest genuine 14-day move was 1,371
     uint32 public constant BASELINE_WINDOW = 1800;
-    uint24 public constant MAX_TWAP_DEVIATION_TICKS = 1000;
-    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint24 public constant MAX_TWAP_DEVIATION_TICKS = 2000;
+    /// @dev Below every listed pool's 14-day low (1.37e11) and above every full-range floor (at most 4.4e9)
     uint128 public constant MIN_HARMONIC_LIQUIDITY = 1e11;
     uint8 internal constant STOCK_DECIMALS = 8;
 
@@ -57,7 +58,7 @@ contract HardenStockPriceChecker is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Point the stock registry at a price checker that refuses a pool TWAP whose window held zero in-range liquidity or strays more than 1,000 ticks from the 30 minutes before it";
+        return "Point the stock registry at a price checker that refuses a pool TWAP whose window held zero in-range liquidity or strays more than 2,000 ticks from the 30 minutes before it, or whose window and baseline held a harmonic-mean liquidity below 1e11";
     }
 
     function deploy() public override {

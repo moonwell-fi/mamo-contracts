@@ -49,10 +49,10 @@ contract RedeployStockAccountSystem is MultisigProposal {
 
     /// @notice Price checker's sequencer grace period, same as proposals 013 and 016
     uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
-    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    /// @dev The TWAP window may stray at most 2,000 ticks (~22%) from the 30 minutes before it; the largest genuine 14-day move was 1,371
     uint32 internal constant BASELINE_WINDOW = 1800;
-    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
-    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 2000;
+    /// @dev Below every listed pool's 14-day low (1.37e11) and above every full-range floor (at most 4.4e9)
     uint128 internal constant MIN_HARMONIC_LIQUIDITY = 1e11;
 
     /// @notice Slots 1-5 hold live implementations; slot 6 is reserved for the leveraged-Aero account
