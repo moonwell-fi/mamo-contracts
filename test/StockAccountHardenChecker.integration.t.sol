@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {RepointStockDropChecker} from "../multisig/f-mamo/007_RepointStockDropChecker.sol";
 import {HardenStockPriceChecker} from "../multisig/mamo-multisig/023_HardenStockPriceChecker.sol";
 
+import {MamoStakingRegistryV2} from "@contracts/MamoStakingRegistryV2.sol";
 import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
 import {StockAccountRegistry} from "@contracts/StockAccountRegistry.sol";
 
@@ -86,6 +88,45 @@ contract StockAccountHardenCheckerTest is Test {
         assertEq(targets[0], address(registry), "target");
         assertEq(values[0], 0, "no ETH");
         assertEq(args[0], abi.encodeWithSignature("setPriceChecker(address)", checker), "calldata");
+    }
+
+    /// @notice f-mamo/007 after 023: each of the 12 stock-drop routes moves its stock hop onto the hardened checker
+    function test_repointStockDropChecker() public {
+        address old = addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER_PRE_023");
+        address checker = addresses.getAddress("STOCK_ACCOUNT_PRICE_CHECKER");
+        proposal.build();
+        proposal.simulate();
+        proposal.validate();
+
+        RepointStockDropChecker repoint = new RepointStockDropChecker();
+        repoint.setPrimaryForkId(vm.activeFork());
+        repoint.setAddresses(addresses);
+        repoint.deploy();
+        repoint.preBuildMock();
+        repoint.build();
+
+        MamoStakingRegistryV2 staking = MamoStakingRegistryV2(addresses.getAddress("MAMO_STAKING_REGISTRY_V2"));
+        (address[] memory targets, uint256[] memory values, bytes[] memory args) = repoint.getProposalActions();
+        assertEq(targets.length, 12, "one setRoute per stock");
+        for (uint256 i = 0; i < targets.length; i++) {
+            assertEq(targets[i], address(staking), "target");
+            assertEq(values[i], 0, "no ETH");
+            assertEq(bytes4(args[i]), MamoStakingRegistryV2.setRoute.selector, "selector");
+        }
+
+        repoint.simulate();
+        repoint.validate();
+
+        MamoStakingRegistryV2.Hop[] memory route = staking.getRoute(MUC);
+        assertEq(route[0].pool, MUC_POOL, "MUc hop pool");
+        assertEq(address(route[0].checker), checker, "MUc hop on the hardened checker");
+        MamoStakingRegistryV2.RewardToken[] memory tokens = staking.getRewardTokens();
+        for (uint256 i = 0; i < tokens.length; i++) {
+            route = staking.getRoute(tokens[i].token);
+            for (uint256 j = 0; j < route.length; j++) {
+                assertTrue(address(route[j].checker) != old, "no hop left on the pre-023 checker");
+            }
+        }
     }
 
     /// @notice A dust ANTc balance in the swept window drains the account under the live checker, and moves

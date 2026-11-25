@@ -145,6 +145,8 @@ contract StockAccountSystemSetupTest is Test {
                     || name == keccak256("AERODROME_SLIPSTREAM_V3_CL_FACTORY")
                     || name == keccak256("AERODROME_SLIPSTREAM_V3_SWAP_ROUTER")
                     || name == keccak256("AERODROME_SLIPSTREAM_V3_METAQUOTER")
+                    || name == keccak256("STOCK_ACCOUNT_PRICE_CHECKER_PRE_023")
+                    || name == keccak256("MAMO_STAKING_REGISTRY_V2")
             ) continue;
 
             json = string.concat(

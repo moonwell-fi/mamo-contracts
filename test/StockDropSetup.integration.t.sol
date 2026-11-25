@@ -73,7 +73,12 @@ contract StockDropSetupTest is Test {
 
         // The deployer's EIP-7702 delegation reads as a contract to FPS; a nonce-0 throwaway replaces it anyway
         vm.etch(DEPLOYER_EOA, "");
-        addresses = PinnedAddresses.load("./addresses");
+        // The staking registry 017 deploys is in the book since f-mamo/007; the rehearsal deploys it again
+        string[] memory deployedBy017 = new string[](1);
+        deployedBy017[0] = "MAMO_STAKING_REGISTRY_V2";
+        addresses = PinnedAddresses.loadWithout(
+            "./addresses", "./script/stock-accounts/addresses-rehearsal/017", deployedBy017
+        );
         vm.makePersistent(address(addresses));
         addresses.changeAddress("DEPLOYER_EOA", makeAddr("stockDropDeployer"), false);
 

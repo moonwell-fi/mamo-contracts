@@ -110,7 +110,7 @@ stock-fee-hook-gas:
 	forge test --ffi --match-contract StockAccountFeeHookGasTest -vv
 
 # Base-fork rehearsal of multisig proposal 023 (price checker that refuses zero-liquidity TWAP windows, MOO-1164),
-# then the ANTc drain replayed on a live account before and after. Self-forks at a PINNED block (no --fork-url).
+# then f-mamo 007 (stock-drop routes onto it) and the ANTc drain replayed before and after. Self-forks at a PINNED block.
 stock-checker-harden:
 	forge test --ffi --match-contract StockAccountHardenCheckerTest -vv
 
