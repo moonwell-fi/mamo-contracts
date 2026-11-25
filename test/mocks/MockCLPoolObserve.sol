@@ -10,6 +10,9 @@ contract MockCLPoolObserve {
     int56 public cumulativeNow;
     uint160 public secondsPerLiquidityAtWindow;
     uint160 public secondsPerLiquidityNow;
+    /// @dev secondsPerLiquidity at the start of the baseline; unset reads as a baseline at near-infinite liquidity
+    uint160 public secondsPerLiquidityAtHistory;
+    bool public historySet;
     /// @dev Mean tick of the baseline before the window; unset follows the window's own mean
     int24 public baselineTick;
     bool public baselineSet;
@@ -39,6 +42,11 @@ contract MockCLPoolObserve {
     function setSecondsPerLiquidity(uint160 atWindow, uint160 now_) external {
         secondsPerLiquidityAtWindow = atWindow;
         secondsPerLiquidityNow = now_;
+    }
+
+    function setSecondsPerLiquidityAtHistory(uint160 value) external {
+        secondsPerLiquidityAtHistory = value;
+        historySet = true;
     }
 
     function setBaselineTick(int24 tick) external {
@@ -76,7 +84,10 @@ contract MockCLPoolObserve {
         tickCumulatives[1] = cumulativeAtWindow;
         tickCumulatives[2] = cumulativeNow;
         secondsPerLiquidityCumulativeX128 = new uint160[](3);
-        secondsPerLiquidityCumulativeX128[0] = secondsPerLiquidityAtWindow;
+        unchecked {
+            secondsPerLiquidityCumulativeX128[0] =
+                historySet ? secondsPerLiquidityAtHistory : secondsPerLiquidityAtWindow - 1;
+        }
         secondsPerLiquidityCumulativeX128[1] = secondsPerLiquidityAtWindow;
         secondsPerLiquidityCumulativeX128[2] = secondsPerLiquidityNow;
     }

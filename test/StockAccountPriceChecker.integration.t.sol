@@ -67,6 +67,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
     uint32 internal constant BASELINE_WINDOW = 1800;
     uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
+    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint128 internal constant MIN_HARMONIC_LIQUIDITY = 1e11;
     address internal constant STRANGER = 0x000000000000000000000000000000000000dEaD;
 
     /// @dev Swap inputs large enough to run the pool to the sqrt-price limit the helpers set; the
@@ -110,7 +112,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
             BASELINE_WINDOW,
-            MAX_TWAP_DEVIATION_TICKS
+            MAX_TWAP_DEVIATION_TICKS,
+            MIN_HARMONIC_LIQUIDITY
         );
         vm.prank(admin);
         registry.setPriceChecker(checker);
@@ -596,7 +599,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(checker.getExpectedOut(1e8, NVDAC, USDC), twapBefore, "twap moved within the same block");
     }
 
-    /// @dev The manipulation studies measure the TWAP itself, so they run on a checker whose deviation guard never fires
+    /// @dev The manipulation studies measure the TWAP itself, so they run on a checker whose deviation and liquidity guards never fire
     function _useUnguardedChecker() internal {
         checker = new StockAccountPriceChecker(
             registry,
@@ -605,7 +608,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
             1,
-            type(uint24).max
+            type(uint24).max,
+            1
         );
         vm.prank(admin);
         registry.setPriceChecker(checker);
@@ -984,7 +988,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
             1,
-            type(uint24).max
+            type(uint24).max,
+            1
         );
         vm.startPrank(admin);
         poolRegistry.setPriceChecker(poolChecker);

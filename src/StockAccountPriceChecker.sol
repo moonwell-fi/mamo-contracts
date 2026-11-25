@@ -35,6 +35,9 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     uint32 public immutable baselineWindow;
     /// @dev Largest gap between the TWAP window's mean tick and the baseline's before a quote is refused.
     uint24 public immutable maxTwapDeviationTicks;
+    /// @dev Smallest harmonic-mean in-range liquidity over window and baseline: an absolute anchor that a price held
+    ///      through both windows on a thin floor position cannot meet.
+    uint128 public immutable minHarmonicLiquidity;
 
     error ZeroAddress();
     error ZeroGracePeriod();
@@ -48,6 +51,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     error InsufficientObservations(address pool, uint32 window);
     error ZeroLiquidityInWindow(address pool, uint32 window);
     error TwapDeviatesFromBaseline(address pool, int24 tick, int24 baselineTick);
+    error LiquidityBelowFloor(address pool, uint256 harmonicLiquidity);
     error ZeroBaseline();
     error InvalidSlippage(uint256 slippageBps);
     error NotSupported();
@@ -59,7 +63,8 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         address sequencerUptimeFeed_,
         uint256 sequencerGracePeriod_,
         uint32 baselineWindow_,
-        uint24 maxTwapDeviationTicks_
+        uint24 maxTwapDeviationTicks_,
+        uint128 minHarmonicLiquidity_
     ) {
         if (
             address(registry_) == address(0) || quoteAsset_ == address(0) || address(existingChecker_) == address(0)
@@ -69,7 +74,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         }
         if (sequencerGracePeriod_ == 0) revert ZeroGracePeriod();
         if (sequencerGracePeriod_ < MIN_SEQUENCER_GRACE_PERIOD) revert GracePeriodTooShort();
-        if (baselineWindow_ == 0 || maxTwapDeviationTicks_ == 0) revert ZeroBaseline();
+        if (baselineWindow_ == 0 || maxTwapDeviationTicks_ == 0 || minHarmonicLiquidity_ == 0) revert ZeroBaseline();
         registry = registry_;
         quoteAsset = quoteAsset_;
         existingChecker = existingChecker_;
@@ -77,6 +82,7 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         sequencerGracePeriod = sequencerGracePeriod_;
         baselineWindow = baselineWindow_;
         maxTwapDeviationTicks = maxTwapDeviationTicks_;
+        minHarmonicLiquidity = minHarmonicLiquidity_;
     }
 
     /// @inheritdoc ISlippagePriceChecker
@@ -265,6 +271,13 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         if (SignedMath.abs(int256(tick) - baselineTick) > maxTwapDeviationTicks) {
             revert TwapDeviatesFromBaseline(address(pool), tick, baselineTick);
         }
+
+        uint160 perLiquidity;
+        unchecked {
+            perLiquidity = secondsPerLiquidity[2] - secondsPerLiquidity[0];
+        }
+        uint256 harmonicLiquidity = (uint256(history) << 128) / perLiquidity;
+        if (harmonicLiquidity < minHarmonicLiquidity) revert LiquidityBelowFloor(address(pool), harmonicLiquidity);
     }
 
     function _meanTick(int56 delta, uint32 window) internal pure returns (int24 tick) {

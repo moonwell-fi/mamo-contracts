@@ -246,26 +246,54 @@ contract StockAccountHardenCheckerTest is Test {
 
     /// @notice The organic 11-19 pattern on a floored pool: a stray 120 USDC buy after the range sold out. Two
     ///         seconds of it stay inside the bound; by 23 s (the day's longest gap) it is refused.
-    function test_floorPool_strayBuy_refusedWithinTheDaysLongestGap() public {
+    /// @notice A buy that leaves MUc on its floor for 2 s is already refused, by the liquidity floor, for 33 minutes
+    function test_floorPool_strayBuy_refusedByTheLiquidityFloor() public {
         proposal.build();
         proposal.simulate();
         ISlippagePriceChecker checker = registry.priceChecker();
-        uint256 clean = checker.getExpectedOut(1e8, MUC, address(usdc));
 
         _sellOutMainRange();
         _buyMuc(120e6, -887_000);
-        uint256 t0 = block.timestamp;
-
-        vm.warp(t0 + 2);
-        assertLt(checker.getExpectedOut(1e8, MUC, address(usdc)), (clean * 110) / 100, "2 s: within 10%");
-
-        vm.warp(t0 + 23);
+        vm.warp(block.timestamp + 2);
         vm.expectRevert(
             abi.encodeWithSelector(
-                StockAccountPriceChecker.TwapDeviatesFromBaseline.selector, MUC_POOL, int24(-28_169), int24(-19_567)
+                StockAccountPriceChecker.LiquidityBelowFloor.selector, MUC_POOL, uint256(2_188_405_513)
             )
         );
         checker.getExpectedOut(1e8, MUC, address(usdc));
+    }
+
+    /// @notice The reviewer's push held through window and baseline (1,980 s): no deviation is left, so the live
+    ///         and a deviation-only checker quote ~23,000x and drain; the liquidity floor refuses it.
+    function test_floorPool_pushHeldThroughBaseline_drainsBeforeAndIsRefusedAfter() public {
+        MockERC20Decimals(MUC).mint(ACCOUNT, ACCOUNT_MUC);
+        MockERC20Decimals(NVDAC).mint(ACCOUNT, 10e8);
+        deal(address(usdc), ACCOUNT, 1_000e6);
+        address feeRecipient = registry.feeRecipient();
+        uint256 recipientBefore = usdc.balanceOf(feeRecipient);
+        uint256 snap = vm.snapshotState();
+
+        _buyMuc(50_000_000e6, _sellOutMainRange() - 90_000);
+        vm.warp(block.timestamp + WINDOW + BASELINE_WINDOW);
+        IStockAccountStrategy(ACCOUNT).payFeesFromAny();
+        assertEq(usdc.balanceOf(ACCOUNT), 0, "live checker: all USDC taken");
+
+        vm.revertToState(snap);
+        proposal.build();
+        proposal.simulate();
+        ISlippagePriceChecker checker = registry.priceChecker();
+
+        _buyMuc(50_000_000e6, _sellOutMainRange() - 90_000);
+        vm.warp(block.timestamp + WINDOW + BASELINE_WINDOW);
+        vm.expectRevert(
+            abi.encodeWithSelector(StockAccountPriceChecker.LiquidityBelowFloor.selector, MUC_POOL, uint256(MUC_FLOOR))
+        );
+        checker.getExpectedOut(1e8, MUC, address(usdc));
+
+        IStockAccountStrategy(ACCOUNT).payFeesFromAny();
+        assertEq(usdc.balanceOf(ACCOUNT), 1_000e6, "hardened: USDC untouched");
+        assertEq(IERC20(NVDAC).balanceOf(ACCOUNT), 10e8, "hardened: stocks untouched");
+        assertEq(usdc.balanceOf(feeRecipient), recipientBefore, "hardened: no fee while the valuation is partial");
     }
 }
 

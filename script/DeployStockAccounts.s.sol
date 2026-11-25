@@ -49,6 +49,8 @@ contract DeployStockAccounts is Script {
     /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
     uint32 internal constant BASELINE_WINDOW = 1800;
     uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
+    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint128 internal constant MIN_HARMONIC_LIQUIDITY = 1e11;
 
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
@@ -146,7 +148,8 @@ contract DeployStockAccounts is Script {
             addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
             SEQUENCER_GRACE_PERIOD,
             BASELINE_WINDOW,
-            MAX_TWAP_DEVIATION_TICKS
+            MAX_TWAP_DEVIATION_TICKS,
+            MIN_HARMONIC_LIQUIDITY
         );
         vm.stopBroadcast();
 

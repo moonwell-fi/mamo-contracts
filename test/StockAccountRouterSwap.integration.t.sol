@@ -54,6 +54,8 @@ contract StockAccountRouterSwapIntegrationTest is Test {
     /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
     uint32 internal constant BASELINE_WINDOW = 1800;
     uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
+    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint128 internal constant MIN_HARMONIC_LIQUIDITY = 1e11;
     address internal constant COWSWAP_SETTLEMENT = 0x9008D19f58AAbD9eD0D60971565AA8510560ab41;
 
     /// @dev The staleness bounds of `DeployStockAccounts`: the launch list's cbBTC heartbeat, and the
@@ -130,7 +132,8 @@ contract StockAccountRouterSwapIntegrationTest is Test {
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
             BASELINE_WINDOW,
-            MAX_TWAP_DEVIATION_TICKS
+            MAX_TWAP_DEVIATION_TICKS,
+            MIN_HARMONIC_LIQUIDITY
         );
 
         vm.prank(admin);

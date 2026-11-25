@@ -28,6 +28,8 @@ contract HardenStockPriceChecker is MultisigProposal {
     /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
     uint32 public constant BASELINE_WINDOW = 1800;
     uint24 public constant MAX_TWAP_DEVIATION_TICKS = 1000;
+    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint128 public constant MIN_HARMONIC_LIQUIDITY = 1e11;
     uint8 internal constant STOCK_DECIMALS = 8;
 
     /// @dev Every registry parameter other than the price checker, and the token list, as they read before the batch
@@ -71,7 +73,8 @@ contract HardenStockPriceChecker is MultisigProposal {
             old.sequencerUptimeFeed(),
             old.sequencerGracePeriod(),
             BASELINE_WINDOW,
-            MAX_TWAP_DEVIATION_TICKS
+            MAX_TWAP_DEVIATION_TICKS,
+            MIN_HARMONIC_LIQUIDITY
         );
         vm.stopBroadcast();
 
@@ -125,6 +128,7 @@ contract HardenStockPriceChecker is MultisigProposal {
         assertEq(checker.sequencerGracePeriod(), old.sequencerGracePeriod(), "grace period");
         assertEq(checker.baselineWindow(), BASELINE_WINDOW, "baseline window");
         assertEq(checker.maxTwapDeviationTicks(), MAX_TWAP_DEVIATION_TICKS, "max deviation");
+        assertEq(checker.minHarmonicLiquidity(), MIN_HARMONIC_LIQUIDITY, "min harmonic liquidity");
 
         // A clean window quotes exactly as before, in both directions
         address asset = stockRegistry.asset();

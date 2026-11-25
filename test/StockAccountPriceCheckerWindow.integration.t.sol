@@ -34,6 +34,8 @@ contract StockAccountPriceCheckerWindowIntegrationTest is Test {
     /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
     uint32 internal constant BASELINE_WINDOW = 1800;
     uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
+    /// @dev Below every listed pool's 48 h low (6.8e11) and above every full-range floor (at most 4.4e9)
+    uint128 internal constant MIN_HARMONIC_LIQUIDITY = 1e11;
 
     StockAccountRegistry internal registry = StockAccountRegistry(REGISTRY);
     StockAccountPriceChecker internal live = StockAccountPriceChecker(LIVE_CHECKER);
@@ -56,7 +58,8 @@ contract StockAccountPriceCheckerWindowIntegrationTest is Test {
             live.sequencerUptimeFeed(),
             live.sequencerGracePeriod(),
             BASELINE_WINDOW,
-            MAX_TWAP_DEVIATION_TICKS
+            MAX_TWAP_DEVIATION_TICKS,
+            MIN_HARMONIC_LIQUIDITY
         );
         assertEq(registry.twapWindow(), WINDOW);
     }
