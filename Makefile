@@ -4,7 +4,7 @@ ADDRESSES_PATH ?= ./script/stock-accounts/addresses-dryrun
 # The excluded suites self-fork at a PINNED block in setUp: a CLI --fork-url on top of that panics
 # on the Isthmus L1Block and doubles the RPC load. Each has its own target (and CI job) below.
 test:
-	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountPriceCheckerWindowIntegrationTest|StockAccountStrategyInvariantsUnitTest|ERC20StrategyV2Test|StockAccountRouterSwapIntegrationTest|StockAccountSystemSetupTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest|MamoStaking(Registry|Strategy|StrategyFactory)V2IntegrationTest|StockDropSetupTest|LPAutoBalancerV2Integration|StockAccountUniverseListingTest|StockAccountRedeployTest|StockAccountRepointTest|StockAccountFeeHookGasTest|StockAccountHardenCheckerTest"
+	forge test --fork-url base --ffi -vvv --no-match-contract "MoonwellMorphoStrategy|StrategyFactoryIntegrationTest|MulticallIntegrationTest|SlippagePriceCheckerTest|MamoStrategyRegistryIntegrationTest|FeeSplitterIntegrationTest|StockAccountPriceCheckerIntegrationTest|StockAccountStrategyInvariantsUnitTest|ERC20StrategyV2Test|StockAccountRouterSwapIntegrationTest|StockAccountSystemSetupTest|LPAutoBalancerV2SetupTest|DeployLPAutoBalancerV2Test|LeveragedAeroSystemSetupTest|MamoStaking(Registry|Strategy|StrategyFactory)V2IntegrationTest|StockDropSetupTest|LPAutoBalancerV2Integration|StockAccountUniverseListingTest|StockAccountRedeployTest|StockAccountRepointTest|StockAccountFeeHookGasTest|StrategyFactoryIntegrationV1Test|StrategyV1UpgradeTest|MamoStakingStrategyIntegrationTest|RewardsDistributorSafeModuleIntegrationTest|StockAccountHardenCheckerTest|StockAccountPriceCheckerWindowIntegrationTest"
 
 test-unit:
 	forge test --ffi -vvv --match-path "test/*.unit.t.sol"
@@ -23,13 +23,13 @@ deploy-broadcast:
 	export DEPLOY_ENV="8453_PROD" && forge script script/DeploySystem.s.sol:DeploySystem --fork-url base --account mamo-test --verify --slow -vvvvv --broadcast --sender   0xDca82E03057329f53Ed4173429D46B0511E46Fb8
 
 usdc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategy -vvv
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi -vvv --mc MoonwellMorphoStrategyTest -vvv
 
 cbbtc-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyTest  -vvv
 
 weth-strategy:
-	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategy  -vvv
+	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyTest  -vvv
 
 usdc-price-checker:
 	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi --mc SlippagePriceCheckerTest -vvv
@@ -40,8 +40,27 @@ cbbtc-price-checker:
 weth-price-checker:
 	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc SlippagePriceCheckerTest -vvv
 
+# Matches the v1 staking factory suite. It creates accounts through the v1 staking factory, which
+# proposal 017 retired, so it self-forks at the last pre-017 block in setUp: NO --fork-url (Isthmus panic).
 strategy-factory:
-	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationTest
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --ffi --mc StrategyFactoryIntegrationTest
+
+# Legacy two-market ERC20MoonwellMorphoStrategy + StrategyFactory (live type 1/4), restored under src/v1.
+v1-usdc-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/USDCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyV1Test -vvv
+
+v1-cbbtc-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyV1Test -vvv
+
+v1-weth-strategy:
+	export ASSET_CONFIG_PATH="config/strategies/WETHStrategyConfig.json" && forge test --fork-url base --ffi --mc MoonwellMorphoStrategyV1Test -vvv
+
+v1-strategy-factory:
+	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --fork-url base --ffi --mc StrategyFactoryIntegrationV1Test
+
+# Upgrade of real legacy USDC proxies at a pinned zero-cash block; self-forks in setUp, so NO --fork-url.
+v1-upgrade:
+	forge test --ffi --mc StrategyV1UpgradeTest -vv
 
 # NO --fork-url here: MulticallIntegrationTest self-forks at a PINNED block via vm.createSelectFork in
 # setUp (with the vm.fee(0) op-revm Isthmus workaround). Passing --fork-url base in addition makes
@@ -51,12 +70,24 @@ strategy-factory:
 strategy-multicall:
 	export ASSET_CONFIG_PATH="./config/strategies/cbBTCStrategyConfig.json" && forge test --ffi --mc MulticallIntegrationTest
 
-mamo-staking:
-	forge test --fork-url base --ffi --mc MamoStaking -vvv
+# Upgrades real mainnet proxies at a PINNED block; self-forks in setUp, so NO --fork-url (Isthmus panic).
+strategy-v2-upgrade:
+	forge test --ffi --mc ERC20StrategyV2Test -vv
 
-# Staking V2 suites: the V2 copies of the three staking suites.
+# The registry suites run at chain head. The strategy and factory suites go through the v1 staking
+# factory that proposal 017 retired, so they self-fork at the last pre-017 block: NO --fork-url there.
+mamo-staking:
+	forge test --fork-url base --ffi --mc MamoStakingRegistryIntegrationTest -vvv
+	forge test --ffi --mc "MamoStakingStrategy(Factory)?IntegrationTest" -vvv
+
+# Staking V2 suites: the V2 copies of the three staking suites, split the same way.
 mamo-staking-v2:
-	forge test --fork-url base --ffi --mc "MamoStaking(Registry|Strategy|StrategyFactory)V2IntegrationTest" -vvv
+	forge test --fork-url base --ffi --mc MamoStakingRegistryV2IntegrationTest -vvv
+	forge test --ffi --mc "MamoStakingStrategy(Factory)?V2IntegrationTest" -vvv
+
+# The v1 drop module, disabled on the F-MAMO Safe by f-mamo 006: self-forks before 017, NO --fork-url.
+rewards-distributor-module:
+	forge test --ffi --mc RewardsDistributorSafeModuleIntegrationTest -vvv
 
 fee-splitter:
 	forge test --fork-url base --ffi --mc FeeSplitterIntegrationTest -vv
@@ -264,6 +295,6 @@ tenderly-leveraged-aero-withdraw:
 	./script/tenderly/run-harness.sh leveraged-aero-withdraw
 
 test-all:
-	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking mamo-staking-v2 fee-splitter stock-price-checker stock-router-swap stock-accounts-setup stock-drop-setup lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas stock-checker-harden
+	$(MAKE) test test-unit usdc-strategy cbbtc-strategy usdc-price-checker cbbtc-price-checker strategy-factory strategy-multicall mamo-staking mamo-staking-v2 fee-splitter stock-price-checker stock-router-swap stock-accounts-setup stock-drop-setup lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas v1-usdc-strategy v1-cbbtc-strategy v1-weth-strategy v1-strategy-factory v1-upgrade strategy-v2-upgrade rewards-distributor-module stock-checker-harden
 
-.PHONY:shell-lint stock-checker-harden stock-price-checker stock-accounts-setup stock-drop-setup deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking mamo-staking-v2 test-all stock-router-swap lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas stock-pool-grow stock-list-check
+.PHONY: stock-checker-harden rewards-distributor-module shell-lint stock-price-checker stock-accounts-setup stock-drop-setup deploy-stock-accounts stock-pool-readiness tenderly-stock-accounts tenderly-stock-accounts-scenarios test test-unit coverage deploy-broadcast usdc-strategy cbbtc-strategy strategy-factory strategy-multicall usdc-price-checker cbbtc-price-checker fee-splitter integration-test mamo-staking mamo-staking-v2 test-all stock-router-swap lp-auto-balancer-v2 lp-v2-setup lp-v2-deploy leveraged-aero-account leveraged-aero-vault leveraged-aero-setup tenderly-harness tenderly-matrix tenderly-price-checker tenderly-mine tenderly-mine-start tenderly-mine-stop tenderly-mine-status tenderly-leveraged-aero-stack tenderly-leveraged-aero-account tenderly-leveraged-aero-withdraw stock-universe-listing stock-accounts-redeploy stock-accounts-repoint stock-fee-hook-gas stock-pool-grow strategy-v2-upgrade v1-usdc-strategy v1-cbbtc-strategy v1-weth-strategy v1-strategy-factory v1-upgrade stock-list-check

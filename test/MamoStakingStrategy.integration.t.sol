@@ -39,6 +39,7 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
     address payable public userStrategy;
 
     function setUp() public override {
+        _forkBefore017();
         super.setUp();
 
         // Get existing contract instances from addresses
@@ -52,7 +53,8 @@ contract MamoStakingStrategyIntegrationTest is BaseTest {
         stakingStrategyImplementation = addresses.getAddress("MAMO_STAKING_STRATEGY");
 
         // Get the cbBTC strategy factory for testing reward distribution
-        cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY"));
+        // The factory live at the pinned block: 020's replacement has no code there.
+        cbBTCStrategyFactory = MultiMarketStrategyFactory(addresses.getAddress("cbBTC_STRATEGY_FACTORY_DEPRECATED_2"));
 
         // The implementation the live factory points at is the bytecode deployed on Base before this
         // branch. Every proxy the factory creates delegatecalls into it, so without this the whole

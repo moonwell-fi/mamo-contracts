@@ -26,7 +26,7 @@ npm run generate-appdata -- --sell-token <SELL_TOKEN_ADDRESS> --fee-recipient <F
 - `--fee-recipient, -r`: The address that will receive the fee (required)
 - `--sell-amount, -a`: The amount being sold (required)
 - `--compound-fee, -c`: The compound fee in basis points (e.g., 100 = 1%) (required)
-- `--hook-gas-limit, -g`: The gas limit for the pre-hook (default: 100000)
+- `--hook-gas-limit, -g`: Accepted and ignored (orders carry no hooks)
 - `--verbose, -v`: Show detailed output with formatting and hash
 - `--help, -h`: Show help message
 
@@ -47,28 +47,13 @@ npm run generate-appdata -- \
 You can also use the utility programmatically in your TypeScript/JavaScript code:
 
 ```typescript
-import { generateMamoAppData, calculateFeeAmount } from "./generate-appdata";
+import { generateMamoAppData } from "./generate-appdata";
 
 async function example() {
-  const sellToken = "0x1234567890123456789012345678901234567890";
-  const feeRecipient = "0xabcdef1234567890abcdef1234567890abcdef12";
-  
-  // Calculate fee amount (e.g., 1% of sell amount)
-  const sellAmount = "1000000000000000000"; // 1 token with 18 decimals
-  const compoundFeeBps = 100; // 1% in basis points
-  const feeAmount = calculateFeeAmount(sellAmount, compoundFeeBps);
-  
-  const hookGasLimit = 100000;
-  
-  // Generate the appData
-  const appDataDoc = await generateMamoAppData(
-    sellToken,
-    feeRecipient,
-    feeAmount,
-    hookGasLimit
-  );
-  
-  console.log(JSON.stringify(appDataDoc, null, 2));
+  // The document is constant, so this is the appData hash every order carries
+  const appDataHash = await generateMamoAppData();
+
+  console.log(appDataHash);
 }
 ```
 
@@ -77,7 +62,6 @@ async function example() {
 The utility generates appData that matches the format expected by the `isValidSignature` function in the `ERC20MoonwellMorphoStrategy.sol` contract:
 
 1. It sets the appCode to "Mamo"
-2. It creates a pre-hook with the correct transferFrom calldata format
-3. It includes the gasLimit parameter and target token address
+2. It adds no hooks: the compound fee is taken on chain (at claim time on the v1 strategy), so the document does not depend on the order
 
 The generated appData will be properly validated by the contract, allowing orders to be executed successfully.

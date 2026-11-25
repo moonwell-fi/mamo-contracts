@@ -150,12 +150,12 @@
     "isContract": true
   },
   {
-    "addr": "0xf8CFdEf5068929e022a50315983043b61E9987f8",
+    "addr": "0x659db1ad2A2bED45699F093D5CF2d41322980040",
     "name": "cbBTC_STRATEGY_FACTORY",
     "isContract": true
   },
   {
-    "addr": "0x3098360e627E84Fb9dD621F01ea03E325cCEE2c6",
+    "addr": "0x3d2d585bbA2b5e389ba7993ee7bff131AB9109f3",
     "name": "USDC_STRATEGY_FACTORY",
     "isContract": true
   },
@@ -350,7 +350,7 @@
     "isContract": true
   },
   {
-    "addr": "0x4007EFfCE837701Fdd90017Ab747fefD58aAD98B",
+    "addr": "0xc073a94DF8448d773Bb2c0cBA4fD82e54Fde6aD5",
     "name": "MOONWELL_MORPHO_STRATEGY_IMPL",
     "isContract": true
   },
@@ -390,12 +390,12 @@
     "isContract": true
   },
   {
-    "addr": "0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7",
+    "addr": "0x12F6eD24B642971da14ec02C29BCb0556cB7F280",
     "name": "MOONWELL_MORPHO_STRATEGY_IMPL_V2",
     "isContract": true
   },
   {
-    "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
+    "addr": "0x8e201e70dF352E2a65B7A6995b25d9A435A9D363",
     "name": "WETH_STRATEGY_FACTORY",
     "isContract": true
   },
@@ -607,6 +607,31 @@
   {
     "addr": "0xAa067F08FeF60420d050A92E7800E588748B7d67",
     "name": "WETH_MAMO_CL_POOL",
+    "isContract": true
+  },
+  {
+    "addr": "0x4007EFfCE837701Fdd90017Ab747fefD58aAD98B",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL_DEPRECATED_2",
+    "isContract": true
+  },
+  {
+    "addr": "0x6C8577fa9B10807f7485f6476C2AFE0B8d61D1e7",
+    "name": "MOONWELL_MORPHO_STRATEGY_IMPL_V2_DEPRECATED",
+    "isContract": true
+  },
+  {
+    "addr": "0x3098360e627E84Fb9dD621F01ea03E325cCEE2c6",
+    "name": "USDC_STRATEGY_FACTORY_DEPRECATED_2",
+    "isContract": true
+  },
+  {
+    "addr": "0xf8CFdEf5068929e022a50315983043b61E9987f8",
+    "name": "cbBTC_STRATEGY_FACTORY_DEPRECATED_2",
+    "isContract": true
+  },
+  {
+    "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
+    "name": "WETH_STRATEGY_FACTORY_DEPRECATED",
     "isContract": true
   },
   {

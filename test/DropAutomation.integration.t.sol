@@ -396,6 +396,10 @@ contract DropAutomationIntegrationTest is BaseTest {
     function testWithdrawGauge() public {
         // Gauge is already configured by setUp
         address gauge = addresses.getAddress("AERODROME_USDC_AERO_GAUGE");
+        // Aerodrome killed this gauge in 2026-10; deposits revert NotAlive() until it is revived
+        (, bytes memory alive) =
+            0x16613524e02ad97eDfeF371bC883F2F5d6C480A5.staticcall(abi.encodeWithSignature("isAlive(address)", gauge));
+        vm.skip(!abi.decode(alive, (bool)));
         address stakingToken = addresses.getAddress("AERO_STAKING_TOKEN");
 
         IAerodromeGauge gaugeContract = IAerodromeGauge(gauge);
