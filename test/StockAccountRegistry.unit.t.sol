@@ -1505,7 +1505,8 @@ contract StockAccountRegistryTwapWindowUnitTest is Test {
             existingChecker,
             address(new MockSequencerUptimeFeed(0, 1)),
             3600,
-            443_636
+            300,
+            1000
         );
         vm.prank(admin);
         registry.setPriceChecker(ISlippagePriceChecker(address(checker)));

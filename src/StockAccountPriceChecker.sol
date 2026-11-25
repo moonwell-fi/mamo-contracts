@@ -9,6 +9,7 @@ import {TickMath} from "@libraries/uniswap/TickMath.sol";
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {SignedMath} from "@openzeppelin/contracts/utils/math/SignedMath.sol";
 
 /// @title StockAccountPriceChecker
 /// @notice Prices stock-account tokens by their registry `PriceSource` — an Aerodrome CL pool TWAP
@@ -30,8 +31,10 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     /// @dev Gates PoolTwap quotes only; Chainlink tokens rely on the existing checker's own guard.
     address public immutable sequencerUptimeFeed;
     uint256 public immutable sequencerGracePeriod;
-    /// @dev A TWAP mean tick within this many ticks of MIN_TICK/MAX_TICK is refused as a swept pool.
-    int24 public immutable tickBoundMargin;
+    /// @dev Seconds before the TWAP window that its mean tick is compared against.
+    uint32 public immutable baselineWindow;
+    /// @dev Largest gap between the TWAP window's mean tick and the baseline's before a quote is refused.
+    uint24 public immutable maxTwapDeviationTicks;
 
     error ZeroAddress();
     error ZeroGracePeriod();
@@ -44,8 +47,8 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
     error PoolNotAgainstQuoteAsset(address pool);
     error InsufficientObservations(address pool, uint32 window);
     error ZeroLiquidityInWindow(address pool, uint32 window);
-    error TwapTickOutOfBounds(address pool, int24 tick);
-    error InvalidTickBoundMargin(uint24 margin);
+    error TwapDeviatesFromBaseline(address pool, int24 tick, int24 baselineTick);
+    error ZeroBaseline();
     error InvalidSlippage(uint256 slippageBps);
     error NotSupported();
 
@@ -55,7 +58,8 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         ISlippagePriceChecker existingChecker_,
         address sequencerUptimeFeed_,
         uint256 sequencerGracePeriod_,
-        uint24 tickBoundMargin_
+        uint32 baselineWindow_,
+        uint24 maxTwapDeviationTicks_
     ) {
         if (
             address(registry_) == address(0) || quoteAsset_ == address(0) || address(existingChecker_) == address(0)
@@ -65,13 +69,14 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
         }
         if (sequencerGracePeriod_ == 0) revert ZeroGracePeriod();
         if (sequencerGracePeriod_ < MIN_SEQUENCER_GRACE_PERIOD) revert GracePeriodTooShort();
-        if (tickBoundMargin_ >= uint24(TickMath.MAX_TICK)) revert InvalidTickBoundMargin(tickBoundMargin_);
+        if (baselineWindow_ == 0 || maxTwapDeviationTicks_ == 0) revert ZeroBaseline();
         registry = registry_;
         quoteAsset = quoteAsset_;
         existingChecker = existingChecker_;
         sequencerUptimeFeed = sequencerUptimeFeed_;
         sequencerGracePeriod = sequencerGracePeriod_;
-        tickBoundMargin = int24(tickBoundMargin_);
+        baselineWindow = baselineWindow_;
+        maxTwapDeviationTicks = maxTwapDeviationTicks_;
     }
 
     /// @inheritdoc ISlippagePriceChecker
@@ -232,36 +237,40 @@ contract StockAccountPriceChecker is ISlippagePriceChecker {
             baseIsToken0 ? Math.mulDiv(ratioX128, baseAmount, 1 << 128) : Math.mulDiv(1 << 128, baseAmount, ratioX128);
     }
 
-    /// @dev Mean tick over `window` seconds, floored toward -inf. Any `observe` revert (Slipstream
-    ///      reverts "OLD" when history is shorter than the window) is surfaced as InsufficientObservations.
-    ///      The oracle adds 2^128 to secondsPerLiquidity for every second with no in-range liquidity.
+    /// @dev Mean tick over `window` seconds, floored toward -inf. Refused when any second of it had no in-range
+    ///      liquidity (the oracle adds 2^128 to secondsPerLiquidity per such second) or when it strays more than
+    ///      `maxTwapDeviationTicks` from the mean of the `baselineWindow` seconds before it.
     function _twapTick(ICLPool pool, uint32 window) internal view returns (int24 tick) {
-        uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = window;
-        secondsAgos[1] = 0;
+        uint32 history = window + baselineWindow;
+        uint32[] memory secondsAgos = new uint32[](3);
+        secondsAgos[0] = history;
+        secondsAgos[1] = window;
         int56[] memory cum;
         uint160[] memory secondsPerLiquidity;
         try pool.observe(secondsAgos) returns (int56[] memory c, uint160[] memory s) {
             (cum, secondsPerLiquidity) = (c, s);
         } catch {
-            revert InsufficientObservations(address(pool), window);
+            revert InsufficientObservations(address(pool), history);
         }
 
         // The cumulative wraps at 2^160 by design, so the delta is taken modulo it
         unchecked {
-            if (secondsPerLiquidity[1] - secondsPerLiquidity[0] >= 1 << 128) {
+            if (secondsPerLiquidity[2] - secondsPerLiquidity[1] >= 1 << 128) {
                 revert ZeroLiquidityInWindow(address(pool), window);
             }
         }
 
-        int56 delta = cum[1] - cum[0];
+        tick = _meanTick(cum[2] - cum[1], window);
+        int24 baselineTick = _meanTick(cum[1] - cum[0], baselineWindow);
+        if (SignedMath.abs(int256(tick) - baselineTick) > maxTwapDeviationTicks) {
+            revert TwapDeviatesFromBaseline(address(pool), tick, baselineTick);
+        }
+    }
+
+    function _meanTick(int56 delta, uint32 window) internal pure returns (int24 tick) {
         int56 w = int56(uint56(window));
         tick = int24(delta / w);
         if (delta < 0 && delta % w != 0) tick--;
-
-        if (tick <= TickMath.MIN_TICK + tickBoundMargin || tick >= TickMath.MAX_TICK - tickBoundMargin) {
-            revert TwapTickOutOfBounds(address(pool), tick);
-        }
     }
 
     /// @dev A Chainlink uptime feed answers 0 while the sequencer is up; startedAt is when that status began.

@@ -15,8 +15,8 @@ import {MockERC20Decimals} from "@test/mocks/MockERC20Decimals.sol";
 /**
  * @title HardenStockPriceChecker
  * @notice Multisig proposal that points the stock registry at a StockAccountPriceChecker that refuses a pool
- *         TWAP whose window held zero in-range liquidity or whose mean tick sits near MIN_TICK/MAX_TICK (MOO-1164)
- * @dev The new checker copies every constructor argument from the live one except the tick margin. B20 stocks
+ *         TWAP whose window held zero in-range liquidity or strays from the 30 minutes before it (MOO-1164)
+ * @dev The new checker copies every constructor argument from the live one except the two new guards. B20 stocks
  *      are stood in as in proposal 016; every listed stock is 8 decimals.
  */
 contract HardenStockPriceChecker is MultisigProposal {
@@ -25,7 +25,9 @@ contract HardenStockPriceChecker is MultisigProposal {
     string internal constant CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER";
     string internal constant OLD_CHECKER_KEY = "STOCK_ACCOUNT_PRICE_CHECKER_PRE_023";
 
-    uint24 public constant TICK_BOUND_MARGIN = 443_636;
+    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    uint32 public constant BASELINE_WINDOW = 1800;
+    uint24 public constant MAX_TWAP_DEVIATION_TICKS = 1000;
     uint8 internal constant STOCK_DECIMALS = 8;
 
     /// @dev Every registry parameter other than the price checker, and the token list, as they read before the batch
@@ -53,7 +55,7 @@ contract HardenStockPriceChecker is MultisigProposal {
     }
 
     function description() public pure override returns (string memory) {
-        return "Point the stock registry at a price checker that refuses a pool TWAP whose window held zero in-range liquidity or a mean tick near the tick bounds";
+        return "Point the stock registry at a price checker that refuses a pool TWAP whose window held zero in-range liquidity or strays more than 1,000 ticks from the 30 minutes before it";
     }
 
     function deploy() public override {
@@ -68,7 +70,8 @@ contract HardenStockPriceChecker is MultisigProposal {
             old.existingChecker(),
             old.sequencerUptimeFeed(),
             old.sequencerGracePeriod(),
-            TICK_BOUND_MARGIN
+            BASELINE_WINDOW,
+            MAX_TWAP_DEVIATION_TICKS
         );
         vm.stopBroadcast();
 
@@ -120,7 +123,8 @@ contract HardenStockPriceChecker is MultisigProposal {
         assertEq(address(checker.existingChecker()), address(old.existingChecker()), "existing checker");
         assertEq(checker.sequencerUptimeFeed(), old.sequencerUptimeFeed(), "sequencer feed");
         assertEq(checker.sequencerGracePeriod(), old.sequencerGracePeriod(), "grace period");
-        assertEq(checker.tickBoundMargin(), int24(TICK_BOUND_MARGIN), "tick margin");
+        assertEq(checker.baselineWindow(), BASELINE_WINDOW, "baseline window");
+        assertEq(checker.maxTwapDeviationTicks(), MAX_TWAP_DEVIATION_TICKS, "max deviation");
 
         // A clean window quotes exactly as before, in both directions
         address asset = stockRegistry.asset();

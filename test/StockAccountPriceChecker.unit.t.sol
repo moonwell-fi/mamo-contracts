@@ -18,7 +18,8 @@ import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol
 contract StockAccountPriceCheckerUnitTest is Test {
     uint32 internal constant WINDOW = 180;
     uint256 internal constant GRACE = 3600;
-    uint24 internal constant MARGIN = 100_000;
+    uint32 internal constant BASELINE = 1800;
+    uint24 internal constant MAX_DEV = 1000;
     uint256 internal constant START = 1_700_000_000;
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant FEED_MAX_TIME_PRICE_VALID = 3600;
@@ -72,7 +73,7 @@ contract StockAccountPriceCheckerUnitTest is Test {
         vm.warp(START);
         sequencerFeed = new MockSequencerUptimeFeed(0, START - 1 days);
         checker = new StockAccountPriceChecker(
-            registry, address(usdc), existingChecker, address(sequencerFeed), GRACE, MARGIN
+            registry, address(usdc), existingChecker, address(sequencerFeed), GRACE, BASELINE, MAX_DEV
         );
 
         stockPool.setMeanTick(0, WINDOW);
@@ -101,38 +102,42 @@ contract StockAccountPriceCheckerUnitTest is Test {
         assertEq(checker.quoteAsset(), address(usdc));
         assertEq(checker.sequencerUptimeFeed(), address(sequencerFeed));
         assertEq(checker.sequencerGracePeriod(), GRACE);
-        assertEq(checker.tickBoundMargin(), int24(MARGIN));
+        assertEq(checker.baselineWindow(), BASELINE);
+        assertEq(checker.maxTwapDeviationTicks(), MAX_DEV);
     }
 
-    function test_constructor_revertsOnMarginReachingMaxTick() public {
+    function test_constructor_revertsOnZeroBaselineOrDeviation() public {
         address feed = address(sequencerFeed);
-        uint24 maxTick = uint24(TickMath.MAX_TICK);
-        vm.expectRevert(abi.encodeWithSelector(StockAccountPriceChecker.InvalidTickBoundMargin.selector, maxTick));
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, maxTick);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, maxTick - 1);
+        vm.expectRevert(StockAccountPriceChecker.ZeroBaseline.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, 0, MAX_DEV);
+        vm.expectRevert(StockAccountPriceChecker.ZeroBaseline.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, BASELINE, 0);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, 1, 1);
     }
 
     function test_constructor_revertsOnZeroAddresses() public {
         address feed = address(sequencerFeed);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
         new StockAccountPriceChecker(
-            IStockAccountRegistry(address(0)), address(usdc), existingChecker, feed, GRACE, MARGIN
+            IStockAccountRegistry(address(0)), address(usdc), existingChecker, feed, GRACE, BASELINE, MAX_DEV
         );
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(0), existingChecker, feed, GRACE, MARGIN);
+        new StockAccountPriceChecker(registry, address(0), existingChecker, feed, GRACE, BASELINE, MAX_DEV);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(usdc), ISlippagePriceChecker(address(0)), feed, GRACE, MARGIN);
+        new StockAccountPriceChecker(
+            registry, address(usdc), ISlippagePriceChecker(address(0)), feed, GRACE, BASELINE, MAX_DEV
+        );
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, address(0), GRACE, MARGIN);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, address(0), GRACE, BASELINE, MAX_DEV);
     }
 
     function test_constructor_revertsOnZeroOrShortGracePeriod() public {
         address feed = address(sequencerFeed);
         vm.expectRevert(StockAccountPriceChecker.ZeroGracePeriod.selector);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 0, MARGIN);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 0, BASELINE, MAX_DEV);
         vm.expectRevert(StockAccountPriceChecker.GracePeriodTooShort.selector);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes - 1, MARGIN);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes, MARGIN);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes - 1, BASELINE, MAX_DEV);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes, BASELINE, MAX_DEV);
     }
 
     // ==================== sequencer gate ====================
@@ -389,13 +394,13 @@ contract StockAccountPriceCheckerUnitTest is Test {
         stockPool.setRevertOld(true);
         vm.expectRevert(
             abi.encodeWithSelector(
-                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW + BASELINE
             )
         );
         checker.getExpectedOut(1e8, address(stock), address(usdc));
         vm.expectRevert(
             abi.encodeWithSelector(
-                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW + BASELINE
             )
         );
         checker.checkPrice(1e8, address(stock), address(usdc), 1, 100);
@@ -445,38 +450,62 @@ contract StockAccountPriceCheckerUnitTest is Test {
         assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
     }
 
-    function test_getExpectedOut_tickBoundIsExclusiveAtMinSide() public {
-        int24 bound = TickMath.MIN_TICK + int24(MARGIN);
-        stockPool.setMeanTick(bound + 1, WINDOW);
-        assertEq(
-            checker.getExpectedOut(1e8, address(stock), address(usdc)), _quoteAtTick(bound + 1, 1e38, false) / 1e30
-        );
-
-        stockPool.setMeanTick(bound, WINDOW);
+    function _expectDeviation(MockCLPoolObserve pool, int24 tick, int24 baselineTick) internal {
         vm.expectRevert(
-            abi.encodeWithSelector(StockAccountPriceChecker.TwapTickOutOfBounds.selector, address(stockPool), bound)
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.TwapDeviatesFromBaseline.selector, address(pool), tick, baselineTick
+            )
         );
+    }
+
+    /// @notice The window may sit exactly MAX_DEV ticks from its baseline, on either side, and no further.
+    function test_getExpectedOut_deviationBoundIsInclusiveBothSides() public {
+        stockPool.setBaselineTick(-7000);
+
+        stockPool.setMeanTick(-7000 + int24(MAX_DEV), WINDOW);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), _quoteAtTick(-6000, 1e38, false) / 1e30);
+        stockPool.setMeanTick(-7000 - int24(MAX_DEV), WINDOW);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), _quoteAtTick(-8000, 1e38, false) / 1e30);
+
+        stockPool.setMeanTick(-7000 + int24(MAX_DEV) + 1, WINDOW);
+        _expectDeviation(stockPool, -5999, -7000);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+
+        stockPool.setMeanTick(-7000 - int24(MAX_DEV) - 1, WINDOW);
+        _expectDeviation(stockPool, -8001, -7000);
         checker.getExpectedOut(1e8, address(stock), address(usdc));
     }
 
-    function test_getExpectedOut_tickBoundIsExclusiveAtMaxSide() public {
-        int24 bound = TickMath.MAX_TICK - int24(MARGIN);
-        stockPool.setMeanTick(bound - 1, WINDOW);
-        assertGt(checker.getExpectedOut(1e60, address(stock), address(usdc)), 0);
-
-        stockPool.setMeanTick(bound, WINDOW);
-        vm.expectRevert(
-            abi.encodeWithSelector(StockAccountPriceChecker.TwapTickOutOfBounds.selector, address(stockPool), bound)
-        );
-        checker.getExpectedOut(1e60, address(stock), address(usdc));
+    /// @notice The deviation is measured on the floored mean: a remainder just above the bound floors past it.
+    function test_getExpectedOut_deviationAppliesAfterFloor() public {
+        stockPool.setBaselineTick(0);
+        stockPool.setCumulatives(0, -int56(uint56(MAX_DEV)) * int56(uint56(WINDOW)) - 1);
+        _expectDeviation(stockPool, -int24(MAX_DEV) - 1, 0);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
     }
 
-    /// @notice The bound applies to the floored mean: a remainder just above the bound floors onto it.
-    function test_getExpectedOut_tickBoundAppliesAfterFloor() public {
-        int24 bound = TickMath.MIN_TICK + int24(MARGIN);
-        stockPool.setCumulatives(0, int56(bound + 1) * int56(uint56(WINDOW)) - 1);
+    /// @notice A swept window is refused in both directions and through checkPrice.
+    function test_sweptWindowAgainstACleanBaseline_revertsEveryEntryPoint() public {
+        altPool.setBaselineTick(-276_000);
+        altPool.setMeanTick(-250_000, WINDOW);
+        _expectDeviation(altPool, -250_000, -276_000);
+        checker.getExpectedOut(1e18, address(alt), address(usdc));
+        _expectDeviation(altPool, -250_000, -276_000);
+        checker.getExpectedOut(1e6, address(usdc), address(alt));
+        _expectDeviation(altPool, -250_000, -276_000);
+        checker.checkPrice(1e18, address(alt), address(usdc), 1, 100);
+    }
+
+    /// @notice The pool must serve the window plus the baseline before it.
+    function test_getExpectedOut_needsWindowPlusBaselineHistory() public {
+        stockPool.setMaxObservableWindow(WINDOW + BASELINE);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+
+        stockPool.setMaxObservableWindow(WINDOW + BASELINE - 1);
         vm.expectRevert(
-            abi.encodeWithSelector(StockAccountPriceChecker.TwapTickOutOfBounds.selector, address(stockPool), bound)
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW + BASELINE
+            )
         );
         checker.getExpectedOut(1e8, address(stock), address(usdc));
     }

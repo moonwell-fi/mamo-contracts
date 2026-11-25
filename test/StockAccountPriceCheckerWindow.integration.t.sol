@@ -31,7 +31,9 @@ contract StockAccountPriceCheckerWindowIntegrationTest is Test {
     address internal constant ANTC = 0xb20000000000000000000016e38FD364d271Ba28; // 8 dec, pool token1
     address internal constant ANTC_POOL = 0x599C4225FE90214795a0be228D20d7680f8CED15;
     uint32 internal constant WINDOW = 180;
-    uint24 internal constant TICK_BOUND_MARGIN = 443_636;
+    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    uint32 internal constant BASELINE_WINDOW = 1800;
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
 
     StockAccountRegistry internal registry = StockAccountRegistry(REGISTRY);
     StockAccountPriceChecker internal live = StockAccountPriceChecker(LIVE_CHECKER);
@@ -53,7 +55,8 @@ contract StockAccountPriceCheckerWindowIntegrationTest is Test {
             live.existingChecker(),
             live.sequencerUptimeFeed(),
             live.sequencerGracePeriod(),
-            TICK_BOUND_MARGIN
+            BASELINE_WINDOW,
+            MAX_TWAP_DEVIATION_TICKS
         );
         assertEq(registry.twapWindow(), WINDOW);
     }

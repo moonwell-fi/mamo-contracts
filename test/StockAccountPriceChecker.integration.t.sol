@@ -64,7 +64,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     address internal constant CHAINLINK_USDC_USD = 0x7e860098F58bBFC8648a4311b374B1D669a2bc6B;
     address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
-    uint24 internal constant TICK_BOUND_MARGIN = 443_636;
+    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    uint32 internal constant BASELINE_WINDOW = 1800;
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
     address internal constant STRANGER = 0x000000000000000000000000000000000000dEaD;
 
     /// @dev Swap inputs large enough to run the pool to the sqrt-price limit the helpers set; the
@@ -107,7 +109,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             existingChecker,
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
-            TICK_BOUND_MARGIN
+            BASELINE_WINDOW,
+            MAX_TWAP_DEVIATION_TICKS
         );
         vm.prank(admin);
         registry.setPriceChecker(checker);
@@ -225,7 +228,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         registry.setTwapWindow(type(uint32).max);
 
         vm.mockCall(
-            address(registry), abi.encodeCall(IStockAccountRegistry.twapWindow, ()), abi.encode(type(uint32).max)
+            address(registry),
+            abi.encodeCall(IStockAccountRegistry.twapWindow, ()),
+            abi.encode(type(uint32).max - BASELINE_WINDOW)
         );
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -591,9 +596,37 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
         assertEq(checker.getExpectedOut(1e8, NVDAC, USDC), twapBefore, "twap moved within the same block");
     }
 
+    /// @dev The manipulation studies measure the TWAP itself, so they run on a checker whose deviation guard never fires
+    function _useUnguardedChecker() internal {
+        checker = new StockAccountPriceChecker(
+            registry,
+            USDC,
+            existingChecker,
+            CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
+            SEQUENCER_GRACE_PERIOD,
+            1,
+            type(uint24).max
+        );
+        vm.prank(admin);
+        registry.setPriceChecker(checker);
+    }
+
+    /// @notice The production checker refuses the full-window hold the unguarded studies below price.
+    function test_fork_fullWindowHoldIsRefusedByTheDeviationGuard() public {
+        _pumpNvdac();
+        vm.warp(vm.getBlockTimestamp() + WINDOW + 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.TwapDeviatesFromBaseline.selector, NVDAC_USDC_POOL, int24(-9987), int24(-7862)
+            )
+        );
+        checker.getExpectedOut(1e8, NVDAC, USDC);
+    }
+
     /// @notice Non-vacuity control for the test above: the TWAP converges on the held tick, so a
     ///         full-window hold is the upper bound on the attack, not its threshold.
     function test_fork_manipulationHeldForTheWholeWindowMovesTheTwap() public {
+        _useUnguardedChecker();
         uint256 twapBefore = checker.getExpectedOut(1e8, NVDAC, USDC);
 
         _pumpNvdac();
@@ -629,6 +662,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     /// @notice Drift follows the closed form drift(h) = (1 + D)^(h/W) - 1 exactly: the mean tick is linear
     ///         in hold time and price is exponential in tick. An attacker buys drift by the second.
     function test_fork_twapDriftFollowsTheClosedForm() public {
+        _useUnguardedChecker();
         uint32[7] memory holds = [uint32(3), 12, 30, 60, 90, 150, 180];
         uint256 full = _driftBpsAfterHold(MAX_PUMP_SQRT_BPS, WINDOW);
         uint256 fullTicks = _tickDeltaForDriftBps(full);
@@ -681,6 +715,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     /// @notice The attacker buys exactly the drift they can use, and a usable drift is far cheaper than a
     ///         maximal one: cost against sqrt-price factor at the pinned block.
     function test_fork_manipulationCostCurve() public {
+        _useUnguardedChecker();
         uint256[6] memory factors = [uint256(9_995), 9_975, 9_950, 9_900, 9_800, MAX_PUMP_SQRT_BPS];
         uint256 previousDrift;
         uint256 previousLost;
@@ -716,6 +751,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     ///         reference with the slippage budget, and exposure is what one order can move under
     ///         `StockAccountStrategy._checkRange`, not automatically the whole deposit cap.
     function test_fork_manipulationBreakEvenGrid() public {
+        _useUnguardedChecker();
         uint256[6] memory factors = [uint256(9_995), 9_975, 9_950, 9_900, 9_800, MAX_PUMP_SQRT_BPS];
         uint256 concentrated = MAX_STRATEGY_DEPOSIT;
         uint256 diversified = (MAX_STRATEGY_DEPOSIT * (DIVERSIFIED_TARGET_BPS + registry.maxDeviationBps())) / 10_000;
@@ -777,6 +813,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     /// @notice How long the attacker must hold before the drift covers the whole backend budget, per
     ///         candidate window, against the closed form the linear mean tick implies.
     function test_fork_twapWindowSensitivity() public {
+        _useUnguardedChecker();
         uint32[3] memory windows = [uint32(60), 180, 300];
         emit log_string("window sensitivity (budget = 100 bps)");
         for (uint256 i = 0; i < windows.length; i++) {
@@ -807,6 +844,7 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
     ///         needs a manipulation of (1 + budget)^(W/hold) - 1, which the pool's sqrt-price limit
     ///         eventually cannot reach.
     function test_fork_windowRaisesTheCostOfAShortAttack() public {
+        _useUnguardedChecker();
         uint32[2] memory holds = [uint32(30), 12];
         uint32[3] memory windows = [uint32(60), 180, 300];
         uint256 thirtySecondCostAtSixty;
@@ -945,7 +983,8 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
             existingChecker,
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
-            TICK_BOUND_MARGIN
+            1,
+            type(uint24).max
         );
         vm.startPrank(admin);
         poolRegistry.setPriceChecker(poolChecker);
@@ -958,7 +997,9 @@ contract StockAccountPriceCheckerIntegrationTest is Test {
 
         _swapUsdcForCbbtc();
         vm.expectRevert(
-            abi.encodeWithSelector(StockAccountPriceChecker.InsufficientObservations.selector, CBBTC_USDC_POOL, WINDOW)
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.InsufficientObservations.selector, CBBTC_USDC_POOL, WINDOW + 1
+            )
         );
         poolChecker.getExpectedOut(1e8, CBBTC, USDC);
 

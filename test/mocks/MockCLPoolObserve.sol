@@ -10,6 +10,9 @@ contract MockCLPoolObserve {
     int56 public cumulativeNow;
     uint160 public secondsPerLiquidityAtWindow;
     uint160 public secondsPerLiquidityNow;
+    /// @dev Mean tick of the baseline before the window; unset follows the window's own mean
+    int24 public baselineTick;
+    bool public baselineSet;
     bool public revertOld;
     /// @dev Longest window this pool has history for; 0 means any window
     uint32 public maxObservableWindow;
@@ -38,6 +41,11 @@ contract MockCLPoolObserve {
         secondsPerLiquidityNow = now_;
     }
 
+    function setBaselineTick(int24 tick) external {
+        baselineTick = tick;
+        baselineSet = true;
+    }
+
     function setFactory(address value) external {
         factory = value;
     }
@@ -51,6 +59,7 @@ contract MockCLPoolObserve {
         maxObservableWindow = value;
     }
 
+    /// @notice Answers `observe([history, window, 0])`; the baseline runs at `baselineTick` before the window
     function observe(uint32[] calldata secondsAgos)
         external
         view
@@ -58,12 +67,17 @@ contract MockCLPoolObserve {
     {
         if (revertOld) revert("OLD");
         if (maxObservableWindow != 0 && secondsAgos[0] > maxObservableWindow) revert("OLD");
-        require(secondsAgos.length == 2 && secondsAgos[1] == 0, "unexpected secondsAgos");
-        tickCumulatives = new int56[](2);
-        tickCumulatives[0] = cumulativeAtWindow;
-        tickCumulatives[1] = cumulativeNow;
-        secondsPerLiquidityCumulativeX128 = new uint160[](2);
+        require(secondsAgos.length == 3 && secondsAgos[2] == 0, "unexpected secondsAgos");
+        int56 window = int56(uint56(secondsAgos[1]));
+        int56 baselineMean = baselineSet ? int56(baselineTick) : (cumulativeNow - cumulativeAtWindow) / window;
+
+        tickCumulatives = new int56[](3);
+        tickCumulatives[0] = cumulativeAtWindow - baselineMean * int56(uint56(secondsAgos[0] - secondsAgos[1]));
+        tickCumulatives[1] = cumulativeAtWindow;
+        tickCumulatives[2] = cumulativeNow;
+        secondsPerLiquidityCumulativeX128 = new uint160[](3);
         secondsPerLiquidityCumulativeX128[0] = secondsPerLiquidityAtWindow;
-        secondsPerLiquidityCumulativeX128[1] = secondsPerLiquidityNow;
+        secondsPerLiquidityCumulativeX128[1] = secondsPerLiquidityAtWindow;
+        secondsPerLiquidityCumulativeX128[2] = secondsPerLiquidityNow;
     }
 }

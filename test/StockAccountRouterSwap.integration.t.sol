@@ -51,7 +51,9 @@ contract StockAccountRouterSwapIntegrationTest is Test {
     address internal constant CHAINLINK_SWAP_CHECKER_PROXY = 0x5A8F10be44E25Bb21492C5f46DA94cDb1f0b2fF6;
     address internal constant CHAINLINK_L2_SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
     uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
-    uint24 internal constant TICK_BOUND_MARGIN = 443_636;
+    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    uint32 internal constant BASELINE_WINDOW = 1800;
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
     address internal constant COWSWAP_SETTLEMENT = 0x9008D19f58AAbD9eD0D60971565AA8510560ab41;
 
     /// @dev The staleness bounds of `DeployStockAccounts`: the launch list's cbBTC heartbeat, and the
@@ -127,7 +129,8 @@ contract StockAccountRouterSwapIntegrationTest is Test {
             ISlippagePriceChecker(CHAINLINK_SWAP_CHECKER_PROXY),
             CHAINLINK_L2_SEQUENCER_UPTIME_FEED,
             SEQUENCER_GRACE_PERIOD,
-            TICK_BOUND_MARGIN
+            BASELINE_WINDOW,
+            MAX_TWAP_DEVIATION_TICKS
         );
 
         vm.prank(admin);

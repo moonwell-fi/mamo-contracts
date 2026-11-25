@@ -80,7 +80,9 @@ contract DeployStockAccountSystem is MultisigProposal {
 
     /// @notice Price checker's sequencer grace period, same as proposal 013
     uint256 internal constant SEQUENCER_GRACE_PERIOD = 3600;
-    uint24 internal constant TICK_BOUND_MARGIN = 443_636;
+    /// @dev The TWAP window may stray at most 1,000 ticks (~10%) from the 30 minutes before it
+    uint32 internal constant BASELINE_WINDOW = 1800;
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1000;
 
     /// @notice Strategy type slots that already hold live implementations and must survive untouched
     uint256 internal constant GUARDED_SLOTS = 4;
@@ -180,7 +182,8 @@ contract DeployStockAccountSystem is MultisigProposal {
             ISlippagePriceChecker(addresses.getAddress(cfg.existingPriceChecker)),
             addresses.getAddress("CHAINLINK_L2_SEQUENCER_UPTIME_FEED"),
             SEQUENCER_GRACE_PERIOD,
-            TICK_BOUND_MARGIN
+            BASELINE_WINDOW,
+            MAX_TWAP_DEVIATION_TICKS
         );
         vm.stopBroadcast();
 
