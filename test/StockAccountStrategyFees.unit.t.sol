@@ -778,6 +778,17 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
         assertEq(strategy.lastFeePaid(), startTime, "the clock does not move");
     }
 
+    function testDepositTokenRevertsWhileTheTokenCannotBePriced() public {
+        _fundToken(msft, funder, 100e18);
+        _cannotPrice(address(msft));
+        uint256 principalBefore = strategy.principal();
+
+        vm.prank(funder);
+        vm.expectRevert(bytes("No rate"));
+        strategy.depositToken(address(msft), 100e18);
+        assertEq(strategy.principal(), principalBefore);
+    }
+
     function testWithdrawTokenOfAnUnpriceableHoldingDefersTheFeeAndTheRestPaysItLater() public {
         _fundToken(msft, funder, 100e18);
         vm.prank(funder);
@@ -785,11 +796,13 @@ contract StockAccountStrategyFeesUnitTest is StockAccountStrategyTestBase {
 
         vm.warp(startTime + 30 days);
         _cannotPrice(address(msft));
+        uint256 principalBefore = strategy.principal();
 
         vm.prank(user);
         strategy.withdrawToken(address(msft), 100e18);
 
         assertEq(msft.balanceOf(user), 100e18, "user msft");
+        assertEq(strategy.principal(), principalBefore, "an unpriced exit leaves principal for the cap to see");
         assertEq(usdc.balanceOf(feeRecipient), 0, "nothing is charged on a partial valuation");
         assertEq(strategy.lastFeePaid(), startTime, "the fee stays owed");
 

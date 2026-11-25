@@ -18,6 +18,9 @@ import {MockStockAccountRegistry} from "@test/mocks/MockStockAccountRegistry.sol
 contract StockAccountPriceCheckerUnitTest is Test {
     uint32 internal constant WINDOW = 180;
     uint256 internal constant GRACE = 3600;
+    uint32 internal constant BASELINE = 1800;
+    uint24 internal constant MAX_DEV = 1000;
+    uint128 internal constant MIN_L = 1e11;
     uint256 internal constant START = 1_700_000_000;
     uint256 internal constant MAX_BPS = 10_000;
     uint256 internal constant FEED_MAX_TIME_PRICE_VALID = 3600;
@@ -70,7 +73,9 @@ contract StockAccountPriceCheckerUnitTest is Test {
 
         vm.warp(START);
         sequencerFeed = new MockSequencerUptimeFeed(0, START - 1 days);
-        checker = new StockAccountPriceChecker(registry, address(usdc), existingChecker, address(sequencerFeed), GRACE);
+        checker = new StockAccountPriceChecker(
+            registry, address(usdc), existingChecker, address(sequencerFeed), GRACE, BASELINE, MAX_DEV, MIN_L
+        );
 
         stockPool.setMeanTick(0, WINDOW);
         altPool.setMeanTick(0, WINDOW);
@@ -98,27 +103,51 @@ contract StockAccountPriceCheckerUnitTest is Test {
         assertEq(checker.quoteAsset(), address(usdc));
         assertEq(checker.sequencerUptimeFeed(), address(sequencerFeed));
         assertEq(checker.sequencerGracePeriod(), GRACE);
+        assertEq(checker.baselineWindow(), BASELINE);
+        assertEq(checker.maxTwapDeviationTicks(), MAX_DEV);
+        assertEq(checker.minHarmonicLiquidity(), MIN_L);
+    }
+
+    function test_constructor_revertsOnZeroBaselineOrDeviation() public {
+        address feed = address(sequencerFeed);
+        vm.expectRevert(StockAccountPriceChecker.ZeroBaseline.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, 0, MAX_DEV, MIN_L);
+        vm.expectRevert(StockAccountPriceChecker.ZeroBaseline.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, BASELINE, 0, MIN_L);
+        vm.expectRevert(StockAccountPriceChecker.ZeroBaseline.selector);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, BASELINE, MAX_DEV, 0);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, GRACE, 1, 1, 1);
     }
 
     function test_constructor_revertsOnZeroAddresses() public {
         address feed = address(sequencerFeed);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(IStockAccountRegistry(address(0)), address(usdc), existingChecker, feed, GRACE);
+        new StockAccountPriceChecker(
+            IStockAccountRegistry(address(0)), address(usdc), existingChecker, feed, GRACE, BASELINE, MAX_DEV, MIN_L
+        );
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(0), existingChecker, feed, GRACE);
+        new StockAccountPriceChecker(registry, address(0), existingChecker, feed, GRACE, BASELINE, MAX_DEV, MIN_L);
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(usdc), ISlippagePriceChecker(address(0)), feed, GRACE);
+        new StockAccountPriceChecker(
+            registry, address(usdc), ISlippagePriceChecker(address(0)), feed, GRACE, BASELINE, MAX_DEV, MIN_L
+        );
         vm.expectRevert(StockAccountPriceChecker.ZeroAddress.selector);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, address(0), GRACE);
+        new StockAccountPriceChecker(
+            registry, address(usdc), existingChecker, address(0), GRACE, BASELINE, MAX_DEV, MIN_L
+        );
     }
 
     function test_constructor_revertsOnZeroOrShortGracePeriod() public {
         address feed = address(sequencerFeed);
         vm.expectRevert(StockAccountPriceChecker.ZeroGracePeriod.selector);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 0);
+        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 0, BASELINE, MAX_DEV, MIN_L);
         vm.expectRevert(StockAccountPriceChecker.GracePeriodTooShort.selector);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes - 1);
-        new StockAccountPriceChecker(registry, address(usdc), existingChecker, feed, 30 minutes);
+        new StockAccountPriceChecker(
+            registry, address(usdc), existingChecker, feed, 30 minutes - 1, BASELINE, MAX_DEV, MIN_L
+        );
+        new StockAccountPriceChecker(
+            registry, address(usdc), existingChecker, feed, 30 minutes, BASELINE, MAX_DEV, MIN_L
+        );
     }
 
     // ==================== sequencer gate ====================
@@ -375,16 +404,187 @@ contract StockAccountPriceCheckerUnitTest is Test {
         stockPool.setRevertOld(true);
         vm.expectRevert(
             abi.encodeWithSelector(
-                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW + BASELINE
             )
         );
         checker.getExpectedOut(1e8, address(stock), address(usdc));
         vm.expectRevert(
             abi.encodeWithSelector(
-                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW + BASELINE
             )
         );
         checker.checkPrice(1e8, address(stock), address(usdc), 1, 100);
+    }
+
+    // ==================== bad TWAP windows ====================
+
+    /// @notice One second with no in-range liquidity adds exactly 2^128 to secondsPerLiquidity.
+    function test_getExpectedOut_revertsOnOneZeroLiquiditySecond() public {
+        stockPool.setSecondsPerLiquidity(5, 5 + (uint160(1) << 128));
+        vm.expectRevert(
+            abi.encodeWithSelector(StockAccountPriceChecker.ZeroLiquidityInWindow.selector, address(stockPool), WINDOW)
+        );
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @dev A 2^128 - 1 window delta is a harmonic liquidity near 11, so the floor is lowered to isolate this check
+    function test_getExpectedOut_quotesJustBelowOneZeroLiquiditySecond() public {
+        checker = new StockAccountPriceChecker(
+            registry, address(usdc), existingChecker, address(sequencerFeed), GRACE, BASELINE, MAX_DEV, 1
+        );
+        stockPool.setSecondsPerLiquidity(5, 4 + (uint160(1) << 128));
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    /// @notice The cumulative wraps at 2^160; the delta across the wrap is what counts.
+    function test_getExpectedOut_secondsPerLiquidityWrapIsModular() public {
+        uint160 nearTop = type(uint160).max - 9;
+        stockPool.setSecondsPerLiquidity(nearTop, 1000);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+
+        stockPool.setSecondsPerLiquidity(nearTop, (uint160(1) << 128) - 10);
+        vm.expectRevert(
+            abi.encodeWithSelector(StockAccountPriceChecker.ZeroLiquidityInWindow.selector, address(stockPool), WINDOW)
+        );
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @notice A bad window reverts in both directions and through checkPrice, never returns false.
+    function test_zeroLiquidityWindow_revertsEveryEntryPoint() public {
+        altPool.setSecondsPerLiquidity(0, uint160(103) << 128);
+        bytes memory err =
+            abi.encodeWithSelector(StockAccountPriceChecker.ZeroLiquidityInWindow.selector, address(altPool), WINDOW);
+        vm.expectRevert(err);
+        checker.getExpectedOut(1e18, address(alt), address(usdc));
+        vm.expectRevert(err);
+        checker.getExpectedOut(1e6, address(usdc), address(alt));
+        vm.expectRevert(err);
+        checker.checkPrice(1e18, address(alt), address(usdc), 1, 100);
+        // other tokens keep quoting
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    function _expectDeviation(MockCLPoolObserve pool, int24 tick, int24 baselineTick) internal {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.TwapDeviatesFromBaseline.selector, address(pool), tick, baselineTick
+            )
+        );
+    }
+
+    /// @notice The window may sit exactly MAX_DEV ticks from its baseline, on either side, and no further.
+    function test_getExpectedOut_deviationBoundIsInclusiveBothSides() public {
+        stockPool.setBaselineTick(-7000);
+
+        stockPool.setMeanTick(-7000 + int24(MAX_DEV), WINDOW);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), _quoteAtTick(-6000, 1e38, false) / 1e30);
+        stockPool.setMeanTick(-7000 - int24(MAX_DEV), WINDOW);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), _quoteAtTick(-8000, 1e38, false) / 1e30);
+
+        stockPool.setMeanTick(-7000 + int24(MAX_DEV) + 1, WINDOW);
+        _expectDeviation(stockPool, -5999, -7000);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+
+        stockPool.setMeanTick(-7000 - int24(MAX_DEV) - 1, WINDOW);
+        _expectDeviation(stockPool, -8001, -7000);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @notice The deviation is measured on the floored mean: a remainder just above the bound floors past it.
+    function test_getExpectedOut_deviationAppliesAfterFloor() public {
+        stockPool.setBaselineTick(0);
+        stockPool.setCumulatives(0, -int56(uint56(MAX_DEV)) * int56(uint56(WINDOW)) - 1);
+        _expectDeviation(stockPool, -int24(MAX_DEV) - 1, 0);
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @notice A swept window is refused in both directions and through checkPrice.
+    function test_sweptWindowAgainstACleanBaseline_revertsEveryEntryPoint() public {
+        altPool.setBaselineTick(-276_000);
+        altPool.setMeanTick(-250_000, WINDOW);
+        _expectDeviation(altPool, -250_000, -276_000);
+        checker.getExpectedOut(1e18, address(alt), address(usdc));
+        _expectDeviation(altPool, -250_000, -276_000);
+        checker.getExpectedOut(1e6, address(usdc), address(alt));
+        _expectDeviation(altPool, -250_000, -276_000);
+        checker.checkPrice(1e18, address(alt), address(usdc), 1, 100);
+    }
+
+    // ==================== harmonic liquidity floor ====================
+
+    uint256 internal constant HISTORY_X128 = uint256(WINDOW + BASELINE) << 128;
+
+    /// @dev Window and baseline both at `liquidity`, so their secondsPerLiquidity deltas are in proportion
+    function _setLiquidity(MockCLPoolObserve pool, uint256 perLiquidityTotal) internal {
+        pool.setSecondsPerLiquidityAtHistory(0);
+        pool.setSecondsPerLiquidity(
+            uint160(perLiquidityTotal * BASELINE / (WINDOW + BASELINE)), uint160(perLiquidityTotal)
+        );
+    }
+
+    /// @notice A harmonic mean of exactly the floor quotes; one more unit of secondsPerLiquidity is refused.
+    function test_getExpectedOut_liquidityFloorIsInclusive() public {
+        uint256 atFloor = HISTORY_X128 / MIN_L;
+        _setLiquidity(stockPool, atFloor);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+
+        _setLiquidity(stockPool, atFloor + 1);
+        uint256 below = HISTORY_X128 / (atFloor + 1);
+        assertLt(below, MIN_L, "vacuous: still at the floor");
+        vm.expectRevert(
+            abi.encodeWithSelector(StockAccountPriceChecker.LiquidityBelowFloor.selector, address(stockPool), below)
+        );
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @notice A push held through window and baseline on MUc's full-range floor has no deviation, and is refused.
+    function test_priceHeldOnAFloorThroughBothWindows_revertsEveryEntryPoint() public {
+        altPool.setBaselineTick(-250_000);
+        altPool.setMeanTick(-250_000, WINDOW);
+        _setLiquidity(altPool, HISTORY_X128 / 2_215_419);
+        bytes memory err = abi.encodeWithSelector(
+            StockAccountPriceChecker.LiquidityBelowFloor.selector, address(altPool), uint256(2_215_419)
+        );
+        vm.expectRevert(err);
+        checker.getExpectedOut(1e18, address(alt), address(usdc));
+        vm.expectRevert(err);
+        checker.getExpectedOut(1e6, address(usdc), address(alt));
+        vm.expectRevert(err);
+        checker.checkPrice(1e18, address(alt), address(usdc), 1, 100);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+    }
+
+    /// @notice A deep window does not lift a baseline held on dust: the floor spans both.
+    function test_getExpectedOut_liquidityFloorCoversTheBaseline() public {
+        uint160 thinBaseline = uint160(uint256(BASELINE) << 128) / 1e6;
+        stockPool.setSecondsPerLiquidityAtHistory(0);
+        stockPool.setSecondsPerLiquidity(thinBaseline, thinBaseline + 1);
+        uint256 harmonic = HISTORY_X128 / (uint256(thinBaseline) + 1);
+        assertLt(harmonic, MIN_L, "vacuous");
+        vm.expectRevert(
+            abi.encodeWithSelector(StockAccountPriceChecker.LiquidityBelowFloor.selector, address(stockPool), harmonic)
+        );
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @notice The pool must serve the window plus the baseline before it.
+    function test_getExpectedOut_needsWindowPlusBaselineHistory() public {
+        stockPool.setMaxObservableWindow(WINDOW + BASELINE);
+        assertEq(checker.getExpectedOut(1e8, address(stock), address(usdc)), 1e8);
+
+        stockPool.setMaxObservableWindow(WINDOW + BASELINE - 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StockAccountPriceChecker.InsufficientObservations.selector, address(stockPool), WINDOW + BASELINE
+            )
+        );
+        checker.getExpectedOut(1e8, address(stock), address(usdc));
+    }
+
+    /// @notice A swept pool does not touch Chainlink-sourced tokens.
+    function test_badPoolWindow_chainlinkTokenStillQuotes() public {
+        stockPool.setSecondsPerLiquidity(0, uint160(1) << 128);
+        assertEq(checker.getExpectedOut(1e8, address(feedToken), address(usdc)), 250_500_000);
     }
 
     // ==================== checkPrice ====================

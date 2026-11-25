@@ -780,6 +780,33 @@ jobs:
       - name: Run stock accounts repoint proposal tests (021, on a Base fork)
         run: make stock-accounts-repoint
 
+  stock-checker-harden:
+    name: Stock Accounts Price Checker Hardening Proposal Tests
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      # Self-forking Base test (see the make target's comment for why there is no --fork-url).
+      - name: Run price checker hardening proposal tests (023, on a Base fork)
+        run: make stock-checker-harden
+
   stock-fee-hook-gas:
     name: Stock Accounts Fee Hook Gas Tests
     runs-on: ubuntu-latest

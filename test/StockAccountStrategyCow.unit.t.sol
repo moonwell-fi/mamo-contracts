@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import {StockAccountPriceChecker} from "@contracts/StockAccountPriceChecker.sol";
 import {ISlippagePriceChecker} from "@interfaces/ISlippagePriceChecker.sol";
 import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 import {IStockAccountStrategy} from "@interfaces/IStockAccountStrategy.sol";
@@ -371,6 +372,35 @@ contract StockAccountStrategyCowUnitTest is StockAccountStrategyTestBase {
 
         vm.expectRevert(IStockAccountStrategy.ValuationIncomplete.selector);
         _check(order);
+    }
+
+    /// @notice A checker refusing the token's TWAP window rejects orders on either side of it
+    function testRejectsOrdersOnATokenWhoseTwapWindowIsRefused() public {
+        usdc.mint(address(strategy), 1000e18);
+        vm.prank(user);
+        strategy.setBasket(_entries(address(nvda), 4000, address(aapl), 4000), 2000);
+
+        address pool = stockRegistry.tokenConfig(address(nvda)).pool;
+        GPv2Order.Data memory sell = _order(address(nvda), address(usdc), 1e18, 199e18);
+        GPv2Order.Data memory buy = _order(address(usdc), address(nvda), 400e18, 2e18);
+        bytes memory refused =
+            abi.encodeWithSelector(StockAccountPriceChecker.ZeroLiquidityInWindow.selector, pool, uint32(180));
+
+        vm.mockCallRevert(
+            address(priceChecker),
+            abi.encodeCall(ISlippagePriceChecker.getExpectedOut, (1e18, address(nvda), address(usdc))),
+            refused
+        );
+        vm.expectRevert(refused);
+        _check(sell);
+
+        vm.mockCallRevert(
+            address(priceChecker),
+            abi.encodeCall(ISlippagePriceChecker.getExpectedOut, (400e18, address(usdc), address(nvda))),
+            refused
+        );
+        vm.expectRevert(refused);
+        _check(buy);
     }
 
     function testValidOrderQuotesEveryHoldingPlusTheOrderOnce() public {

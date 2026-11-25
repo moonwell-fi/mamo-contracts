@@ -13,9 +13,9 @@ import {IStockAccountRegistry} from "@interfaces/IStockAccountRegistry.sol";
 
 /**
  * @title StockAccountsPoolReadiness
- * @notice Checks the observation ring of every PoolTwap pool in the token list against its TWAP window,
- *         and with GROW=1 grows the short ones
- * @dev Base blocks are about two seconds, so a window needs about window / 2 observations; the ring is
+ * @notice Checks the observation ring of every PoolTwap pool in the token list against the history the price
+ *         checker reads (TWAP window plus its baseline), and with GROW=1 grows the short ones
+ * @dev Base blocks are about two seconds, so a history needs about history / 2 observations; the ring is
  *      sized at twice that for headroom. A pool already at or above the target is left alone, which
  *      makes a second grow run send nothing
  * @dev Env: DEPLOY_ENV (default 8453_TESTING), ADDRESSES_PATH (default ./addresses),
@@ -31,6 +31,9 @@ contract StockAccountsPoolReadiness is Script {
     /// @notice How many times the window's own observation count the ring is sized at
     uint256 internal constant RING_HEADROOM = 2;
 
+    /// @notice Seconds before the TWAP window the price checker compares against (023's BASELINE_WINDOW)
+    uint32 internal constant BASELINE_WINDOW = 1800;
+
     Addresses internal addresses;
     StockAccountsConfig internal configLoader;
 
@@ -43,11 +46,11 @@ contract StockAccountsPoolReadiness is Script {
         configLoader = new StockAccountsConfig(string.concat("./deploy/stock-accounts/", environment, ".json"));
 
         bool grow = vm.envOr("GROW", uint256(0)) != 0;
-        uint32 twapWindow = _twapWindow();
+        uint32 twapWindow = _twapWindow() + BASELINE_WINDOW;
         uint16 required = _requiredCardinality(twapWindow);
 
         console.log(
-            "twap window: %s seconds, required cardinality: %s",
+            "twap window plus baseline: %s seconds, required cardinality: %s",
             vm.toString(uint256(twapWindow)),
             vm.toString(uint256(required))
         );
@@ -70,7 +73,7 @@ contract StockAccountsPoolReadiness is Script {
 
     /// @notice Observations a window needs at Base's block rate, times the headroom factor
     /// @dev BLOCK_SECONDS and RING_HEADROOM are both 2 today, so the two cancel and the target equals
-    ///      the window in seconds: 180 for the configured 180-second window. They are named rather than
+    ///      the history in seconds: 1,980 for the 180-second window and 1,800-second baseline. They are named rather than
     ///      folded away because moving either one is what changes the target
     function _requiredCardinality(uint32 twapWindow) internal pure returns (uint16) {
         uint256 required = (uint256(twapWindow) / BLOCK_SECONDS) * RING_HEADROOM;

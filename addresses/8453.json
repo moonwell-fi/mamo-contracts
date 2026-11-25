@@ -633,5 +633,10 @@
     "addr": "0x14bA47Ef0286B345E2B74d26243767268290eE28",
     "name": "WETH_STRATEGY_FACTORY_DEPRECATED",
     "isContract": true
+  },
+  {
+    "addr": "0x2D47a6d7eE6273A1360773F81C13748f9Eb17212",
+    "name": "MAMO_STAKING_REGISTRY_V2",
+    "isContract": true
   }
 ]
